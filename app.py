@@ -224,82 +224,342 @@ def exibir_cabecalho_sai(*, login=False):
 
 
 # ============================================================
-# IDENTIDADE E AUTENTICAÇÃO INDIVIDUAL PRISMA
+# PRISMA — LOGIN INDIVIDUAL | MODELO 1 (LAYOUT DIVIDIDO)
+# Painel institucional à esquerda e formulários à direita.
+# O layout não modifica as regras de autenticação do backend.
 # ============================================================
+def aplicar_layout_login_prisma():
+    st.markdown("""
+    <style>
+    [data-testid="stAppViewContainer"], .stApp {
+        background: #f5f7fb !important;
+    }
+    .block-container {
+        max-width: 1360px !important;
+        padding: 2rem 1.4rem 3rem !important;
+    }
+    /* Três partes visuais fazem um único cartão, sem a faixa superior pesada. */
+    [class*="st-key-prisma_login_layout"] [data-testid="stHorizontalBlock"] {
+        gap: 0 !important;
+        align-items: stretch !important;
+    }
+    [class*="st-key-prisma_login_layout"] [data-testid="column"] {
+        min-width: 0;
+    }
+    [class*="st-key-prisma_login_left"] {
+        position: relative;
+        isolation: isolate;
+        overflow: hidden;
+        min-height: 615px;
+        height: 100%;
+        border-radius: 26px 0 0 26px;
+        padding: 4.2rem 3.6rem !important;
+        background: linear-gradient(138deg, #0027bd 0%, #1662b6 38%, #36b8b6 75%, #6ce27b 112%);
+        box-shadow: 0 19px 48px rgba(23, 64, 116, .12);
+    }
+    [class*="st-key-prisma_login_left"]::before,
+    [class*="st-key-prisma_login_left"]::after {
+        content: "";
+        position: absolute;
+        pointer-events: none;
+        border: 1px solid rgba(255,255,255,.15);
+        border-radius: 45%;
+        z-index: -1;
+    }
+    [class*="st-key-prisma_login_left"]::before {
+        width: 700px; height: 700px; top: -500px; right: -270px;
+        background: rgba(255,255,255,.05);
+        transform: rotate(-25deg);
+    }
+    [class*="st-key-prisma_login_left"]::after {
+        width: 830px; height: 540px; bottom: -385px; left: -250px;
+        background: rgba(106,224,203,.20);
+        transform: rotate(-23deg);
+        box-shadow: 90px -35px 0 18px rgba(108,226,123,.08);
+    }
+    .prisma-brand-pane {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        min-height: 470px;
+        position: relative;
+    }
+    .prisma-brand-head {display:flex;align-items:center;gap:22px;flex-wrap:wrap;}
+    .prisma-brand-mark {
+        width:84px;height:84px;border-radius:23px;
+        background:rgba(255,255,255,.12);
+        border:1px solid rgba(255,255,255,.3);
+        box-shadow: inset 0 1px 14px rgba(255,255,255,.07);
+        display:grid;place-items:center;
+    }
+    .prisma-brand-mark svg {width:55px;height:55px;}
+    .prisma-brand-name {
+        font:800 clamp(2.8rem, 4vw, 4.2rem)/1.1 'Segoe UI', sans-serif;
+        letter-spacing:-.045em;color:#fff;
+    }
+    .prisma-brand-description {
+        color:#f2fbff;font-size:clamp(1rem,1.4vw,1.3rem);
+        line-height:1.65;max-width:430px;margin:22px 0 0 108px;
+    }
+    .prisma-brand-rule {
+        width:52px;height:6px;border-radius:6px;background:#6ce27b;
+        margin:31px 0 17px 108px;
+    }
+    .prisma-brand-office {
+        color:#f5ffff;font-size:14px;font-weight:650;
+        margin-left:108px;line-height:1.6;
+    }
+    [class*="st-key-prisma_login_right"] {
+        min-height:615px;
+        height:100%;
+        padding:3.15rem 3.2rem 2.3rem !important;
+        background:#fff;
+        border:1px solid #e7edf5;
+        border-left:0;
+        border-radius:0 26px 26px 0;
+        box-shadow:0 19px 48px rgba(23,64,116,.10);
+    }
+    .prisma-access-label {
+        color:#234c70;
+        text-transform:uppercase;
+        letter-spacing:.21em;
+        font-size:11px;
+        font-weight:800;
+        margin:7px 0 17px;
+    }
+    .prisma-login-heading {
+        color:#122033;font-size:25px;font-weight:750;
+        letter-spacing:-.025em;line-height:1.25;margin:0 0 8px;
+    }
+    .prisma-login-hint {font-size:13px;color:#66788c;line-height:1.6;margin-bottom:21px;}
+    [class*="st-key-prisma_login_right"] [data-testid="stForm"] {
+        border:0 !important; padding:0 !important; background:transparent;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] input {
+        min-height:44px;
+        border-radius:11px;
+        background:#fff;
+        color:#17283e;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] input:focus {
+        border-color:#0027bd;
+        box-shadow:0 0 0 1px #0027bd;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stFormSubmitButton"] button {
+        width:100%;border-radius:11px;
+        min-height:47px;font-weight:750;
+        background:#0027bd;border-color:#0027bd;color:white;
+        margin-top:11px;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stFormSubmitButton"] button:hover:enabled {
+        background:#3a7d40;border-color:#3a7d40;color:#fff;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stFormSubmitButton"] button:disabled {
+        background:#7b93d8;border-color:#7b93d8;color:white;
+    }
+    [class*="st-key-prisma_login_right"] .stButton button[kind="secondary"] {
+        background:transparent;border:0;box-shadow:none;
+        color:#0027bd;font-weight:650;padding:.2rem;
+        min-height:36px;
+    }
+    [class*="st-key-prisma_login_right"] .stButton button[kind="secondary"]:hover {
+        background:#edf7f6;color:#3a7d40;
+    }
+    .prisma-login-status {
+        border-radius:13px;
+        padding:15px 16px;
+        background:#f0f7fc;
+        border:1px solid #e0edf6;
+        color:#365474;
+        font-size:12px;
+        line-height:1.6;
+        margin-top:22px;
+    }
+    .prisma-login-status strong {color:#234c70;font-weight:750;}
+    .prisma-login-mini-footer {
+        text-align:center;font-size:11px;color:#8a9bab;
+        margin-top:17px;
+    }
+    @media(max-width:950px) {
+        [class*="st-key-prisma_login_left"] {min-height:300px;padding:2.5rem 2rem !important;}
+        .prisma-brand-pane {min-height:210px;}
+        .prisma-brand-description,.prisma-brand-rule,.prisma-brand-office {margin-left:0;}
+        [class*="st-key-prisma_login_right"] {padding:2.4rem 2rem !important;}
+    }
+    @media(max-width:700px) {
+        .block-container {padding:1rem .8rem 2rem !important;}
+        [class*="st-key-prisma_login_layout"] [data-testid="stHorizontalBlock"] {
+            flex-direction:column !important;
+        }
+        [class*="st-key-prisma_login_left"] {
+            min-height:235px;border-radius:22px 22px 0 0;padding:1.8rem 1.7rem !important;
+        }
+        .prisma-brand-pane {min-height:168px;}
+        .prisma-brand-mark {width:58px;height:58px;border-radius:15px;}
+        .prisma-brand-mark svg {width:37px;height:37px;}
+        .prisma-brand-name {font-size:2.25rem;}
+        .prisma-brand-description {font-size:12px;line-height:1.4;margin-top:12px;}
+        .prisma-brand-rule {margin:13px 0 8px;width:40px;height:4px;}
+        .prisma-brand-office {font-size:11px;}
+        [class*="st-key-prisma_login_right"] {
+            min-height:auto;border:1px solid #e7edf5;border-top:0;
+            border-radius:0 0 22px 22px;padding:1.7rem 1.5rem !important;
+        }
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def definir_etapa_login(etapa: str):
+    """Navegação simples entre login, cadastro, confirmação e recuperação."""
+    st.session_state["prisma_etapa_login"] = etapa
+
+
 if not verificar_autenticacao():
     aplicar_estilo_sai()
-    exibir_cabecalho_sai(login=True)
-    esq, centro, direita = st.columns([1, 1.35, 1], gap="large")
-    with centro:
-        with st.container(border=True,key="sai_login_card"):
-            try:
-                configuracao()
-            except ErroPRISMA as erro:
-                st.error(str(erro))
-                st.info("Configure o Supabase e execute o script prisma_setup.sql antes de disponibilizar o cadastro.")
-                st.stop()
-            etapa=st.radio("Acesso",["Entrar","Criar conta","Confirmar e-mail","Recuperar senha"],
-                           horizontal=True,key="prisma_etapa_login")
-            if etapa=="Entrar":
-                st.markdown('<div class="sai-login-title">Acesso individual</div>',unsafe_allow_html=True)
-                with st.form("prisma_entrar"):
-                    email=st.text_input("E-mail corporativo",key="login_email")
-                    senha=st.text_input("Senha",type="password",key="login_senha")
-                    enviar=st.form_submit_button("Entrar no PRISMA",use_container_width=True,type="primary")
-                if enviar:
-                    try:
-                        tokens=entrar(email,senha)
-                        if iniciar_sessao(tokens):st.rerun()
-                        st.warning("E-mail confirmado, mas a conta ainda não foi aprovada ou está bloqueada.")
-                    except ErroPRISMA as erro:st.error(str(erro))
-            elif etapa=="Criar conta":
-                st.markdown("**Primeiro acesso — solicitação de cadastro**")
-                with st.form("prisma_criar"):
-                    nome=st.text_input("Nome completo")
-                    email=st.text_input("E-mail corporativo")
-                    senha=st.text_input("Criar senha (mínimo de 12 caracteres)",type="password")
-                    repetida=st.text_input("Confirmar senha",type="password")
-                    enviar=st.form_submit_button("Enviar código de confirmação",use_container_width=True)
-                if enviar:
-                    if senha!=repetida:st.error("As senhas não coincidem.")
-                    else:
+    aplicar_layout_login_prisma()
+    if "prisma_etapa_login" not in st.session_state:
+        st.session_state["prisma_etapa_login"] = "Entrar"
+    try:
+        configuracao()
+        login_configurado = True
+    except ErroPRISMA:
+        login_configurado = False
+
+    with st.container(key="prisma_login_layout"):
+        painel_esquerdo, painel_direito = st.columns([1.1, 1], gap="small")
+        with painel_esquerdo:
+            with st.container(key="prisma_login_left"):
+                st.markdown(f"""
+                <div class="prisma-brand-pane">
+                  <div class="prisma-brand-head">
+                    <div class="prisma-brand-mark">{SIMBOLO_SAI}</div>
+                    <div class="prisma-brand-name">PRISMA</div>
+                  </div>
+                  <div class="prisma-brand-description">
+                    Plataforma de Recursos Integrados para<br>
+                    Suporte, Monitoramento e Análises
+                  </div>
+                  <div class="prisma-brand-rule"></div>
+                  <div class="prisma-brand-office">COI — Centro de Operações Integradas</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with painel_direito:
+            with st.container(key="prisma_login_right"):
+                st.markdown('<div class="prisma-access-label">ACESSO À PLATAFORMA</div>',
+                            unsafe_allow_html=True)
+                etapa = st.session_state["prisma_etapa_login"]
+                if etapa == "Entrar":
+                    st.markdown('<div class="prisma-login-heading">Bem-vindo ao PRISMA</div>'
+                                '<div class="prisma-login-hint">Entre com suas credenciais corporativas para continuar.</div>',
+                                unsafe_allow_html=True)
+                    with st.form("prisma_entrar"):
+                        email = st.text_input("E-mail corporativo", key="login_email")
+                        senha = st.text_input("Senha", type="password", key="login_senha")
+                        enviar = st.form_submit_button("Entrar", use_container_width=True,
+                                                      type="primary", disabled=not login_configurado)
+                    if enviar:
                         try:
-                            cadastrar(email,senha,nome)
-                            st.success("Se o cadastro for elegível, a confirmação será enviada ao e-mail. Use 'Confirmar e-mail'.")
-                        except ErroPRISMA as erro:st.error(str(erro))
-            elif etapa=="Confirmar e-mail":
-                st.info("Digite o código recebido no e-mail. Depois, aguarde a aprovação administrativa.")
-                with st.form("prisma_confirmar"):
-                    email=st.text_input("E-mail cadastrado")
-                    codigo=st.text_input("Código recebido",max_chars=12)
-                    enviar=st.form_submit_button("Confirmar cadastro",use_container_width=True)
-                if enviar:
-                    try:
-                        confirmar(email,codigo)
-                        st.success("E-mail confirmado! O acesso será liberado após aprovação do administrador.")
-                    except ErroPRISMA as erro:st.error(str(erro))
-            else:
-                st.markdown("**Recuperar senha de acesso**")
-                with st.form("prisma_recuperar"):
-                    email=st.text_input("E-mail cadastrado")
-                    enviar=st.form_submit_button("Enviar código de recuperação",use_container_width=True)
-                if enviar:
-                    try:
-                        pedir_recuperacao(email)
-                        st.success("Se a conta existir, enviaremos as instruções ao e-mail informado.")
-                    except ErroPRISMA as erro:st.error(str(erro))
-                with st.form("prisma_redefinir"):
-                    email_codigo=st.text_input("E-mail para confirmação da recuperação")
-                    codigo=st.text_input("Código de recuperação",max_chars=12)
-                    senha=st.text_input("Nova senha",type="password")
-                    enviar=st.form_submit_button("Definir nova senha",use_container_width=True)
-                if enviar:
-                    try:
-                        t=confirmar(email_codigo,codigo,tipo="recovery")
-                        mudar_senha_token(t["access_token"],senha)
-                        st.success("Senha alterada. Faça login com a nova senha.")
-                    except (ErroPRISMA,KeyError) as erro:st.error(str(erro))
+                            tokens = entrar(email, senha)
+                            if iniciar_sessao(tokens):
+                                st.rerun()
+                            st.warning("Seu e-mail está confirmado, mas o acesso ainda não foi aprovado ou está bloqueado.")
+                        except ErroPRISMA as erro:
+                            st.error(str(erro))
+                    col_criar, col_recuperar = st.columns(2)
+                    with col_criar:
+                        st.button("Criar uma conta", key="prisma_link_criar", use_container_width=True,
+                                  on_click=definir_etapa_login, args=("Criar conta",))
+                    with col_recuperar:
+                        st.button("Esqueci minha senha", key="prisma_link_recuperar", use_container_width=True,
+                                  on_click=definir_etapa_login, args=("Recuperar senha",))
+
+                elif etapa == "Criar conta":
+                    st.markdown('<div class="prisma-login-heading">Criar conta</div>'
+                                '<div class="prisma-login-hint">Use seu e-mail corporativo para solicitar acesso.</div>',
+                                unsafe_allow_html=True)
+                    with st.form("prisma_criar"):
+                        nome = st.text_input("Nome completo")
+                        email = st.text_input("E-mail corporativo")
+                        senha = st.text_input("Criar senha (mínimo de 12 caracteres)", type="password")
+                        repetida = st.text_input("Confirmar senha", type="password")
+                        enviar = st.form_submit_button("Enviar código de confirmação",
+                                                      use_container_width=True, disabled=not login_configurado)
+                    if enviar:
+                        if senha != repetida:
+                            st.error("As senhas não coincidem.")
+                        else:
+                            try:
+                                cadastrar(email, senha, nome)
+                                st.success("Confira o e-mail e utilize 'Confirmar e-mail' para finalizar.")
+                            except ErroPRISMA as erro:
+                                st.error(str(erro))
+                    voltar, confirmar_col = st.columns(2)
+                    with voltar:
+                        st.button("Voltar ao login", key="prisma_voltar_cadastro",
+                                  use_container_width=True,on_click=definir_etapa_login,args=("Entrar",))
+                    with confirmar_col:
+                        st.button("Confirmar e-mail", key="prisma_ir_confirmacao",
+                                  use_container_width=True,on_click=definir_etapa_login,args=("Confirmar e-mail",))
+
+                elif etapa == "Confirmar e-mail":
+                    st.markdown('<div class="prisma-login-heading">Confirmar e-mail</div>'
+                                '<div class="prisma-login-hint">Digite o código recebido para concluir o cadastro.</div>',
+                                unsafe_allow_html=True)
+                    with st.form("prisma_confirmar"):
+                        email = st.text_input("E-mail cadastrado")
+                        codigo = st.text_input("Código recebido", max_chars=12)
+                        enviar = st.form_submit_button("Confirmar cadastro", use_container_width=True,
+                                                      disabled=not login_configurado)
+                    if enviar:
+                        try:
+                            confirmar(email, codigo)
+                            st.success("E-mail confirmado. Aguarde a aprovação do administrador.")
+                        except ErroPRISMA as erro:
+                            st.error(str(erro))
+                    st.button("Voltar ao login", key="prisma_voltar_confirmacao",
+                              on_click=definir_etapa_login,args=("Entrar",))
+
+                else:  # Recuperar senha
+                    st.markdown('<div class="prisma-login-heading">Recuperar acesso</div>'
+                                '<div class="prisma-login-hint">Solicite um código para redefinir sua senha.</div>',
+                                unsafe_allow_html=True)
+                    with st.form("prisma_recuperar"):
+                        email = st.text_input("E-mail cadastrado")
+                        enviar = st.form_submit_button("Enviar código de recuperação",
+                                                      use_container_width=True, disabled=not login_configurado)
+                    if enviar:
+                        try:
+                            pedir_recuperacao(email)
+                            st.success("Se a conta existir, enviaremos as instruções ao e-mail informado.")
+                        except ErroPRISMA as erro:
+                            st.error(str(erro))
+                    with st.form("prisma_redefinir"):
+                        email_codigo = st.text_input("E-mail para confirmação da recuperação")
+                        codigo = st.text_input("Código de recuperação", max_chars=12)
+                        senha = st.text_input("Nova senha", type="password")
+                        enviar = st.form_submit_button("Definir nova senha", use_container_width=True,
+                                                      disabled=not login_configurado)
+                    if enviar:
+                        try:
+                            t = confirmar(email_codigo, codigo, tipo="recovery")
+                            mudar_senha_token(t["access_token"], senha)
+                            st.success("Senha alterada. Faça login com a nova senha.")
+                        except (ErroPRISMA, KeyError) as erro:
+                            st.error(str(erro))
+                    st.button("Voltar ao login", key="prisma_voltar_recuperacao",
+                              on_click=definir_etapa_login,args=("Entrar",))
+
+                if not login_configurado:
+                    st.markdown('<div class="prisma-login-status"><strong>Configuração do PRISMA</strong><br>'
+                                'A plataforma está em fase de configuração. O acesso será liberado '
+                                'após conectar o serviço de autenticação.</div>',
+                                unsafe_allow_html=True)
+                st.markdown('<div class="prisma-login-mini-footer">Acesso restrito a usuários autorizados.</div>',
+                            unsafe_allow_html=True)
     st.stop()
+
 
 # ============================================================
 # HUB CENTRAL — SOMENTE APRESENTAÇÃO RENOVADA
