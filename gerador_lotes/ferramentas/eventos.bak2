@@ -1,0 +1,1786 @@
+import re
+import unicodedata
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+
+from ..estado import obter_base, base_carregada, limpar_resultado
+from ..exportacao import dataframe_para_excel
+from ..zonas import obter_zona
+from .componentes import selecionar_modo_api_the
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+NOME_ARQUIVO_API = "Eventos API.xlsx"
+NOME_ARQUIVO_THE = "Eventos THE.xlsx"
+
+TIPO_ENCERRAMENTO = 6
+
+# Regra selecionada para a análise completa (não altera a base original).
+REGRA_PADRAO = "1h_3h"
+REGRAS_JANELA = {
+    "1h_3h": "1h antes e 3h após",
+    "6h_6h": "6h antes e 6h após",
+    "dia_inteiro": "Dia inteiro",
+}
+
+COLUNAS_LOTE = [
+    "Quant. de O.S",
+    "Cidade",
+    "Bairro",
+    "Ano",
+    "Mês",
+    "Dia",
+    "Hora Inicial",
+    "Hora Final",
+    "Observação",
+]
+
+
+# ============================================================
+# IDENTIDADE VISUAL
+# ============================================================
+
+def aplicar_modo_visual():
+    st.markdown(
+        """
+        <style>
+        .coi-card {
+            border-radius: 12px;
+            padding: 18px 20px;
+            margin-bottom: 14px;
+            border: 1px solid;
+        }
+
+        .coi-card h3,
+        .coi-card h4 {
+            margin-top: 0;
+        }
+
+        .coi-metric {
+            border-radius: 10px;
+            padding: 14px 16px;
+            border: 1px solid;
+        }
+
+        .coi-metric-label {
+            font-size: 0.82rem;
+            margin-bottom: 4px;
+        }
+
+        .coi-metric-value {
+            font-size: 1.45rem;
+            font-weight: 700;
+        }
+
+        @media (prefers-color-scheme: light) {
+            .coi-card {
+                background: #ffffff;
+                border-color: #d9dee7;
+            }
+
+            .coi-card h3,
+            .coi-card h4 {
+                color: #111827;
+            }
+
+            .coi-card p,
+            .coi-card span {
+                color: #374151;
+            }
+
+            .coi-metric {
+                background: #ffffff;
+                border-color: #d9dee7;
+            }
+
+            .coi-metric-label {
+                color: #6b7280;
+            }
+
+            .coi-metric-value {
+                color: #111827;
+            }
+
+            section[data-testid="stSidebar"] {
+                background: #ffffff;
+            }
+        }
+
+        @media (prefers-color-scheme: dark) {
+            .coi-card {
+                background: #161b22;
+                border-color: #30363d;
+            }
+
+            .coi-card h3,
+            .coi-card h4 {
+                color: #f0f2f6;
+            }
+
+            .coi-card p,
+            .coi-card span {
+                color: #c9d1d9;
+            }
+
+            .coi-metric {
+                background: #161b22;
+                border-color: #30363d;
+            }
+
+            .coi-metric-label {
+                color: #8b949e;
+            }
+
+            .coi-metric-value {
+                color: #f0f2f6;
+            }
+
+            section[data-testid="stSidebar"] {
+                background: #161b22;
+            }
+        }
+
+        div.stButton > button {
+            border-radius: 8px;
+        }
+
+        div[data-testid="stDataFrame"] {
+            border-radius: 8px;
+        }
+
+        div[data-testid="stExpander"] {
+            border-radius: 8px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# NORMALIZAÇÃO DE TEXTO
+# ============================================================
+
+def normalizar_texto(valor) -> str:
+    if valor is None:
+        return ""
+
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+
+    texto = str(valor).strip().upper()
+
+    texto = unicodedata.normalize("NFKD", texto)
+
+    texto = "".join(
+        caractere
+        for caractere in texto
+        if not unicodedata.combining(caractere)
+    )
+
+    texto = re.sub(r"[^A-Z0-9\s]", " ", texto)
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto.strip()
+
+
+# ============================================================
+# LOCALIZAÇÃO DE COLUNAS
+# ============================================================
+
+def encontrar_coluna(df: pd.DataFrame, *nomes):
+    mapa = {
+        normalizar_texto(coluna): coluna
+        for coluna in df.columns
+    }
+
+    for nome in nomes:
+        chave = normalizar_texto(nome)
+
+        if chave in mapa:
+            return mapa[chave]
+
+    return None
+
+
+# ============================================================
+# DATA/HORA DOS EVENTOS
+# ============================================================
+
+def converter_datetime_evento(valor):
+    """
+    Converte datas/horas da base de Eventos.
+
+    Exemplos aceitos:
+        24/09/2026 10:30h
+        24/09/2026 10:30
+        datetime
+        Timestamp
+    """
+
+    if valor is None:
+        return pd.NaT
+
+    try:
+        if pd.isna(valor):
+            return pd.NaT
+    except Exception:
+        pass
+
+    if isinstance(valor, (pd.Timestamp, datetime)):
+        return pd.Timestamp(valor)
+
+    texto = str(valor).strip()
+
+    if not texto:
+        return pd.NaT
+
+    texto = re.sub(
+        r"(\d{1,2}:\d{2})h\b",
+        r"\1",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    resultado = pd.to_datetime(
+        texto,
+        format="%d/%m/%Y %H:%M",
+        errors="coerce",
+    )
+
+    if not pd.isna(resultado):
+        return resultado
+
+    return pd.to_datetime(
+        texto,
+        errors="coerce",
+        dayfirst=True,
+    )
+
+
+# ============================================================
+# PROTOCOLO
+# ============================================================
+
+def parse_protocolo(valor):
+    if valor is None:
+        return None, None
+
+    try:
+        if pd.isna(valor):
+            return None, None
+    except Exception:
+        pass
+
+    texto = str(valor).strip()
+
+    padrao = re.search(
+        r"(\d+)\s*/\s*(\d{4})(?:\s*-\s*\d+)?",
+        texto,
+    )
+
+    if not padrao:
+        return None, None
+
+    try:
+        return (
+            int(padrao.group(1)),
+            int(padrao.group(2)),
+        )
+    except (TypeError, ValueError):
+        return None, None
+
+
+# ============================================================
+# MATRÍCULA
+# ============================================================
+
+def normalizar_matricula(valor):
+    if valor is None:
+        return ""
+
+    try:
+        if pd.isna(valor):
+            return ""
+    except Exception:
+        pass
+
+    texto = str(valor).strip()
+
+    if texto.endswith(".0"):
+        texto = texto[:-2]
+
+    return re.sub(r"\D", "", texto)
+
+
+# ============================================================
+# TODO O MUNICÍPIO
+# ============================================================
+
+PADROES_TODO_MUNICIPIO = {
+    "TODA A CIDADE",
+    "TODA CIDADE",
+    "TODO O MUNICIPIO",
+    "TODO MUNICIPIO",
+    "TODA A AREA",
+    "TODA AREA",
+    "TODA A REGIAO",
+    "TODA REGIAO",
+    "MUNICIPIO TODO",
+    "CIDADE TODA",
+    "AREA TODA",
+    "REGIAO TODA",
+    "TODAS AS AREAS",
+    "TODAS AREAS",
+    "TODOS OS BAIRROS",
+    "TODAS AS REGIOES",
+    "TODAS REGIOES",
+    "TODOS BAIRROS",
+    "MUNICIPIO INTEIRO",
+    "CIDADE INTEIRA",
+    "TODA A CIDADE",
+}
+
+
+def eh_todo_municipio(valor) -> bool:
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return False
+
+    if texto in PADROES_TODO_MUNICIPIO:
+        return True
+
+    if "MUNICIPIO INTEIRO" in texto:
+        return True
+
+    if "CIDADE INTEIRA" in texto:
+        return True
+
+    if "TODOS OS BAIRROS" in texto:
+        return True
+
+    if "TODAS AS REGIOES" in texto:
+        return True
+
+    return False
+
+
+# ============================================================
+# SEPARAÇÃO DAS ÁREAS IMPACTADAS
+# ============================================================
+
+def separar_areas_impactadas(valor):
+    """
+    Interpreta o conteúdo original da coluna
+    'Áreas Impactadas'.
+
+    O texto é separado ANTES de ser normalizado.
+    """
+
+    if valor is None:
+        return []
+
+    try:
+        if pd.isna(valor):
+            return []
+    except Exception:
+        pass
+
+    texto_original = str(valor).strip()
+
+    if not texto_original:
+        return []
+
+    if eh_todo_municipio(texto_original):
+        return ["TODA A CIDADE"]
+
+    texto = texto_original
+
+    texto = texto.replace("\r\n", "\n")
+    texto = texto.replace("\r", "\n")
+
+    texto = texto.replace(";", ",")
+    texto = texto.replace("|", ",")
+    texto = texto.replace("/", ",")
+    texto = texto.replace("\\", ",")
+
+    texto = re.sub(
+        r"\s*&\s*",
+        ",",
+        texto,
+    )
+
+    texto = re.sub(
+        r"\s+E\s+",
+        ",",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    partes = re.split(
+        r"[,;\n|]+",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    resultado = []
+
+    for parte in partes:
+
+        area = normalizar_texto(parte)
+
+        if not area:
+            continue
+
+        if eh_todo_municipio(area):
+            return ["TODA A CIDADE"]
+
+        if area not in resultado:
+            resultado.append(area)
+
+    return resultado
+
+
+# ============================================================
+# ÁREAS / BAIRROS
+# ============================================================
+
+SINONIMOS_AREAS = {
+    "CENTRO": {
+        "CENTRO",
+    },
+
+    "SAO JOSE": {
+        "SAO JOSE",
+        "SAO JOSE I",
+        "SAO JOSE II",
+    },
+}
+
+
+# ============================================================
+# NORMALIZAÇÃO ESPECÍFICA DO NOME DO BAIRRO
+# ============================================================
+
+def normalizar_nome_area_com_qualificadores(valor):
+    """
+    Remove qualificadores operacionais que aparecem na
+    descrição das áreas impactadas, mas não fazem parte
+    do nome do bairro.
+    """
+
+    texto = normalizar_texto(valor)
+
+    if not texto:
+        return ""
+
+    qualificadores = {
+        "PARCIAL",
+        "PARCIALMENTE",
+        "TOTAL",
+        "INTEGRAL",
+        "PARTE",
+    }
+
+    tokens = texto.split()
+
+    while tokens and tokens[-1] in qualificadores:
+        tokens.pop()
+
+    return " ".join(tokens).strip()
+
+
+def tokenizar_area(valor):
+    texto = normalizar_nome_area_com_qualificadores(valor)
+
+    if not texto:
+        return set()
+
+    return {
+        token
+        for token in texto.split()
+        if token
+    }
+
+
+def areas_evento_correspondem(area_evento, bairro_os) -> bool:
+
+    if not area_evento or not bairro_os:
+        return False
+
+    area = normalizar_nome_area_com_qualificadores(
+        area_evento
+    )
+
+    bairro = normalizar_nome_area_com_qualificadores(
+        bairro_os
+    )
+
+    if not area or not bairro:
+        return False
+
+    if area == bairro:
+        return True
+
+    for grupo, sinonimos in SINONIMOS_AREAS.items():
+
+        grupo_normalizado = (
+            normalizar_nome_area_com_qualificadores(
+                grupo
+            )
+        )
+
+        equivalentes = {
+            grupo_normalizado,
+            *{
+                normalizar_nome_area_com_qualificadores(
+                    sinonimo
+                )
+                for sinonimo in sinonimos
+                if normalizar_nome_area_com_qualificadores(
+                    sinonimo
+                )
+            },
+        }
+
+        if area in equivalentes and bairro in equivalentes:
+            return True
+
+    tokens_area = tokenizar_area(area)
+    tokens_bairro = tokenizar_area(bairro)
+
+    if tokens_area and tokens_bairro:
+
+        if tokens_area == tokens_bairro:
+            return True
+
+    return False
+
+
+# ============================================================
+# PREPARAÇÃO DOS EVENTOS
+# ============================================================
+
+def preparar_eventos(df_eventos: pd.DataFrame, regra_janela=REGRA_PADRAO):
+
+    if regra_janela not in REGRAS_JANELA:
+        raise ValueError("Regra de janela de horário inválida.")
+
+    avisos = []
+
+    if df_eventos is None or df_eventos.empty:
+        return (
+            pd.DataFrame(),
+            ["A base de Eventos está vazia."],
+            {
+                "total": 0,
+                "validos": 0,
+                "invalidos": 0,
+            },
+        )
+
+    df = df_eventos.copy()
+
+    coluna_cidade = encontrar_coluna(
+        df,
+        "Cidade",
+    )
+
+    coluna_area = encontrar_coluna(
+        df,
+        "Áreas Impactadas",
+        "Areas Impactadas",
+        "Área Impactada",
+        "Area Impactada",
+    )
+
+    coluna_inicio = encontrar_coluna(
+        df,
+        "Início",
+        "Inicio",
+    )
+
+    coluna_fim_real = encontrar_coluna(
+        df,
+        "Término Real",
+        "Termino Real",
+        "Término Realizado",
+        "Termino Realizado",
+        "Fim Real",
+        "Fim Realizado",
+    )
+
+    coluna_fim_previsto = encontrar_coluna(
+        df,
+        "Prev. Término",
+        "Prev Término",
+        "Prev. Termino",
+        "Previsão de Término",
+        "Previsao de Termino",
+    )
+
+    coluna_descricao = encontrar_coluna(
+        df,
+        "Descrição do Serviço",
+        "Descricao do Servico",
+        "Descrição",
+        "Descricao",
+    )
+
+    faltantes = []
+
+    if coluna_cidade is None:
+        faltantes.append("Cidade")
+
+    if coluna_area is None:
+        faltantes.append("Áreas Impactadas")
+
+    if coluna_inicio is None:
+        faltantes.append("Início")
+
+    if (
+        coluna_fim_real is None
+        and coluna_fim_previsto is None
+    ):
+        faltantes.append(
+            "Término Real / Prev. Término"
+        )
+
+    if faltantes:
+        return (
+            pd.DataFrame(),
+            [
+                "Colunas obrigatórias ausentes na base de "
+                "Eventos: "
+                + ", ".join(faltantes)
+                + "."
+            ],
+            {
+                "total": len(df),
+                "validos": 0,
+                "invalidos": len(df),
+            },
+        )
+
+    eventos = pd.DataFrame()
+
+    # --------------------------------------------------------
+    # CIDADE
+    # --------------------------------------------------------
+
+    eventos["cidade"] = df[coluna_cidade].apply(
+        normalizar_texto
+    )
+
+    # --------------------------------------------------------
+    # ÁREAS
+    # --------------------------------------------------------
+
+    eventos["areas_original"] = (
+        df[coluna_area]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    eventos["areas_lista"] = eventos[
+        "areas_original"
+    ].apply(
+        separar_areas_impactadas
+    )
+
+    eventos["areas"] = eventos[
+        "areas_original"
+    ].apply(
+        normalizar_texto
+    )
+
+    # --------------------------------------------------------
+    # INÍCIO
+    # --------------------------------------------------------
+
+    eventos["inicio"] = df[coluna_inicio].apply(
+        converter_datetime_evento
+    )
+
+    # --------------------------------------------------------
+    # TÉRMINO DO EVENTO
+    #
+    # Prioridade:
+    #   1. Término Real
+    #   2. Prev. Término
+    # --------------------------------------------------------
+
+    if coluna_fim_real is not None:
+        fim_real = df[coluna_fim_real].apply(
+            converter_datetime_evento
+        )
+    else:
+        fim_real = pd.Series(
+            pd.NaT,
+            index=df.index,
+        )
+
+    if coluna_fim_previsto is not None:
+        fim_previsto = df[coluna_fim_previsto].apply(
+            converter_datetime_evento
+        )
+    else:
+        fim_previsto = pd.Series(
+            pd.NaT,
+            index=df.index,
+        )
+
+    eventos["fim_previsto"] = fim_real.combine_first(
+        fim_previsto
+    )
+
+    # --------------------------------------------------------
+    # JANELA DE CORRESPONDÊNCIA
+    #
+    # Regra padrão: início -1h até término +3h.
+    # Regra ampliada: início -6h até término +6h.
+    # Dia inteiro: todas as datas civis abrangidas pelo evento.
+    # O limite final do dia inteiro é exclusivo, à meia-noite
+    # seguinte, evitando perder registros com segundos/frações.
+    # --------------------------------------------------------
+
+    if regra_janela == "dia_inteiro":
+        eventos["inicio_janela"] = eventos["inicio"].dt.normalize()
+        eventos["fim_efetivo"] = (
+            eventos["fim_previsto"].dt.normalize()
+            + pd.Timedelta(days=1)
+        )
+    else:
+        horas_antes, horas_apos = (
+            (6, 6) if regra_janela == "6h_6h" else (1, 3)
+        )
+        eventos["inicio_janela"] = (
+            eventos["inicio"] - pd.Timedelta(hours=horas_antes)
+        )
+        eventos["fim_efetivo"] = (
+            eventos["fim_previsto"] + pd.Timedelta(hours=horas_apos)
+        )
+
+    eventos["fim_janela_exclusivo"] = (regra_janela == "dia_inteiro")
+
+    # --------------------------------------------------------
+    # DESCRIÇÃO
+    # --------------------------------------------------------
+
+    if coluna_descricao is not None:
+        eventos["descricao"] = (
+            df[coluna_descricao]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+    else:
+        eventos["descricao"] = ""
+
+    # --------------------------------------------------------
+    # TODO MUNICÍPIO
+    # --------------------------------------------------------
+
+    eventos["todo_municipio"] = eventos[
+        "areas_original"
+    ].apply(
+        eh_todo_municipio
+    )
+
+    # --------------------------------------------------------
+    # VALIDAÇÕES
+    # --------------------------------------------------------
+
+    eventos["fim_anterior_inicio"] = (
+        eventos["inicio"].notna()
+        & eventos["fim_previsto"].notna()
+        & (
+            eventos["fim_previsto"]
+            < eventos["inicio"]
+        )
+    )
+
+    quantidade_inicio_invalido = int(
+        eventos["inicio"].isna().sum()
+    )
+
+    quantidade_fim_invalido = int(
+        eventos["fim_previsto"].isna().sum()
+    )
+
+    quantidade_fim_anterior = int(
+        eventos["fim_anterior_inicio"].sum()
+    )
+
+    cidades_vazias = int(
+        (eventos["cidade"] == "").sum()
+    )
+
+    areas_vazias = int(
+        eventos["areas_lista"].apply(
+            lambda lista: len(lista) == 0
+        ).sum()
+    )
+
+    if quantidade_inicio_invalido:
+        avisos.append(
+            f"{quantidade_inicio_invalido} evento(s) com "
+            "Início inválido serão ignorados."
+        )
+
+    if quantidade_fim_invalido:
+        avisos.append(
+            f"{quantidade_fim_invalido} evento(s) sem "
+            "Término Real ou Prev. Término válido serão "
+            "ignorados."
+        )
+
+    if quantidade_fim_anterior:
+        avisos.append(
+            f"{quantidade_fim_anterior} evento(s) com fim "
+            "anterior ao início serão ignorados."
+        )
+
+    if cidades_vazias:
+        avisos.append(
+            f"{cidades_vazias} evento(s) sem cidade serão "
+            "ignorados."
+        )
+
+    if areas_vazias:
+        avisos.append(
+            f"{areas_vazias} evento(s) sem área impactada "
+            "válida serão ignorados."
+        )
+
+    # --------------------------------------------------------
+    # EVENTOS VÁLIDOS
+    # --------------------------------------------------------
+
+    eventos_validos = eventos[
+        eventos["inicio"].notna()
+        & eventos["fim_previsto"].notna()
+        & ~eventos["fim_anterior_inicio"]
+        & (eventos["cidade"] != "")
+        & (
+            eventos["areas_lista"].apply(
+                lambda lista: len(lista) > 0
+            )
+        )
+    ].copy()
+
+    estatisticas = {
+        "total": len(eventos),
+        "validos": len(eventos_validos),
+        "invalidos": (
+            len(eventos)
+            - len(eventos_validos)
+        ),
+    }
+
+    return (
+        eventos_validos,
+        avisos,
+        estatisticas,
+    )
+
+
+# ============================================================
+# FORMATAÇÃO DO PERÍODO DO EVENTO
+# ============================================================
+
+def formatar_periodo_evento(
+    inicio_evento,
+    fim_previsto,
+):
+
+    if inicio_evento.date() == fim_previsto.date():
+        return str(inicio_evento.day)
+
+    if (
+        inicio_evento.year == fim_previsto.year
+        and inicio_evento.month == fim_previsto.month
+    ):
+        return (
+            f"{inicio_evento.day} a "
+            f"{fim_previsto.day}"
+        )
+
+    if inicio_evento.year == fim_previsto.year:
+        return (
+            f"{inicio_evento.day:02d}/"
+            f"{inicio_evento.month:02d} a "
+            f"{fim_previsto.day:02d}/"
+            f"{fim_previsto.month:02d}"
+        )
+
+    return (
+        f"{inicio_evento.day:02d}/"
+        f"{inicio_evento.month:02d}/"
+        f"{inicio_evento.year} a "
+        f"{fim_previsto.day:02d}/"
+        f"{fim_previsto.month:02d}/"
+        f"{fim_previsto.year}"
+    )
+
+
+# ============================================================
+# OBSERVAÇÃO
+# ============================================================
+
+def montar_observacao(descricao):
+
+    descricao = (
+        ""
+        if descricao is None
+        else str(descricao).strip()
+    )
+
+    descricao = re.sub(
+        r"\s+",
+        " ",
+        descricao,
+    )
+
+    return descricao[:280]
+
+
+# ============================================================
+# CRUZAMENTO EVENTOS x BACKLOG
+# ============================================================
+
+def cruzar_eventos_com_backlog(
+    df_eventos,
+    df_backlog,
+    modo=None,
+):
+
+    # ========================================================
+    # LOCALIZAÇÃO DAS COLUNAS DO BACKLOG
+    # ========================================================
+
+    coluna_cidade = encontrar_coluna(
+        df_backlog,
+        "CIDADE",
+        "Cidade",
+    )
+
+    coluna_bairro = encontrar_coluna(
+        df_backlog,
+        "BAIRRO",
+        "Bairro",
+    )
+
+    coluna_inicio_sla = encontrar_coluna(
+        df_backlog,
+        "INÍCIO DO SLA",
+        "Inicio do SLA",
+        "INICIO DO SLA",
+    )
+
+    coluna_protocolo = encontrar_coluna(
+        df_backlog,
+        "COD. PROTOCOLO ORIGEM",
+        "Cod. Protocolo Origem",
+        "COD PROTOCOLO ORIGEM",
+        "Código Protocolo Origem",
+        "Codigo Protocolo Origem",
+    )
+
+    coluna_matricula = encontrar_coluna(
+        df_backlog,
+        "MATRICULA",
+        "Matrícula",
+    )
+
+    faltantes = []
+
+    if coluna_cidade is None:
+        faltantes.append("CIDADE")
+
+    if coluna_bairro is None:
+        faltantes.append("BAIRRO")
+
+    if coluna_inicio_sla is None:
+        faltantes.append("INÍCIO DO SLA")
+
+    if coluna_protocolo is None:
+        faltantes.append("COD. PROTOCOLO ORIGEM")
+
+    if coluna_matricula is None:
+        faltantes.append("MATRICULA")
+
+    if faltantes:
+        raise ValueError(
+            "Colunas obrigatórias ausentes no backlog: "
+            + ", ".join(faltantes)
+        )
+
+    df = df_backlog.copy()
+
+    # ========================================================
+    # NORMALIZAÇÃO DO BACKLOG
+    # ========================================================
+
+    df["cidade_normalizada"] = (
+        df[coluna_cidade]
+        .fillna("")
+        .astype(str)
+        .map(normalizar_texto)
+    )
+
+    df["bairro_normalizado"] = (
+        df[coluna_bairro]
+        .fillna("")
+        .astype(str)
+        .map(normalizar_texto)
+    )
+
+    # ========================================================
+    # DATA/HORA DO SLA
+    # ========================================================
+
+    df["inicio_sla"] = pd.to_datetime(
+        df[coluna_inicio_sla],
+        errors="coerce",
+        dayfirst=True,
+    )
+
+    # ========================================================
+    # CHAVE DA O.S.
+    # ========================================================
+
+    df["chave_os"] = list(
+        zip(
+            df[coluna_matricula].map(
+                normalizar_matricula
+            ),
+            df[coluna_protocolo]
+            .fillna("")
+            .astype(str)
+            .str.strip(),
+        )
+    )
+
+    # ========================================================
+    # FILTRO DE REGISTROS UTILIZÁVEIS
+    # ========================================================
+
+    df = df[
+        (df["cidade_normalizada"] != "")
+        & df["inicio_sla"].notna()
+    ].copy()
+
+    resultado = []
+    avisos = []
+
+    # ========================================================
+    # CRUZAMENTO EVENTO x ÁREA x O.S.
+    # ========================================================
+
+    for _, evento in df_eventos.iterrows():
+
+        cidade = normalizar_texto(
+            evento.get("cidade", "")
+        )
+
+        inicio_evento = evento.get("inicio")
+        fim_previsto = evento.get("fim_previsto")
+        inicio_janela = evento.get("inicio_janela")
+        fim_efetivo = evento.get("fim_efetivo")
+
+        descricao = str(
+            evento.get("descricao", "") or ""
+        ).strip()
+
+        if (
+            not cidade
+            or pd.isna(inicio_evento)
+            or pd.isna(fim_previsto)
+            or pd.isna(inicio_janela)
+            or pd.isna(fim_efetivo)
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # ÁREAS
+        # ----------------------------------------------------
+
+        areas_evento = evento.get(
+            "areas_lista",
+            [],
+        )
+
+        if not isinstance(areas_evento, list):
+            areas_evento = separar_areas_impactadas(
+                areas_evento
+            )
+
+        if not areas_evento:
+            continue
+
+        # ----------------------------------------------------
+        # FILTRO POR CIDADE
+        # ----------------------------------------------------
+
+        candidatos = df[
+            df["cidade_normalizada"] == cidade
+        ].copy()
+
+        if candidatos.empty:
+            avisos.append(
+                f"Evento em {cidade} entre "
+                f"{inicio_evento.strftime('%d/%m/%Y %H:%M')} "
+                f"e {fim_previsto.strftime('%d/%m/%Y %H:%M')} "
+                "não encontrou O.S. na mesma cidade."
+            )
+            continue
+
+        # ----------------------------------------------------
+        # FILTRO POR PERÍODO
+        #
+        # Janela configurada na preparação dos eventos
+        # ----------------------------------------------------
+
+        limite_superior = (
+            candidatos["inicio_sla"] < fim_efetivo
+            if evento.get("fim_janela_exclusivo", False)
+            else candidatos["inicio_sla"] <= fim_efetivo
+        )
+        candidatos = candidatos[
+            (candidatos["inicio_sla"] >= inicio_janela)
+            & limite_superior
+        ].copy()
+
+        if candidatos.empty:
+            avisos.append(
+                f"Evento em {cidade} entre "
+                f"{inicio_evento.strftime('%d/%m/%Y %H:%M')} "
+                f"e {fim_previsto.strftime('%d/%m/%Y %H:%M')} "
+                f"não encontrou O.S. dentro da janela "
+                f"de correspondência "
+                f"({inicio_janela.strftime('%d/%m/%Y %H:%M')} "
+                f"até {fim_efetivo.strftime('%d/%m/%Y %H:%M')})."
+            )
+            continue
+
+        # ----------------------------------------------------
+        # CADA ÁREA
+        # ----------------------------------------------------
+
+        for area_evento in areas_evento:
+
+            if not area_evento:
+                continue
+
+            # ------------------------------------------------
+            # MUNICÍPIO INTEIRO
+            # ------------------------------------------------
+
+            if area_evento == "TODA A CIDADE":
+
+                candidatos_area = candidatos.copy()
+
+            else:
+
+                # --------------------------------------------
+                # FILTRO POR BAIRRO
+                # --------------------------------------------
+
+                mascara_bairro = candidatos[
+                    "bairro_normalizado"
+                ].apply(
+                    lambda bairro: areas_evento_correspondem(
+                        area_evento,
+                        bairro,
+                    )
+                )
+
+                candidatos_area = candidatos[
+                    mascara_bairro
+                ].copy()
+
+            # ------------------------------------------------
+            # CHAVES ÚNICAS DE O.S.
+            # ------------------------------------------------
+
+            chaves_os_evento = set()
+
+            for _, os_row in candidatos_area.iterrows():
+
+                chave_os = os_row["chave_os"]
+
+                if not chave_os[0] and not chave_os[1]:
+                    continue
+
+                chaves_os_evento.add(
+                    chave_os
+                )
+
+            # ------------------------------------------------
+            # QUANTIDADE
+            # ------------------------------------------------
+
+            quantidade_os = len(
+                chaves_os_evento
+            )
+
+            # ------------------------------------------------
+            # SÓ GERA SE TIVER O.S.
+            # ------------------------------------------------
+
+            if quantidade_os > 0:
+
+                resultado.append(
+                    {
+                        "Quant. de O.S": quantidade_os,
+                        "Cidade": cidade,
+                        "Bairro": area_evento,
+                        "Ano": inicio_evento.year,
+                        "Mês": inicio_evento.month,
+                        "Dia": formatar_periodo_evento(
+                            inicio_evento,
+                            fim_previsto,
+                        ),
+                        "Hora Inicial": (
+                            inicio_evento.strftime("%H:%M")
+                        ),
+                        "Hora Final": (
+                            fim_previsto.strftime("%H:%M")
+                        ),
+                        "Observação": montar_observacao(
+                            descricao
+                        ),
+                    }
+                )
+
+    # ========================================================
+    # RESULTADO FINAL
+    # ========================================================
+
+    resultado = pd.DataFrame(
+        resultado,
+        columns=COLUNAS_LOTE,
+    )
+
+    total_os = (
+        int(resultado["Quant. de O.S"].sum())
+        if not resultado.empty
+        else 0
+    )
+
+    return (
+        resultado,
+        len(df),
+        avisos,
+        total_os,
+    )
+
+
+# ============================================================
+# LIMPEZA EXCLUSIVA DA ANÁLISE DE EVENTOS
+# ============================================================
+
+def limpar_estado_eventos():
+    """
+    Limpa somente o resultado da ferramenta Eventos.
+
+    Não remove:
+        df_api
+        df_the
+        df_eventos
+        demais bases compartilhadas
+    """
+
+    st.session_state["eventos_analisado"] = False
+    st.session_state["eventos_resultado"] = None
+    st.session_state["eventos_avisos"] = []
+    st.session_state["eventos_estatisticas"] = {}
+
+
+# ============================================================
+# RENDERIZAÇÃO
+# ============================================================
+
+def render_eventos():
+
+    aplicar_modo_visual()
+
+    # --------------------------------------------------------
+    # ESTADO DA FERRAMENTA
+    # --------------------------------------------------------
+
+    if "eventos_analisado" not in st.session_state:
+        st.session_state["eventos_analisado"] = False
+
+    if "eventos_resultado" not in st.session_state:
+        st.session_state["eventos_resultado"] = None
+
+    if "eventos_avisos" not in st.session_state:
+        st.session_state["eventos_avisos"] = []
+
+    if "eventos_estatisticas" not in st.session_state:
+        st.session_state["eventos_estatisticas"] = {}
+
+    # --------------------------------------------------------
+    # CABEÇALHO
+    # --------------------------------------------------------
+
+    st.title("📋 Análise de Eventos")
+
+    st.caption(
+        "Cancela O.S. de reclamação abertas durante eventos "
+        "oficiais de falta de água."
+    )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # API / THE
+    # --------------------------------------------------------
+
+    modo, df_backlog = selecionar_modo_api_the(
+        key="eventos_modo"
+    )
+
+    # --------------------------------------------------------
+    # BACKLOG
+    # --------------------------------------------------------
+
+    if df_backlog is None or df_backlog.empty:
+
+        st.warning(
+            f"A base de backlog do modo {modo} ainda não foi "
+            "carregada no Hub."
+        )
+
+        st.info(
+            "Volte ao Hub, carregue a base correspondente e "
+            "acesse novamente esta ferramenta."
+        )
+
+        st.divider()
+
+        if st.button(
+            "⬅️ Voltar ao Hub",
+            use_container_width=True,
+            key="btn_voltar_hub_eventos_sem_backlog",
+        ):
+            st.session_state["ferramenta_atual"] = None
+            limpar_resultado()
+            st.rerun()
+
+        st.stop()
+
+    # --------------------------------------------------------
+    # EVENTOS
+    # --------------------------------------------------------
+
+    if not base_carregada("eventos"):
+
+        st.warning(
+            "A base de Eventos ainda não foi carregada no Hub."
+        )
+
+        st.info(
+            "Volte ao Hub, carregue a planilha de Eventos e "
+            "acesse novamente esta ferramenta."
+        )
+
+        st.divider()
+
+        if st.button(
+            "⬅️ Voltar ao Hub",
+            use_container_width=True,
+            key="btn_voltar_hub_eventos_sem_eventos",
+        ):
+            st.session_state["ferramenta_atual"] = None
+            limpar_resultado()
+            st.rerun()
+
+        st.stop()
+
+    df_eventos = obter_base("eventos")
+
+    # --------------------------------------------------------
+    # BASES
+    # --------------------------------------------------------
+
+    st.markdown("### 📊 Bases utilizadas")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown(
+            f"""
+            <div class="coi-metric">
+                <div class="coi-metric-label">Modo</div>
+                <div class="coi-metric-value">{modo}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col2:
+        st.markdown(
+            f"""
+            <div class="coi-metric">
+                <div class="coi-metric-label">Backlog</div>
+                <div class="coi-metric-value">
+                    {len(df_backlog):,}
+                </div>
+            </div>
+            """.replace(",", "."),
+            unsafe_allow_html=True,
+        )
+
+    with col3:
+        st.markdown(
+            f"""
+            <div class="coi-metric">
+                <div class="coi-metric-label">Eventos</div>
+                <div class="coi-metric-value">
+                    {len(df_eventos):,}
+                </div>
+            </div>
+            """.replace(",", "."),
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # SELEÇÃO DA JANELA DE HORÁRIO
+    # --------------------------------------------------------
+
+    st.markdown("### ⏱️ Janela de horário")
+    regra_janela = st.radio(
+        "Selecione a regra de correspondência entre Eventos e O.S.",
+        options=list(REGRAS_JANELA),
+        format_func=lambda chave: REGRAS_JANELA[chave],
+        key="eventos_regra_janela",
+        horizontal=True,
+        on_change=limpar_estado_eventos,
+    )
+    st.caption(
+        "A regra selecionada vale para todos os eventos desta análise. "
+        "A data/hora considerada na O.S. é o INÍCIO DO SLA."
+    )
+    if regra_janela == "dia_inteiro":
+        st.info(
+            "Dia inteiro: inclui todas as O.S. dos dias abrangidos "
+            "pelo evento, inclusive se o evento atravessar a meia-noite."
+        )
+
+    # --------------------------------------------------------
+    # REGRAS
+    # --------------------------------------------------------
+
+    with st.expander(
+        "ℹ️ Regras aplicadas",
+        expanded=False,
+    ):
+        st.markdown(
+            f"""
+            **Critérios para identificação das O.S.:**
+
+            - A cidade da O.S. deve ser a mesma do evento.
+            - O **INÍCIO DO SLA** da O.S. deve estar na janela escolhida: **{REGRAS_JANELA[regra_janela]}**.
+            - No modo **Dia inteiro**, são considerados todos os dias civis entre o início e o término do evento, inclusive.
+            - O término de referência utiliza primeiro o **Término Real**.
+            - Caso o **Término Real** não esteja disponível, utiliza o **Prev. Término**.
+            - Eventos que abrangem todo o município têm correspondência automática.
+            - Nos demais eventos, o bairro é comparado com as **Áreas Impactadas**.
+            - Qualificadores como **(parcial)**, **(parcialmente)** e **(total)** não são considerados parte do nome do bairro.
+            - A mesma O.S. é contabilizada uma única vez por área do evento.
+            - A coluna **Data** não é utilizada.
+            - O resultado é consolidado por evento e área impactada.
+            - Áreas sem nenhuma O.S. não são incluídas no resultado.
+            """
+        )
+
+    # --------------------------------------------------------
+    # ANÁLISE
+    # --------------------------------------------------------
+
+    st.markdown("### 🔍 Análise")
+
+    if st.button(
+        "🔍 Analisar Eventos",
+        type="primary",
+        use_container_width=True,
+        key="btn_analisar_eventos",
+    ):
+
+        with st.spinner(
+            "Preparando eventos e cruzando com o backlog..."
+        ):
+
+            (
+                eventos_preparados,
+                avisos_eventos,
+                estatisticas_eventos,
+            ) = preparar_eventos(
+                df_eventos,
+                regra_janela=regra_janela,
+            )
+
+            (
+                resultado,
+                total_analisado,
+                avisos_cruzamento,
+                total_resultado,
+            ) = cruzar_eventos_com_backlog(
+                df_eventos=eventos_preparados,
+                df_backlog=df_backlog,
+                modo=modo,
+            )
+
+        st.session_state["eventos_analisado"] = True
+
+        st.session_state["eventos_resultado"] = resultado
+
+        st.session_state["eventos_avisos"] = (
+            avisos_eventos
+            + avisos_cruzamento
+        )
+
+        st.session_state["eventos_estatisticas"] = {
+            "eventos_total": estatisticas_eventos["total"],
+            "eventos_validos": estatisticas_eventos["validos"],
+            "eventos_analisados": estatisticas_eventos["validos"],
+            "registros_analisados": total_analisado,
+            "os_cancelamento": total_resultado,
+            "modo": modo,
+            "regra_janela": regra_janela,
+        }
+
+        st.rerun()
+
+    # --------------------------------------------------------
+    # RESULTADO
+    # --------------------------------------------------------
+
+    if st.session_state.get(
+        "eventos_analisado",
+        False,
+    ):
+
+        resultado = st.session_state.get(
+            "eventos_resultado"
+        )
+
+        estatisticas = st.session_state.get(
+            "eventos_estatisticas",
+            {},
+        )
+
+        avisos = st.session_state.get(
+            "eventos_avisos",
+            [],
+        )
+
+        modo_resultado = estatisticas.get(
+            "modo",
+            modo,
+        )
+
+        # ----------------------------------------------------
+        # PERCENTUAL
+        # ----------------------------------------------------
+
+        analisadas = estatisticas.get(
+            "registros_analisados",
+            0,
+        )
+
+        total_os = estatisticas.get(
+            "os_cancelamento",
+            0,
+        )
+
+        percentual = (
+            total_os / analisadas * 100
+            if analisadas
+            else 0
+        )
+
+        st.divider()
+
+        st.markdown("### 📋 Resultado da análise")
+        st.caption(
+            "Janela aplicada: "
+            + REGRAS_JANELA.get(
+                estatisticas.get("regra_janela", REGRA_PADRAO),
+                REGRAS_JANELA[REGRA_PADRAO],
+            )
+        )
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.markdown(
+                f"""
+                <div class="coi-metric">
+                    <div class="coi-metric-label">
+                        O.S analisadas
+                    </div>
+                    <div class="coi-metric-value">
+                        {estatisticas.get("registros_analisados", 0):,}
+                    </div>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
+
+        with col2:
+            st.markdown(
+                f"""
+                <div class="coi-metric">
+                    <div class="coi-metric-label">
+                        Eventos analisados
+                    </div>
+                    <div class="coi-metric-value">
+                        {estatisticas.get("eventos_analisados", 0):,}
+                    </div>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
+
+        with col3:
+            st.markdown(
+                f"""
+                <div class="coi-metric">
+                    <div class="coi-metric-label">
+                        Total de O.S
+                    </div>
+                    <div class="coi-metric-value">
+                        {estatisticas.get("os_cancelamento", 0):,}
+                    </div>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
+
+        with col4:
+            st.markdown(
+                f"""
+                <div class="coi-metric">
+                    <div class="coi-metric-label">
+                        Percentual
+                    </div>
+                    <div class="coi-metric-value">
+                        {percentual:.1f}%
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ----------------------------------------------------
+        # AVISOS
+        # ----------------------------------------------------
+
+        if avisos:
+
+            st.markdown("### ⚠️ Avisos")
+
+            for aviso in avisos:
+                st.warning(aviso)
+
+        # ----------------------------------------------------
+        # PRÉVIA
+        # ----------------------------------------------------
+
+        st.markdown("### 👁️ Prévia do lote")
+
+        if resultado is None or resultado.empty:
+
+            st.info(
+                "Nenhum evento/área foi identificado para "
+                "composição do resultado."
+            )
+
+        else:
+
+            st.dataframe(
+                resultado,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.divider()
+
+            st.markdown("### 📤 Ações")
+
+            arquivo = dataframe_para_excel(
+                resultado,
+                nome_aba="Eventos",
+            )
+
+            nome_arquivo = (
+                NOME_ARQUIVO_THE
+                if modo_resultado == "THE"
+                else NOME_ARQUIVO_API
+            )
+
+            col_acao_1, col_acao_2 = st.columns(2)
+
+            with col_acao_1:
+
+                st.download_button(
+                    "📥 Baixar lote",
+                    data=(
+                        arquivo
+                        if arquivo is not None
+                        else b""
+                    ),
+                    file_name=nome_arquivo,
+                    mime=(
+                        "application/vnd.openxmlformats-"
+                        "officedocument.spreadsheetml.sheet"
+                    ),
+                    use_container_width=True,
+                    key="btn_baixar_eventos",
+                )
+
+            with col_acao_2:
+
+                if st.button(
+                    "🗑️ Limpar análise",
+                    use_container_width=True,
+                    key="btn_limpar_eventos",
+                ):
+                    limpar_estado_eventos()
+                    st.rerun()
+
+    # --------------------------------------------------------
+    # VOLTAR AO HUB
+    # --------------------------------------------------------
+
+    st.divider()
+
+    if st.button(
+        "⬅️ Voltar ao Hub",
+        use_container_width=True,
+        key="btn_voltar_hub_eventos",
+    ):
+
+        st.session_state["ferramenta_atual"] = None
+
+        limpar_resultado()
+
+        limpar_estado_eventos()
+
+        st.rerun()
