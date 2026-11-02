@@ -1,15 +1,15 @@
 """PRISMA — Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises | Hub Central.
 
-Atualização exclusivamente de apresentação do Hub Central e da tela de login.
-A autenticação, as permissões de auth.py, os identificadores de sessão,
-os caminhos das páginas e as posições dos nove cartões foram preservados.
+Login individual PRISMA, gestão de acessos e interface corporativa.
+Permissões e autenticação centralizadas em auth.py e prisma_backend.py.
 """
 
 from html import escape
 import streamlit as st
 
+from prisma_backend import ErroPRISMA, entrar, cadastrar, confirmar, pedir_recuperacao, mudar_senha_token, configuracao
 from auth import (
-    fazer_login,
+    iniciar_sessao,
     verificar_autenticacao,
     fazer_logout,
     tem_acesso_modulo,
@@ -20,7 +20,7 @@ from auth import (
 # CONFIGURAÇÃO E IDENTIDADE
 # ============================================================
 st.set_page_config(
-    page_title="PRISMA | Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises",
+    page_title="PRISMA | Inteligência Operacional Integrada",
     page_icon="💧",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -189,9 +189,9 @@ def aplicar_estilo_sai(modo_escuro=False):
 # Logotipo construído no próprio Hub (sem dependências ou arquivos externos).
 SIMBOLO_SAI = """
 <svg xmlns="http://www.w3.org/2000/svg" width="43" height="43" viewBox="0 0 64 64" fill="none" aria-hidden="true">
-  <path d="M32 7C23 20 16 28 16 39a16 16 0 0 0 32 0C48 28 41 20 32 7Z" fill="#B3F1F0" opacity=".96"/>
-  <path d="M18 40c6-6 11-6 17-1s10 6 14 3" stroke="#0D6692" stroke-width="4" stroke-linecap="round"/>
-  <path d="M23 48c5-3 10-3 15 0" stroke="#0D6692" stroke-width="3" stroke-linecap="round" opacity=".9"/>
+  <path d="M32 7C23 20 16 28 16 39a16 16 0 0 0 32 0C48 28 41 20 32 7Z" fill="#6AE0CB" opacity=".96"/>
+  <path d="M18 40c6-6 11-6 17-1s10 6 14 3" stroke="#0027BD" stroke-width="4" stroke-linecap="round"/>
+  <path d="M23 48c5-3 10-3 15 0" stroke="#0027BD" stroke-width="3" stroke-linecap="round" opacity=".9"/>
 </svg>
 """
 
@@ -209,7 +209,7 @@ def exibir_cabecalho_sai(*, login=False):
             <div class="sai-emblem">{SIMBOLO_SAI}</div>
             <div>
               <div class="sai-eyebrow">{sobrelinha}</div>
-              <div class="sai-brand-title">SAI <span>Sistema de Análises Integradas</span></div>
+              <div class="sai-brand-title">PRISMA <span>Suporte, Monitoramento e Análises</span></div>
               <div class="sai-brand-subtitle">{subtitulo}</div>
             </div>
           </div>
@@ -224,88 +224,82 @@ def exibir_cabecalho_sai(*, login=False):
 
 
 # ============================================================
-# CREDENCIAIS E SESSÃO — REGRAS ORIGINAIS PRESERVADAS
-# ============================================================
-SENHA_ADMIN = st.secrets.get("SENHA_ADMIN")
-SENHA_USUARIO = st.secrets.get("SENHA_USUARIO")
-SENHA_OPERADOR = st.secrets.get("SENHA_OPERADOR")
-
-for nome_secret, senha in (
-    ("SENHA_ADMIN", SENHA_ADMIN),
-    ("SENHA_USUARIO", SENHA_USUARIO),
-    ("SENHA_OPERADOR", SENHA_OPERADOR),
-):
-    if not senha:
-        st.error(f"A senha {nome_secret} não está configurada nos Secrets.")
-        st.stop()
-
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
-if "usuario_logado" not in st.session_state:
-    st.session_state.usuario_logado = ""
-if "perfil" not in st.session_state:
-    st.session_state.perfil = ""
-if "modulos" not in st.session_state:
-    st.session_state.modulos = []
-
-
-# ============================================================
-# LOGIN — mesma função e mesmos perfis do código original
-# ============================================================
-if not st.session_state.get("autenticado", False):
-    aplicar_estilo_sai()
-    exibir_cabecalho_sai(login=True)
-
-    esq, centro, dir_ = st.columns([1, 1.25, 1], gap="large")
-    with centro:
-        with st.container(border=True, key="sai_login_card"):
-            st.markdown(
-                '<div class="sai-login-title">Bem-vindo ao PRISMA</div>'
-                '<div class="sai-login-caption">Digite sua senha para acessar as ferramentas '
-                'autorizadas para seu perfil.</div>',
-                unsafe_allow_html=True,
-            )
-            with st.form("form_login"):
-                senha_digitada = st.text_input("Senha de Acesso", type="password")
-                botao_login = st.form_submit_button(
-                    "Entrar no PRISMA", type="primary", use_container_width=True
-                )
-                if botao_login:
-                    if senha_digitada == SENHA_ADMIN:
-                        sucesso = fazer_login(usuario="admin", perfil="admin")
-                        if sucesso:
-                            st.success("Login de Administrador realizado com sucesso!")
-                            st.rerun()
-                    elif senha_digitada == SENHA_USUARIO:
-                        sucesso = fazer_login(usuario="usuario", perfil="usuario")
-                        if sucesso:
-                            st.success("Login de Usuário realizado com sucesso!")
-                            st.rerun()
-                    elif senha_digitada == SENHA_OPERADOR:
-                        # Identificador interno preservado: operador = Consulta.
-                        sucesso = fazer_login(usuario="operador", perfil="operador")
-                        if sucesso:
-                            st.success("Login de Consulta realizado com sucesso!")
-                            st.rerun()
-                    else:
-                        st.error("❌ Senha incorreta. Tente novamente.")
-            st.markdown(
-                '<div class="sai-login-small">Acesso restrito a usuários autorizados.</div>',
-                unsafe_allow_html=True,
-            )
-    st.stop()
-
-
-# ============================================================
-# VALIDAÇÃO DA AUTENTICAÇÃO — ORIGINAL
+# IDENTIDADE E AUTENTICAÇÃO INDIVIDUAL PRISMA
 # ============================================================
 if not verificar_autenticacao():
-    st.session_state.autenticado = False
-    st.session_state.usuario_logado = ""
-    st.session_state.perfil = ""
-    st.session_state.modulos = []
-    st.rerun()
-
+    aplicar_estilo_sai()
+    exibir_cabecalho_sai(login=True)
+    esq, centro, direita = st.columns([1, 1.35, 1], gap="large")
+    with centro:
+        with st.container(border=True,key="sai_login_card"):
+            try:
+                configuracao()
+            except ErroPRISMA as erro:
+                st.error(str(erro))
+                st.info("Configure o Supabase e execute o script prisma_setup.sql antes de disponibilizar o cadastro.")
+                st.stop()
+            etapa=st.radio("Acesso",["Entrar","Criar conta","Confirmar e-mail","Recuperar senha"],
+                           horizontal=True,key="prisma_etapa_login")
+            if etapa=="Entrar":
+                st.markdown('<div class="sai-login-title">Acesso individual</div>',unsafe_allow_html=True)
+                with st.form("prisma_entrar"):
+                    email=st.text_input("E-mail corporativo",key="login_email")
+                    senha=st.text_input("Senha",type="password",key="login_senha")
+                    enviar=st.form_submit_button("Entrar no PRISMA",use_container_width=True,type="primary")
+                if enviar:
+                    try:
+                        tokens=entrar(email,senha)
+                        if iniciar_sessao(tokens):st.rerun()
+                        st.warning("E-mail confirmado, mas a conta ainda não foi aprovada ou está bloqueada.")
+                    except ErroPRISMA as erro:st.error(str(erro))
+            elif etapa=="Criar conta":
+                st.markdown("**Primeiro acesso — solicitação de cadastro**")
+                with st.form("prisma_criar"):
+                    nome=st.text_input("Nome completo")
+                    email=st.text_input("E-mail corporativo")
+                    senha=st.text_input("Criar senha (mínimo de 12 caracteres)",type="password")
+                    repetida=st.text_input("Confirmar senha",type="password")
+                    enviar=st.form_submit_button("Enviar código de confirmação",use_container_width=True)
+                if enviar:
+                    if senha!=repetida:st.error("As senhas não coincidem.")
+                    else:
+                        try:
+                            cadastrar(email,senha,nome)
+                            st.success("Se o cadastro for elegível, a confirmação será enviada ao e-mail. Use 'Confirmar e-mail'.")
+                        except ErroPRISMA as erro:st.error(str(erro))
+            elif etapa=="Confirmar e-mail":
+                st.info("Digite o código recebido no e-mail. Depois, aguarde a aprovação administrativa.")
+                with st.form("prisma_confirmar"):
+                    email=st.text_input("E-mail cadastrado")
+                    codigo=st.text_input("Código recebido",max_chars=12)
+                    enviar=st.form_submit_button("Confirmar cadastro",use_container_width=True)
+                if enviar:
+                    try:
+                        confirmar(email,codigo)
+                        st.success("E-mail confirmado! O acesso será liberado após aprovação do administrador.")
+                    except ErroPRISMA as erro:st.error(str(erro))
+            else:
+                st.markdown("**Recuperar senha de acesso**")
+                with st.form("prisma_recuperar"):
+                    email=st.text_input("E-mail cadastrado")
+                    enviar=st.form_submit_button("Enviar código de recuperação",use_container_width=True)
+                if enviar:
+                    try:
+                        pedir_recuperacao(email)
+                        st.success("Se a conta existir, enviaremos as instruções ao e-mail informado.")
+                    except ErroPRISMA as erro:st.error(str(erro))
+                with st.form("prisma_redefinir"):
+                    email_codigo=st.text_input("E-mail para confirmação da recuperação")
+                    codigo=st.text_input("Código de recuperação",max_chars=12)
+                    senha=st.text_input("Nova senha",type="password")
+                    enviar=st.form_submit_button("Definir nova senha",use_container_width=True)
+                if enviar:
+                    try:
+                        t=confirmar(email_codigo,codigo,tipo="recovery")
+                        mudar_senha_token(t["access_token"],senha)
+                        st.success("Senha alterada. Faça login com a nova senha.")
+                    except (ErroPRISMA,KeyError) as erro:st.error(str(erro))
+    st.stop()
 
 # ============================================================
 # HUB CENTRAL — SOMENTE APRESENTAÇÃO RENOVADA
@@ -348,7 +342,7 @@ st.markdown(
 )
 
 # Autorização original: todas as permissões continuam sendo lidas de auth.py.
-acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 8)}
+acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 9)}
 acesso_teste = tem_acesso_modulo("teste")
 
 # A posição e os destinos são os mesmos do Hub anterior.
@@ -358,56 +352,56 @@ MODULOS = [
         "descricao": "Medições e indicadores de pressão para análise operacional.",
         "botao": "Acessar Baixa Pressão", "chave": "acessar_baixa_pressao",
         "pagina": "pages/1_Baixa_Pressao.py", "autorizado": acessos["1"],
-        "visivel": acessos["1"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "2", "titulo": "Mapeamento de Pressão", "icone": "🗺️",
         "descricao": "Cadastro e visualização geográfica das medições de pressão.",
         "botao": "Acessar Mapeamento", "chave": "acessar_mapeamento_pressao",
         "pagina": "pages/2_Mapeamento_Pressao.py", "autorizado": acessos["2"],
-        "visivel": acessos["2"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "3", "titulo": "Farol Operacional", "icone": "🚰",
         "descricao": "Concentrações de O.S., eventos e evidências operacionais.",
         "botao": "Acessar Farol Operacional", "chave": "acessar_farol_operacional",
         "pagina": "pages/3_Farol_Operacional.py", "autorizado": acessos["3"],
-        "visivel": acessos["3"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "4", "titulo": "Ferramentas Operacionais", "icone": "🛠️",
         "descricao": "Gerador de lotes, painéis e cards operacionais.",
         "botao": "Acessar Ferramentas", "chave": "acessar_ferramentas_operacionais",
         "pagina": "pages/4_Ferramentas_Operacionais.py", "autorizado": acessos["4"],
-        "visivel": acessos["4"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "5", "titulo": "Cadastros e Consultas COI", "icone": "📋",
         "descricao": "Referências de bairros, regionais e cadastros operacionais.",
         "botao": "Acessar Cadastros e Consultas", "chave": "acessar_cadastros_consultas",
         "pagina": "pages/5_Cadastros_Consultas_COI.py", "autorizado": acessos["5"],
-        "visivel": acessos["5"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "6", "titulo": "Ferramentas Adicionais", "icone": "🔧",
         "descricao": "Ferramentas para Excel, documentos e cálculos de apoio.",
         "botao": "Acessar Ferramentas Adicionais", "chave": "acessar_ferramentas_adicionais",
         "pagina": "pages/6_Ferramentas_Adicionais.py", "autorizado": acessos["6"],
-        "visivel": acessos["6"] or perfil_consulta,
+        "visivel": True,
     },
     {
         "numero": "7", "titulo": "Relatórios Integrados", "icone": "📊",
         "descricao": "Relatórios de concentrações e monitoramento de pressão.",
         "botao": "Acessar Relatórios Integrados", "chave": "acessar_relatorios_integrados",
         "pagina": "pages/7_Relatorios_Integrados.py", "autorizado": acessos["7"],
-        "visivel": acessos["7"] or perfil_consulta,
+        "visivel": True,
     },
     {
         # Módulo 8 segue acessível a TODOS os usuários autenticados.
         "numero": "8", "titulo": "Consulta Operacional", "icone": "🔎",
         "descricao": "Consulta geográfica de matrículas, ativos e loggers.",
         "botao": "Acessar Consulta Operacional", "chave": "acessar_consulta_operacional",
-        "pagina": "pages/8_Consulta_Operacional.py", "autorizado": True,
+        "pagina": "pages/8_Consulta_Operacional.py", "autorizado": acessos["8"],
         "visivel": True,
     },
     {
@@ -415,7 +409,7 @@ MODULOS = [
         "descricao": "Validação de funcionalidades antes da publicação.",
         "botao": "Acessar Ambiente de Teste", "chave": "acessar_ambiente_teste",
         "pagina": "pages/Ambiente_de_Teste.py", "autorizado": acesso_teste,
-        "visivel": acesso_teste or perfil_consulta,
+        "visivel": True,
     },
 ]
 
@@ -460,6 +454,12 @@ for indice_linha in range(3):
         if modulo["visivel"]:
             with colunas[indice_coluna]:
                 exibir_cartao(modulo)
+
+if tem_acesso_modulo("gestao"):
+    st.divider()
+    st.subheader("🔐 Administração")
+    if st.button("Gestão de Acessos — Usuários e permissões",type="primary",use_container_width=True):
+        st.switch_page("pages/9_Gestao_de_Acessos.py")
 
 st.markdown(
     '<div class="sai-footer">PRISMA — Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises'
