@@ -200,7 +200,7 @@ def exibir_cabecalho_sai(*, login=False):
     sobrelinha = "ACESSO À PLATAFORMA" if login else "INTELIGÊNCIA E CONTROLE OPERACIONAL"
     subtitulo = (
         "Ambiente de acesso seguro aos módulos operacionais."
-        if login else "Monitoramento, análises e ferramentas para apoio à decisão."
+        if login else "Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises"
     )
     st.markdown(
         f"""
@@ -209,7 +209,7 @@ def exibir_cabecalho_sai(*, login=False):
             <div class="sai-emblem">{SIMBOLO_SAI}</div>
             <div>
               <div class="sai-eyebrow">{sobrelinha}</div>
-              <div class="sai-brand-title">PRISMA <span>Suporte, Monitoramento e Análises</span></div>
+              <div class="sai-brand-title">PRISMA</div>
               <div class="sai-brand-subtitle">{subtitulo}</div>
             </div>
           </div>
