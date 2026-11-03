@@ -1167,7 +1167,9 @@ def gerar_lote_cancelamento(
 
         registros.append(
             {
-                "Matricula": matricula,
+                # No lote API, matricula e numerica no Excel.
+                # Preserva integralmente o formato existente do modo THE.
+                "Matricula": int(matricula) if modo == "API" else matricula,
                 "Zona Ligacao": zona,
                 "Numero Do Pedido": (
                     numero_int
