@@ -20,11 +20,37 @@ ACOES = ("visualizar", "criar", "importar", "editar", "excluir", "exportar", "re
 class ErroPRISMA(RuntimeError): pass
 
 def configuracao():
-    campos=("PRISMA_SUPABASE_URL", "PRISMA_SUPABASE_ANON_KEY",
-            "PRISMA_SUPABASE_SERVICE_ROLE_KEY", "PRISMA_ADMIN_EMAIL", "PRISMA_ALLOWED_EMAIL_DOMAINS")
-    faltam=[c for c in campos if not str(st.secrets.get(c, "")).strip()]
-    if faltam: raise ErroPRISMA("Configuração do PRISMA incompleta: " + ", ".join(faltam))
-    return {c: str(st.secrets[c]).strip() for c in campos}
+    """Aceita chaves modernas do Supabase e, transitoriamente, as legadas.
+
+    Ambas são enviadas no cabeçalho apikey. Apenas JWTs legados são usados
+    como Bearer; chaves sb_publishable_ e sb_secret_ não são JWTs.
+    """
+    def obter(*nomes):
+        for nome in nomes:
+            valor = str(st.secrets.get(nome, "")).strip()
+            if valor:
+                return valor
+        return ""
+
+    cfg = {
+        "PRISMA_SUPABASE_URL": obter("PRISMA_SUPABASE_URL"),
+        "PRISMA_SUPABASE_ANON_KEY": obter(
+            "PRISMA_SUPABASE_PUBLISHABLE_KEY", "PRISMA_SUPABASE_ANON_KEY"),
+        "PRISMA_SUPABASE_SERVICE_ROLE_KEY": obter(
+            "PRISMA_SUPABASE_SECRET_KEY", "PRISMA_SUPABASE_SERVICE_ROLE_KEY"),
+        "PRISMA_ADMIN_EMAIL": obter("PRISMA_ADMIN_EMAIL"),
+        "PRISMA_ALLOWED_EMAIL_DOMAINS": obter("PRISMA_ALLOWED_EMAIL_DOMAINS"),
+    }
+    nomes_visiveis = {
+        "PRISMA_SUPABASE_ANON_KEY": "PRISMA_SUPABASE_PUBLISHABLE_KEY",
+        "PRISMA_SUPABASE_SERVICE_ROLE_KEY": "PRISMA_SUPABASE_SECRET_KEY",
+    }
+    faltam = [nomes_visiveis.get(campo, campo) for campo, valor in cfg.items() if not valor]
+    if faltam:
+        raise ErroPRISMA("Configuração do PRISMA incompleta: " + ", ".join(faltam))
+    if not cfg["PRISMA_SUPABASE_URL"].startswith("https://"):
+        raise ErroPRISMA("PRISMA_SUPABASE_URL deve utilizar HTTPS.")
+    return cfg
 
 def dominio_permitido(email):
     cfg=configuracao()
@@ -35,8 +61,14 @@ def dominio_permitido(email):
 def _request(method,path,*, admin=False,bearer=None,payload=None,params=None):
     cfg=configuracao()
     key=cfg["PRISMA_SUPABASE_SERVICE_ROLE_KEY"] if admin else cfg["PRISMA_SUPABASE_ANON_KEY"]
-    cab={"apikey":key, "Authorization":"Bearer "+(bearer or key),"Content-Type":"application/json"}
-    if admin and bearer: raise ErroPRISMA("Chamada administrativa não aceita token do usuário")
+    cab={"apikey": key, "Content-Type": "application/json"}
+    if admin and bearer:
+        raise ErroPRISMA("Chamada administrativa não aceita token do usuário")
+    if bearer:
+        cab["Authorization"] = "Bearer " + bearer
+    elif not key.startswith(("sb_publishable_", "sb_secret_")):
+        # Compatibilidade temporária: as chaves legadas são JWTs.
+        cab["Authorization"] = "Bearer " + key
     try:
         response=requests.request(method,cfg["PRISMA_SUPABASE_URL"].rstrip("/")+path,
                                   headers=cab,json=payload,params=params,timeout=16)
@@ -86,7 +118,9 @@ def mudar_senha_token(access_token,nova_senha):
 def _tabela(tabela,*,method="GET",params=None,payload=None,prefer=None):
     cfg=configuracao()
     key=cfg["PRISMA_SUPABASE_SERVICE_ROLE_KEY"]
-    headers={"apikey":key,"Authorization":"Bearer "+key,"Content-Type":"application/json"}
+    headers={"apikey": key, "Content-Type": "application/json"}
+    if not key.startswith(("sb_publishable_", "sb_secret_")):
+        headers["Authorization"] = "Bearer " + key
     if prefer:headers["Prefer"]=prefer
     try:
         r=requests.request(method,cfg["PRISMA_SUPABASE_URL"].rstrip("/")+"/rest/v1/"+tabela,
