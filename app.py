@@ -447,11 +447,16 @@ if not verificar_autenticacao():
     aplicar_layout_login_prisma()
     if "prisma_etapa_login" not in st.session_state:
         st.session_state["prisma_etapa_login"] = "Entrar"
+    # O formulário somente pode enviar dados quando as credenciais do Supabase
+    # estiverem configuradas. Exibir a causa (apenas nomes das variáveis) evita
+    # que o botão desabilitado pareça ser um erro dos campos preenchidos.
+    mensagem_configuracao = None
     try:
         configuracao()
         login_configurado = True
-    except ErroPRISMA:
+    except ErroPRISMA as erro:
         login_configurado = False
+        mensagem_configuracao = str(erro)
 
     with st.container(key="prisma_login_layout"):
         painel_esquerdo, painel_direito = st.columns([1.1, 1], gap="small")
@@ -477,6 +482,13 @@ if not verificar_autenticacao():
                 st.markdown('<div class="prisma-access-label">ACESSO À PLATAFORMA</div>',
                             unsafe_allow_html=True)
                 etapa = st.session_state["prisma_etapa_login"]
+                if not login_configurado:
+                    st.error(
+                        "**Conexão com o Supabase ainda não configurada.** "
+                        "O botão de envio permanece bloqueado até corrigir o Secrets. "
+                        f"**Detalhe:** {escape(mensagem_configuracao or 'Verifique as configurações do aplicativo.')} "
+                        "Acesse Streamlit → Settings → Secrets, corrija as variáveis e salve."
+                    )
                 if etapa == "Entrar":
                     st.markdown('<div class="prisma-login-heading">Bem-vindo ao PRISMA</div>'
                                 '<div class="prisma-login-hint">Entre com suas credenciais corporativas para continuar.</div>',
@@ -578,11 +590,6 @@ if not verificar_autenticacao():
                     st.button("Voltar ao login", key="prisma_voltar_recuperacao",
                               on_click=definir_etapa_login,args=("Entrar",))
 
-                if not login_configurado:
-                    st.markdown('<div class="prisma-login-status"><strong>Configuração do PRISMA</strong><br>'
-                                'A plataforma está em fase de configuração. O acesso será liberado '
-                                'após conectar o serviço de autenticação.</div>',
-                                unsafe_allow_html=True)
                 st.markdown('<div class="prisma-login-mini-footer">Acesso restrito a usuários autorizados.</div>',
                             unsafe_allow_html=True)
     st.stop()
