@@ -8,7 +8,6 @@ from streamlit_folium import st_folium
 import os
 import simplekml
 from datetime import datetime, date, timedelta
-from streamlit_autorefresh import st_autorefresh
 import io
 import uuid
 from typing import Optional
@@ -2768,12 +2767,8 @@ with st.sidebar:
         value=120
     )
 
-    if intervalo > 0:
-
-        st_autorefresh(
-            interval=intervalo * 1000,
-            key="autorefresh"
-        )
+    # O agendamento nativo é registrado após a sidebar.
+    # 0 = atualização automática desativada.
 
     st.markdown(
         "<br>" * 2,
@@ -2879,6 +2874,42 @@ with st.sidebar:
             """,
             unsafe_allow_html=True,
         )
+
+
+# ============================================================
+# ATUALIZAÇÃO AUTOMÁTICA NATIVA — SEM COMPONENTES EXTERNOS
+# ============================================================
+# O seletor permanece na sidebar com as opções 0/15/30/60/120 s
+# e 120 s como padrão. O fragment funciona como um agendador:
+# na hora programada, atualiza a PÁGINA INTEIRA, evitando que
+# indicadores, filtros, tabela e mapa apresentem dados defasados
+# em relação uns aos outros.
+if intervalo > 0:
+
+    @st.fragment(run_every=intervalo)
+    def bp_atualizacao_programada():
+        agora = time.monotonic()
+        ultimo_intervalo = st.session_state.get("_bp_refresh_intervalo")
+        ultimo_ciclo = st.session_state.get("_bp_refresh_ultimo_ciclo")
+
+        # Primeira execução / alteração de intervalo: programa a próxima
+        # atualização, sem recarregar imediatamente nem entrar em loop.
+        if ultimo_intervalo != intervalo or ultimo_ciclo is None:
+            st.session_state["_bp_refresh_intervalo"] = intervalo
+            st.session_state["_bp_refresh_ultimo_ciclo"] = agora
+            return
+
+        # Pequena tolerância para imprecisões de agendamento do navegador.
+        # Marca o horário ANTES do rerun para prevenir ciclos imediatos.
+        if agora - ultimo_ciclo >= max(0.0, intervalo - 0.5):
+            st.session_state["_bp_refresh_ultimo_ciclo"] = agora
+            st.rerun(scope="app")
+
+    bp_atualizacao_programada()
+else:
+    # Ao selecionar 0, interrompe o agendamento da sessão.
+    st.session_state.pop("_bp_refresh_intervalo", None)
+    st.session_state.pop("_bp_refresh_ultimo_ciclo", None)
 
 
 # ============================================================
