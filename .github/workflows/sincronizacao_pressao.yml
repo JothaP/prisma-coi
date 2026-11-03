@@ -1,0 +1,43 @@
+
+name: PRISMA - Importação Automática de Pressões - Módulo 1
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [sai_arquivo_recebido]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prisma-importacao-medicoes-pressao
+  cancel-in-progress: false
+
+jobs:
+  importar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Baixar código do PRISMA
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-sync-pressao.txt
+
+      - name: Instalar bibliotecas do importador
+        run: python -m pip install -r requirements-sync-pressao.txt
+
+      - name: Importar planilhas brutas
+        env:
+          SAI_GCP_JSON: ${{ secrets.SAI_GCP_JSON }}
+          SAI_SHEET_ID: ${{ secrets.SAI_SHEET_ID }}
+          SAI_DRIVE_FOLDER_ID: ${{ secrets.SAI_DRIVE_FOLDER_ID }}
+          SAI_MAX_FILES_PER_RUN: '20'
+          SAI_MAX_FILE_MB: '20'
+          SAI_DRY_RUN: 'true'
+        run: python sai_sincronizar_pressao.py
