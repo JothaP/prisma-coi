@@ -17,6 +17,10 @@ import time
 import re
 import math
 import unicodedata
+from pathlib import Path
+from html import escape
+from branca.element import Element, MacroElement
+from jinja2 import Template
 
 # ============================================================
 # CONFIGURAÇÃO DA PÁGINA
@@ -63,6 +67,137 @@ if not verificar_autenticacao():
 # ============================================================
 LAT_BASE = -5.0892
 LON_BASE = -42.8019
+
+# Base topográfica Copernicus Global DSM 30 utilizada no Módulo 1.
+# O GeoTIFF é apenas lido: nenhuma medição do Sheets é modificada.
+MP_RAIZ = Path(__file__).resolve().parent
+if MP_RAIZ.name.lower() == "pages":
+    MP_RAIZ = MP_RAIZ.parent
+MP_DEM_CAMINHO = MP_RAIZ / "dados" / "topografia" / "teresina_dem.tif"
+
+# Mesma classificação e mesmas cores dos marcadores do Módulo 1.
+COR_SEM_PRESSAO = "#FF5C60"
+COR_BAIXA_PRESSAO = "#F8DC00"
+COR_EM_ATENCAO = "#FF8FE1"
+COR_ALTA_PRESSAO = "#A11FFF"
+
+
+def mp_classificar_pressao(pressao):
+    valor = float(pressao)
+    if valor == 0:
+        return "Sem Pressão", COR_SEM_PRESSAO
+    if valor <= 5:
+        return "Baixa Pressão", COR_BAIXA_PRESSAO
+    if valor <= 15:
+        return "Em Atenção", COR_EM_ATENCAO
+    return "Alta Pressão", COR_ALTA_PRESSAO
+
+
+def mp_formatar_numero(numero, casas=2):
+    return f"{float(numero):.{casas}f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+@st.cache_data(show_spinner=False, max_entries=12)
+def mp_consultar_cotas(caminho: str, versao: int, coordenadas: tuple) -> tuple:
+    """Amostra a cota do terreno em cada ponto WGS84 a partir do GeoTIFF.
+
+    Fora da cobertura, ou com valores inválidos, retorna None. O DSM representa
+    a superfície do terreno e objetos sobre ela, NÃO a cota da tubulação.
+    """
+    _ = versao
+    if not coordenadas:
+        return ()
+    import numpy as np
+    import rasterio
+    from rasterio.warp import transform
+
+    with rasterio.open(caminho) as terreno:
+        if terreno.crs is None or terreno.count < 1:
+            raise ValueError("Modelo digital de elevação sem referência geográfica válida.")
+        lats = [float(c[0]) for c in coordenadas]
+        lons = [float(c[1]) for c in coordenadas]
+        xs, ys = transform("EPSG:4326", terreno.crs, lons, lats)
+        limites = terreno.bounds
+        indices = [i for i, (x, y) in enumerate(zip(xs, ys))
+                   if math.isfinite(x) and math.isfinite(y)
+                   and limites.left <= x < limites.right
+                   and limites.bottom < y <= limites.top]
+        resultado = [None] * len(coordenadas)
+        amostras = terreno.sample(((xs[i], ys[i]) for i in indices),
+                                 indexes=1, masked=True)
+        for i, amostra in zip(indices, amostras):
+            valor = amostra[0]
+            if np.ma.is_masked(valor):
+                continue
+            cota = float(valor)
+            if not math.isfinite(cota):
+                continue
+            if terreno.nodata is not None and np.isclose(cota, terreno.nodata):
+                continue
+            resultado[i] = cota
+        return tuple(resultado)
+
+
+@st.cache_data(show_spinner=False, max_entries=3)
+def mp_criar_relevo_sombreado(caminho: str, versao: int):
+    """Transforma o DSM local em relevo sombreado transparente para Folium.
+
+    A imagem é gerada em memória e cacheada. O arquivo TIF nunca é exposto
+    como caminho público nem enviado a servidores de mapas de terceiros.
+    """
+    _ = versao
+    import numpy as np
+    import rasterio
+    from rasterio.enums import Resampling
+
+    with rasterio.open(caminho) as terreno:
+        if terreno.crs is None or terreno.count < 1:
+            raise ValueError("O arquivo de topografia não possui georreferenciamento.")
+        if terreno.crs.to_epsg() != 4326:
+            raise ValueError("A camada de visualização exige DEM em EPSG:4326.")
+        escala = min(1.0, 720 / max(terreno.width, terreno.height))
+        largura = max(2, round(terreno.width * escala))
+        altura = max(2, round(terreno.height * escala))
+        grade = terreno.read(
+            1, out_shape=(altura, largura),
+            resampling=Resampling.bilinear, masked=True,
+        )
+        valores = np.asarray(grade.filled(np.nan), dtype=np.float32)
+        validos = np.isfinite(valores) & (~np.ma.getmaskarray(grade))
+        if terreno.nodata is not None:
+            validos &= ~np.isclose(valores, terreno.nodata)
+        if not validos.any():
+            raise ValueError("Modelo digital de elevação sem pixels válidos.")
+        media = float(np.median(valores[validos]))
+        valores = np.where(validos, valores, media)
+
+        bounds = terreno.bounds
+        lat_central = (bounds.bottom + bounds.top) / 2
+        pixel_x_m = max(1, (bounds.right - bounds.left) * 111_320
+                        * math.cos(math.radians(lat_central)) / largura)
+        pixel_y_m = max(1, (bounds.top - bounds.bottom) * 111_320 / altura)
+        # Gradientes em metros para renderizar a iluminação do relevo.
+        grad_y, grad_x = np.gradient(valores, pixel_y_m, pixel_x_m)
+        normalizador = np.sqrt(1.0 + grad_x ** 2 + grad_y ** 2)
+        # Luz vinda de noroeste, com elevação moderada.
+        intensidade = (0.52 * grad_x + 0.52 * grad_y + 0.68) / normalizador
+        intensidade = np.clip(intensidade, -1.0, 1.0)
+        luz = np.clip(0.62 + 0.40 * intensidade, 0.18, 1.0)
+
+        # Escala altimétrica discreta (verde suave para cinza-azulado),
+        # diferenciada das cores vibrantes que identificam pressão.
+        baixo, alto = np.percentile(valores[validos], [5, 95])
+        fracao = np.clip((valores - baixo) / max(float(alto - baixo), 1.0), 0, 1)
+        base_baixa = np.array([172, 204, 181], dtype=np.float32)
+        base_alta = np.array([196, 188, 170], dtype=np.float32)
+        rgb = (base_baixa[None, None, :] * (1 - fracao[:, :, None])
+               + base_alta[None, None, :] * fracao[:, :, None])
+        rgb = np.clip(rgb * luz[:, :, None], 0, 255).astype(np.uint8)
+        alpha = np.where(validos, 210, 0).astype(np.uint8)
+        rgba = np.dstack([rgb, alpha])
+        limites = [[bounds.bottom, bounds.left], [bounds.top, bounds.right]]
+        return rgba, limites
+
 SPREADSHEET_ID = "1idCgabn5g5X48hmdE-gqWfrUKUf2XxWGB5M_yJFk0yM"
 COLUNAS_PADRAO = ["Data", "Município", "Pontos", "Latitude", "Longitude", "MCA", "Observacao"]
 CABECALHO_SHEETS = ["Data", "Município", "Pontos", "Latitude", "Longitude", "MCA", "Observação"]
@@ -1520,7 +1655,7 @@ st.divider()
 # ============================================================
 st.subheader("🗺️ Mapa de Mapeamento de Pressão")
 
-c_map1, c_map2, c_map3 = st.columns([2, 2, 2])
+c_map1, c_map2, c_map3, c_map4 = st.columns([2.5, 1.4, 1.7, 2.4])
 
 with c_map1:
 
@@ -1548,6 +1683,16 @@ with c_map3:
     st.session_state.modo_adicionar_mapa = st.checkbox(
         "📍 Modo adicionar ponto",
         value=st.session_state.modo_adicionar_mapa
+    )
+
+
+with c_map4:
+    mostrar_relevo_dem = st.checkbox(
+        "⛰️ Relevo Copernicus DSM 30",
+        value=True,
+        key="mp_exibir_relevo_dem",
+        help=("Camada de relevo sombreado baseada no GeoTIFF "
+              "dados/topografia/teresina_dem.tif. Não altera medições."),
     )
 
 
@@ -1613,87 +1758,639 @@ else:
     ).add_to(m)
 
 
-if not df_filtrado.empty:
-
-    validos = df_filtrado.dropna(
-        subset=["Latitude", "Longitude"]
-    )
-
-    for _, row in validos.iterrows():
-
-        mca = row["MCA"]
-
-        cor = (
-            "red"
-            if mca == 0
-            else (
-                "orange"
-                if mca <= 5
-                else "blue"
+# Sobreposição topográfica baseada no mesmo Copernicus DSM 30 do Módulo 1.
+# Não depende de internet, além do mapa de fundo escolhido.
+if mostrar_relevo_dem:
+    if not MP_DEM_CAMINHO.is_file():
+        st.warning(
+            "Relevo Copernicus indisponível: adicione "
+            "`dados/topografia/teresina_dem.tif` ao repositório PRISMA."
+        )
+    else:
+        try:
+            mp_imagem_relevo, mp_bounds_relevo = mp_criar_relevo_sombreado(
+                str(MP_DEM_CAMINHO), MP_DEM_CAMINHO.stat().st_mtime_ns
             )
-        )
+            folium.raster_layers.ImageOverlay(
+                image=mp_imagem_relevo,
+                bounds=mp_bounds_relevo,
+                name="Relevo Copernicus Global DSM 30",
+                opacity=0.52,
+                interactive=False,
+                cross_origin=False,
+                zindex=2,
+            ).add_to(m)
+        except (ImportError, OSError, ValueError, TypeError) as mp_erro:
+            st.warning(f"Não foi possível exibir o relevo Copernicus: {mp_erro}")
 
-        popup = (
-            f"<b>Data:</b> {row['Data']}<br>"
-            f"<b>Município:</b> {row['Município']}<br>"
-            f"<b>Ponto:</b> {row['Pontos']}<br>"
-            f"<b>MCA:</b> {mca}<br>"
-            f"<b>Obs:</b> {row['Observacao']}"
-        )
+# ============================================================
+# MARCADORES — MESMO PADRÃO VISUAL DO MÓDULO 1
+# ============================================================
+def gerar_pin_svg(
+    cor: str,
+    tamanho: str = "bairro"
+) -> str:
 
-        marker_icon = folium.Icon(
-            color=cor,
-            icon="map-pin",
-            prefix="fa"
-        )
+    if tamanho == "individual":
 
-        folium.Marker(
-            location=[
-                row["Latitude"],
-                row["Longitude"]
-            ],
-            popup=folium.Popup(
-                popup,
-                max_width=250
+        largura = 34
+        altura = 39
+
+
+    else:
+
+        largura = 40
+        altura = 45
+
+
+    return f"""
+    <svg
+        class="bp-pin-svg"
+        width="{largura}"
+        height="{altura}"
+        viewBox="0 0 40 45"
+        xmlns="http://www.w3.org/2000/svg"
+        style="
+            position:absolute;
+            left:50%;
+            bottom:0;
+            transform:translateX(-50%);
+            overflow:visible;
+            pointer-events:auto;
+            z-index:1100;
+        "
+    >
+
+        <path
+            d="
+                M20 43
+                C18.5 40.8 5 26.2 5 16
+                C5 7.72 11.72 1 20 1
+                C28.28 1 35 7.72 35 16
+                C35 26.2 21.5 40.8 20 43
+                Z
+            "
+            fill="{cor}"
+            stroke="#ffffff"
+            stroke-width="2"
+            stroke-linejoin="round"
+        />
+
+        <circle
+            cx="20"
+            cy="16"
+            r="5"
+            fill="#ffffff"
+        />
+
+    </svg>
+    """
+
+
+
+if not df_filtrado.empty:
+    validos = df_filtrado.dropna(subset=["Latitude", "Longitude"]).copy()
+    # Cotas reais do DSM onde houver cobertura; nenhuma interpolação inventada.
+    cotas_mp = (None,) * len(validos)
+    if not validos.empty and MP_DEM_CAMINHO.is_file():
+        try:
+            coords_mp = tuple(
+                (float(lat), float(lon))
+                for lat, lon in zip(validos["Latitude"], validos["Longitude"])
+            )
+            cotas_mp = mp_consultar_cotas(
+                str(MP_DEM_CAMINHO), MP_DEM_CAMINHO.stat().st_mtime_ns, coords_mp
+            )
+        except (ImportError, OSError, ValueError, TypeError) as mp_erro_cota:
+            st.warning(f"Não foi possível consultar cotas do terreno: {mp_erro_cota}")
+
+    for (_, row), cota in zip(validos.iterrows(), cotas_mp):
+        mca = parse_float(row["MCA"], None)
+        if mca is None or not math.isfinite(mca) or mca < 0:
+            continue
+        classificacao, cor = mp_classificar_pressao(mca)
+        mca_fmt = mp_formatar_numero(mca)
+        ponto = escape(str(row.get("Pontos", "")))
+        municipio = escape(str(row.get("Município", "")))
+        data_medicao = escape(str(row.get("Data", "")))
+        observacao = escape(str(row.get("Observacao", "") or ""))
+        cota_disponivel = cota is not None and math.isfinite(float(cota))
+        cota_fmt = mp_formatar_numero(cota, 1) if cota_disponivel else None
+        texto_cota = f"{cota_fmt} m" if cota_fmt else "Não disponível"
+        observacao_html = (
+            f'<div style="margin-top:10px;color:#475569;font-size:11px">'
+            f'<b>Observação:</b> {observacao}</div>' if observacao else ""
+        )
+        popup = f"""
+        <div style="font-family:Arial,sans-serif;min-width:220px;max-width:300px;color:#1f2937">
+          <div style="font-size:14px;font-weight:800;margin-bottom:5px">{ponto}</div>
+          <div style="font-size:11px;color:#64748b;margin-bottom:8px">
+            {municipio} · {data_medicao}</div>
+          <div style="padding:9px;background:#f8fafc;border-radius:8px;
+                      border-left:4px solid {cor};margin-bottom:8px">
+            <div style="font-size:10px;color:#64748b">PRESSÃO MEDIDA</div>
+            <div style="font-size:19px;font-weight:800">{mca_fmt} MCA</div>
+          </div>
+          <div style="font-size:11px;line-height:1.6;color:#475569">
+            <b>Classificação:</b> {classificacao}<br>
+            <b>Cota da superfície (DSM):</b> {texto_cota}
+          </div>{observacao_html}
+        </div>"""
+        rotulo = ""
+        if mostrar_rotulos:
+            cota_html = (
+                f'<span class="bp-label-elevation" title="Cota da superfície no DSM (não é cota da tubulação)">'
+                f'{texto_cota}</span>' if cota_disponivel else ""
+            )
+            rotulo = f"""
+            <div class="bp-label-card bp-label-card-individual" data-bp-default="top">
+                <div class="bp-label-data">
+                    <span class="bp-label-pressure">{mca_fmt} MCA</span>{cota_html}
+                </div>
+            </div>"""
+        prioridade = 4 if mca == 0 else 3 if mca <= 5 else 2 if mca <= 15 else 1
+        marker_html = f"""
+        <div class="bp-marker-wrapper bp-individual-marker-wrapper"
+             data-bp-priority="{prioridade}"
+             style="--bp-color:{cor};position:relative;width:42px;height:70px;
+                    overflow:visible;font-family:Arial,sans-serif;pointer-events:auto">
+            {gerar_pin_svg(cor, "individual")}{rotulo}
+        </div>"""
+        folium.map.Marker(
+            location=[float(row["Latitude"]), float(row["Longitude"])],
+            icon=folium.DivIcon(
+                html=marker_html,
+                icon_size=(42, 70),
+                icon_anchor=(21, 70),
+                class_name="pressao-individual-marker",
             ),
-            tooltip=f"{row['Pontos']} ({mca} MCA)",
-            icon=marker_icon
+            popup=folium.Popup(popup, max_width=310),
+            tooltip=f"{ponto} | {mca_fmt} MCA | {classificacao}",
         ).add_to(m)
 
-        if mostrar_rotulos:
 
-            texto_rotulo = (
-                f"{row['Pontos']} — {mca} MCA"
-            )
+# ============================================================
+# ESTILO, REPOSICIONAMENTO DE RÓTULOS E LEGENDA (MÓDULO 1)
+# ============================================================
+map_style_html = """
+<style>
 
-            folium.map.Marker(
-                [
-                    row["Latitude"],
-                    row["Longitude"]
-                ],
-                icon=folium.DivIcon(
-                    icon_size=(200, 40),
-                    icon_anchor=(-12, 18),
-                    html=f'''
-                    <div style="
-                        font-family: sans-serif;
-                        font-size: 11px;
-                        font-weight: 600;
-                        color: #1f2937;
-                        background-color: rgba(255, 255, 255, 0.92);
-                        padding: 4px 8px;
-                        border-radius: 6px;
-                        border: 1px solid #cbd5e1;
-                        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                        width: max-content;
-                        white-space: nowrap;
-                    ">
-                        📍 {texto_rotulo}
-                    </div>
-                    '''
-                )
-            ).add_to(m)
+    .leaflet-marker-icon.pressao-bairro-marker,
+    .leaflet-marker-icon.pressao-individual-marker {
 
+        background: transparent !important;
+        border: 0 !important;
+        overflow: visible !important;
+        padding: 0 !important;
+        margin: 0 !important;
+    }
+
+
+    .pressao-bairro-marker .bp-marker-wrapper,
+    .pressao-individual-marker .bp-marker-wrapper {
+
+        position: relative !important;
+        overflow: visible !important;
+        pointer-events: auto !important;
+        font-family: Arial, sans-serif;
+    }
+
+
+    .bp-pin-svg {
+
+        display: block !important;
+        visibility: visible !important;
+        opacity: 1 !important;
+        overflow: visible !important;
+        pointer-events: auto !important;
+    }
+
+
+    .pressao-bairro-marker .bp-pin-svg,
+    .pressao-individual-marker .bp-pin-svg {
+
+        z-index: 1100 !important;
+    }
+
+
+    .bp-label-card {
+
+        position: absolute;
+
+        width: 158px;
+
+        box-sizing: border-box;
+
+        padding: 5px 8px;
+
+        background: rgba(255, 255, 255, 0.97);
+
+        border: 1px solid #d7dee8;
+
+        border-left: 3px solid var(--bp-color, #64748b);
+
+        border-radius: 6px;
+
+        box-shadow:
+            0 2px 8px rgba(15, 23, 42, 0.20);
+
+        color: #111827;
+
+        font-family: Arial, sans-serif;
+
+        display: block;
+
+        opacity: 1;
+
+        visibility: visible;
+
+        z-index: 1000;
+
+        pointer-events: none;
+
+        line-height: 1.1;
+
+        white-space: normal;
+
+        transition:
+            left 0.12s ease,
+            top 0.12s ease,
+            transform 0.12s ease;
+
+        overflow: hidden;
+    }
+
+
+    .bp-marker-wrapper {
+
+        --bp-color: #64748b;
+    }
+
+
+    .bp-label-title {
+
+        font-size: 11px;
+
+        font-weight: 800;
+
+        line-height: 1.15;
+
+        white-space: nowrap;
+
+        overflow: hidden;
+
+        text-overflow: ellipsis;
+
+        color: #111827;
+    }
+
+
+    .bp-label-data {
+
+        display: flex;
+
+        align-items: center;
+
+        gap: 6px;
+
+        margin-top: 4px;
+
+        font-size: 9px;
+
+        line-height: 1.1;
+
+        color: #475569;
+
+        white-space: nowrap;
+    }
+
+
+    .bp-label-pressure {
+
+        font-weight: 800;
+
+        color: #111827;
+    }
+
+
+    .bp-label-separator {
+
+        display: inline-block;
+
+        width: 1px;
+
+        height: 10px;
+
+        background: #cbd5e1;
+
+        flex: 0 0 auto;
+    }
+
+
+    .bp-label-card-individual {
+
+        /* Mesmo cartão de pressão, agora com cota opcional à direita. */
+        width: max-content;
+        min-width: 66px;
+        max-width: 165px;
+
+        padding: 4px 6px 4px 8px;
+        border-radius: 999px;
+
+        /* Rótulos sempre presentes: o JavaScript só ajusta a posição. */
+        visibility: visible;
+        transition: none;
+
+        white-space: nowrap;
+    }
+
+
+    .bp-label-card-individual .bp-label-data {
+
+        font-size: 10px;
+
+        margin-top: 0;
+
+        gap: 6px;
+
+        justify-content: center;
+    }
+
+    .bp-label-elevation {
+        display: inline-block;
+        flex: 0 0 auto;
+        padding: 2px 5px;
+        border: 1px solid #dbe3ee;
+        border-radius: 999px;
+        background: #f1f5f9;
+        font-size: 9px;
+        font-weight: 700;
+        color: #475569;
+        white-space: nowrap;
+    }
+
+
+    .bp-label-card-bairro {
+
+        width: 158px;
+    }
+
+
+    .pressao-bairro-marker .leaflet-tooltip,
+    .pressao-individual-marker .leaflet-tooltip {
+
+        display: none !important;
+    }
+
+</style>
+"""
+
+m.get_root().html.add_child(
+    Element(map_style_html)
+)
+
+
+class ReorganizarRotulosIndividuais(MacroElement):
+    def __init__(self):
+        super().__init__()
+        self._name = "ReorganizarRotulosIndividuais"
+        self._template = Template(r"""
+{% macro script(this, kwargs) %}
+(function() {
+    var mapa = {{this._parent.get_name()}};
+    var temporizador = null;
+
+    // Retângulos em coordenadas da janela (getBoundingClientRect).
+    function retangulo(x, y, largura, altura) {
+        return {left:x, top:y, right:x+largura, bottom:y+altura};
+    }
+
+    function intersecao(a, b) {
+        var w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        var h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        return (w > 0 && h > 0) ? w*h : 0;
+    }
+
+    function pontosCandidatos(pin, largura, altura) {
+        var cx = (pin.left + pin.right) / 2;
+        var cy = (pin.top + pin.bottom) / 2;
+        var w = largura, h = altura;
+        var candidatos = [];
+        var vistos = {};
+
+        function colocar(x, y, afastamento) {
+            var chave = Math.round(x)+":"+Math.round(y);
+            if (vistos[chave]) return;
+            vistos[chave] = true;
+            candidatos.push({rect:retangulo(x,y,w,h), distancia:afastamento});
+        }
+
+        // Primeiras posições: o cartão literalmente TOCA o pin (0 px).
+        // As laterais ficam centralizadas na cabeça da gota.
+        var cyCabeça = pin.top + Math.min(15, (pin.bottom-pin.top)*0.35);
+        var bases = [
+            {x:cx-w/2, y:pin.top-h},
+            {x:pin.right, y:cyCabeça-h/2},
+            {x:pin.left-w, y:cyCabeça-h/2},
+            {x:cx-w/2, y:pin.bottom},
+            {x:pin.right, y:pin.top-h},
+            {x:pin.left-w, y:pin.top-h},
+            {x:pin.right, y:pin.bottom},
+            {x:pin.left-w, y:pin.bottom}
+        ];
+        bases.forEach(function(p) {colocar(p.x,p.y,0);});
+
+        // Mais opções próximas antes de afastar vertical ou horizontalmente.
+        [-26,-13,13,26].forEach(function(dx) {
+            colocar(cx-w/2+dx,pin.top-h,Math.abs(dx));
+            colocar(cx-w/2+dx,pin.bottom,Math.abs(dx));
+        });
+        [-16,16].forEach(function(dy) {
+            colocar(pin.right,cyCabeça-h/2+dy,Math.abs(dy));
+            colocar(pin.left-w,cyCabeça-h/2+dy,Math.abs(dy));
+        });
+
+        // Apenas se necessário: anéis progressivos para regiões congestionadas.
+        [6,12,20,30,44,60,80,105,135].forEach(function(d) {
+            colocar(cx-w/2,pin.top-h-d,d);
+            colocar(pin.right+d,cyCabeça-h/2,d);
+            colocar(pin.left-w-d,cyCabeça-h/2,d);
+            colocar(cx-w/2,pin.bottom+d,d);
+            colocar(pin.right+d,pin.top-h-d,d*1.42);
+            colocar(pin.left-w-d,pin.top-h-d,d*1.42);
+            colocar(pin.right+d,pin.bottom+d,d*1.42);
+            colocar(pin.left-w-d,pin.bottom+d,d*1.42);
+        });
+        return candidatos;
+    }
+
+    function avaliar(item, candidato, itens, pinos, limites) {
+        var r = candidato.rect;
+        var pontuacao = candidato.distancia * 0.65;
+
+        // Evita cartões recortados pelo mapa. Penaliza em vez de ocultar.
+        var sobra = Math.max(0,limites.left+2-r.left) +
+                    Math.max(0,r.right-limites.right+2) +
+                    Math.max(0,limites.top+2-r.top) +
+                    Math.max(0,r.bottom-limites.bottom+2);
+        pontuacao += sobra * 350;
+
+        // Não deixar o próprio cartão encobrir a gota correspondente.
+        pontuacao += intersecao(r,item.pin) * 20;
+
+        // As gotas sempre permanecem no mapa; a rotina evita encobri-las.
+        pinos.forEach(function(p) {
+            if (p.id !== item.id) {
+                pontuacao += intersecao(r,p.rect) * 16;
+            }
+        });
+
+        // Conflito com outros cartões: custo muito maior que afastamento.
+        itens.forEach(function(outro) {
+            if (outro.id !== item.id && outro.posicao) {
+                var sobreposicao = intersecao(r,outro.posicao);
+                if (sobreposicao > 0) pontuacao += 2500 + sobreposicao * 14;
+            }
+        });
+        return pontuacao;
+    }
+
+    function melhorPosicao(item, itens, pinos, limites) {
+        var melhor = null, custoMinimo = Infinity;
+        item.candidatos.forEach(function(candidato) {
+            var custo = avaliar(item,candidato,itens,pinos,limites);
+            if (custo < custoMinimo) {
+                melhor = candidato;
+                custoMinimo = custo;
+            }
+        });
+        return melhor;
+    }
+
+    function reorganizar() {
+        var container = mapa.getContainer();
+        if (!container) return;
+        var limites = container.getBoundingClientRect();
+        var wrappers = container.querySelectorAll(
+            ".pressao-individual-marker .bp-individual-marker-wrapper"
+        );
+        if (!wrappers.length) return;
+
+        var itens = [], pinos = [];
+        wrappers.forEach(function(wrapper, i) {
+            var rotulo = wrapper.querySelector(".bp-label-card-individual");
+            var svg = wrapper.querySelector(".bp-pin-svg");
+            if (!svg || !rotulo) return;
+            var pin = svg.getBoundingClientRect();
+            if (!pin.width || !pin.height) return;
+
+            // Marcadores fora da tela não entram no cálculo; a etiqueta não é
+            // removida, apenas fica naturalmente fora da área visível.
+            if (pin.right < limites.left || pin.left > limites.right ||
+                pin.bottom < limites.top || pin.top > limites.bottom) return;
+
+            rotulo.style.display = "block";
+            rotulo.style.visibility = "hidden"; // apenas durante a medição deste ciclo
+            rotulo.style.transform = "none";
+            var largura = rotulo.offsetWidth;
+            var altura = rotulo.offsetHeight;
+            if (!largura || !altura) {
+                rotulo.style.visibility = "visible";
+                return;
+            }
+
+            var caminho = svg.querySelector("path");
+            var cor = caminho && caminho.getAttribute("fill");
+            if (cor) wrapper.style.setProperty("--bp-color",cor);
+
+            var item = {
+                id:i, wrapper:wrapper, rotulo:rotulo, pin:pin,
+                prioridade:Number(wrapper.getAttribute("data-bp-priority") || 0),
+                posicao:null,
+                candidatos:pontosCandidatos(pin,largura,altura)
+            };
+            itens.push(item);
+            pinos.push({id:i,rect:pin});
+        });
+
+        // Prioridade no desempate para pressão zero, SEM eliminar outros rótulos.
+        itens.sort(function(a,b) {
+            return (b.prioridade - a.prioridade) || (a.id - b.id);
+        });
+
+        // Primeira alocação: procura espaços vazios junto aos respectivos pins.
+        itens.forEach(function(item) {
+            var melhor = melhorPosicao(item,itens,pinos,limites);
+            item.posicao = melhor ? melhor.rect : null;
+        });
+
+        // Reajuste local: permite mover uma etiqueta que bloqueia outras.
+        // Não muda os pins e nunca descarta rótulos.
+        for (var rodada=0; rodada<3; rodada++) {
+            var mudou = false;
+            itens.forEach(function(item) {
+                var anterior = item.posicao;
+                item.posicao = null;
+                var melhor = melhorPosicao(item,itens,pinos,limites);
+                item.posicao = melhor ? melhor.rect : anterior;
+                if (item.posicao && anterior &&
+                    (item.posicao.left !== anterior.left || item.posicao.top !== anterior.top)) {
+                    mudou = true;
+                }
+            });
+            if (!mudou) break;
+        }
+
+        itens.forEach(function(item) {
+            var r = item.posicao;
+            if (r) {
+                var origem = item.wrapper.getBoundingClientRect();
+                item.rotulo.style.left = (r.left-origem.left)+"px";
+                item.rotulo.style.top = (r.top-origem.top)+"px";
+            }
+            // Mesmo em densidade extrema, a etiqueta permanece visível.
+            item.rotulo.style.visibility = "visible";
+        });
+    }
+
+    function agendar() {
+        if (temporizador !== null) clearTimeout(temporizador);
+        temporizador = setTimeout(function() {
+            temporizador = null;
+            requestAnimationFrame(reorganizar);
+        },90);
+    }
+
+    mapa.whenReady(function() {
+        agendar();
+        mapa.on("zoomend moveend resize viewreset",agendar);
+        window.addEventListener("resize",agendar);
+    });
+})();
+{% endmacro %}
+""")
+
+
+if mostrar_rotulos:
+    m.add_child(ReorganizarRotulosIndividuais())
+
+
+legenda_mp = f"""
+<div style="position:fixed;bottom:24px;left:24px;z-index:9999;
+            background:rgba(255,255,255,.95);color:#1f2937;
+            border:1px solid #cbd5e1;border-radius:8px;
+            box-shadow:0 2px 8px rgba(0,0,0,.16);
+            padding:9px 11px;font:11px Arial,sans-serif;line-height:1.6">
+  <div style="font-weight:800;margin-bottom:4px">Pressão medida</div>
+  <div><span style="color:{COR_SEM_PRESSAO}">●</span> Sem Pressão (0 MCA)</div>
+  <div><span style="color:{COR_BAIXA_PRESSAO}">●</span> Baixa Pressão (&gt; 0 a 5)</div>
+  <div><span style="color:{COR_EM_ATENCAO}">●</span> Em Atenção (&gt; 5 a 15)</div>
+  <div><span style="color:{COR_ALTA_PRESSAO}">●</span> Alta Pressão (&gt; 15)</div>
+  <div style="font-size:10px;color:#64748b;margin-top:4px">
+    Relevo: Copernicus DSM 30 (quando ativado)</div>
+</div>
+"""
+m.get_root().html.add_child(Element(legenda_mp))
 
 map_data = st_folium(
     m,
