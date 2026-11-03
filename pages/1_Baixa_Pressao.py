@@ -253,14 +253,24 @@ def bp_carregar_poligonos_sanear(caminho: str, versao: int):
 # ============================================================
 # CLASSIFICAÇÃO E PALETA DE CORES DA PRESSÃO
 # ============================================================
-COR_SEM_PRESSAO = "#FF5C60"
-COR_BAIXA_PRESSAO = "#F8DC00"
-COR_EM_ATENCAO = "#FF8FE1"
-COR_ALTA_PRESSAO = "#A11FFF"
+COR_SEM_PRESSAO = "#FF5C60"       # Vermelho
+COR_BAIXA_PRESSAO = "#F8DC00"     # Amarelo
+COR_EM_ATENCAO = "#FF8FE1"       # Rosa
+COR_NORMAL = "#2563EB"           # Azul
+COR_ALTA_PRESSAO = "#22C55E"     # Verde
+
+# Cinco intervalos mutuamente exclusivos: 5 MCA pertence a Baixa Pressão;
+# 10 MCA pertence a Normal; 15 MCA ainda pertence a Normal.
+BP_FAIXAS_PRESSAO = (
+    "Sem Pressão (0 MCA)",
+    "Baixa Pressão (> 0 e ≤ 5 MCA)",
+    "Em Atenção (> 5 e < 10 MCA)",
+    "Normal (≥ 10 e ≤ 15 MCA)",
+    "Alta Pressão (> 15 MCA)",
+)
 
 
 def classificar_pressao(pressao):
-
     try:
         valor = float(pressao)
     except (TypeError, ValueError):
@@ -268,15 +278,36 @@ def classificar_pressao(pressao):
 
     if valor == 0:
         return "Sem Pressão", COR_SEM_PRESSAO
-
-    elif valor <= 5:
+    if valor <= 5:
         return "Baixa Pressão", COR_BAIXA_PRESSAO
-
-    elif valor <= 15:
+    if valor < 10:
         return "Em Atenção", COR_EM_ATENCAO
+    if valor <= 15:
+        return "Normal", COR_NORMAL
+    return "Alta Pressão", COR_ALTA_PRESSAO
 
-    else:
-        return "Alta Pressão", COR_ALTA_PRESSAO
+
+def bp_filtrar_por_faixas(base: pd.DataFrame, selecionadas) -> pd.DataFrame:
+    """União das faixas selecionadas; sem seleção, exibe todas as medições.
+
+    Não altera os dados originais nem a pressão informada pelo usuário.
+    """
+    if base.empty or not selecionadas:
+        return base
+    p = pd.to_numeric(base["Pressao_MCA"], errors="coerce")
+    mascara = pd.Series(False, index=base.index)
+    faixas = set(selecionadas)
+    if BP_FAIXAS_PRESSAO[0] in faixas:
+        mascara |= p.eq(0)
+    if BP_FAIXAS_PRESSAO[1] in faixas:
+        mascara |= p.gt(0) & p.le(5)
+    if BP_FAIXAS_PRESSAO[2] in faixas:
+        mascara |= p.gt(5) & p.lt(10)
+    if BP_FAIXAS_PRESSAO[3] in faixas:
+        mascara |= p.ge(10) & p.le(15)
+    if BP_FAIXAS_PRESSAO[4] in faixas:
+        mascara |= p.gt(15)
+    return base.loc[mascara].copy()
 
 
 # ============================================================
@@ -2537,24 +2568,18 @@ with st.sidebar:
         key="filtro_matricula"
     )
 
-    # É possível combinar várias faixas simultaneamente. A seleção vazia
-    # corresponde a "Todas", preservando a visualização inicial do módulo.
+    # Filtro geral: afeta indicadores, relatórios, tabela e mapa.
+    # Sem seleção = todas as medições.
     faixas_selecionadas = st.multiselect(
         "Faixas de Pressão",
-        options=[
-            "Sem Pressão (0 MCA)",
-            "Baixa Pressão (> 0 e ≤ 5 MCA)",
-            "Em Atenção (> 5 e ≤ 15 MCA)",
-            "Alta Pressão (> 15 MCA)",
-        ],
+        options=BP_FAIXAS_PRESSAO,
         default=[],
         placeholder="Todas as faixas",
         help=(
-            "Selecione uma ou mais faixas para combinar os resultados. "
-            "Sem seleção, todas as medições são consideradas."
+            "Filtro geral do módulo: indicadores, PDF, tabela e mapa. "
+            "Sem seleção, considera todas as medições."
         ),
-        # Chave nova evita incompatibilidade com o estado antigo do selectbox.
-        key="filtro_faixas_pressao",
+        key="filtro_faixas_pressao_v2",
     )
 
     # ========================================================
@@ -2951,28 +2976,9 @@ if matricula_sel != "Todas":
     ]
 
 
-# Aplica uma união lógica (OU) das faixas escolhidas.
-# Sem seleção, mantém a base inteira, como na opção antiga "Todas".
-if faixas_selecionadas and not df_filtrado.empty:
-    pressao_filtro = pd.to_numeric(
-        df_filtrado["Pressao_MCA"], errors="coerce"
-    )
-    mascara_faixas = pd.Series(False, index=df_filtrado.index)
-
-    if "Sem Pressão (0 MCA)" in faixas_selecionadas:
-        mascara_faixas |= pressao_filtro.eq(0)
-
-    if "Baixa Pressão (> 0 e ≤ 5 MCA)" in faixas_selecionadas:
-        mascara_faixas |= pressao_filtro.gt(0) & pressao_filtro.le(5)
-
-    if "Em Atenção (> 5 e ≤ 15 MCA)" in faixas_selecionadas:
-        mascara_faixas |= pressao_filtro.gt(5) & pressao_filtro.le(15)
-
-    if "Alta Pressão (> 15 MCA)" in faixas_selecionadas:
-        mascara_faixas |= pressao_filtro.gt(15)
-
-    df_filtrado = df_filtrado.loc[mascara_faixas].copy()
-
+# Filtro geral de pressão (união das faixas escolhidas).
+# Sem seleção, mantém todas as medições e todos os demais filtros existentes.
+df_filtrado = bp_filtrar_por_faixas(df_filtrado, faixas_selecionadas)
 
 # ============================================================
 # GERAR PDF A PARTIR DOS MESMOS FILTROS EXIBIDOS NA TELA
@@ -3051,13 +3057,15 @@ if not df_filtrado.empty:
 
     em_atencao = len(
         df_filtrado[
-            (
-                df_filtrado["Pressao_MCA"] > 5
-            )
-            &
-            (
-                df_filtrado["Pressao_MCA"] <= 15
-            )
+            (df_filtrado["Pressao_MCA"] > 5)
+            & (df_filtrado["Pressao_MCA"] < 10)
+        ]
+    )
+
+    normal = len(
+        df_filtrado[
+            (df_filtrado["Pressao_MCA"] >= 10)
+            & (df_filtrado["Pressao_MCA"] <= 15)
         ]
     )
 
@@ -3067,32 +3075,14 @@ if not df_filtrado.empty:
         ]
     )
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-    k1.metric(
-        "Total de Ocorrências",
-        total
-    )
-
-    k2.metric(
-        "Sem Pressão (0 MCA)",
-        sem_pressao
-    )
-
-    k3.metric(
-        "Baixa Pressão (≤ 5 MCA)",
-        baixa_pressao
-    )
-
-    k4.metric(
-        "Em Atenção (> 5 e ≤ 15 MCA)",
-        em_atencao
-    )
-
-    k5.metric(
-        "Alta Pressão (> 15 MCA)",
-        alta_pressao
-    )
+    k1.metric("Total de Ocorrências", total)
+    k2.metric("Sem Pressão (0 MCA)", sem_pressao)
+    k3.metric("Baixa Pressão (> 0 e ≤ 5 MCA)", baixa_pressao)
+    k4.metric("Em Atenção (> 5 e < 10 MCA)", em_atencao)
+    k5.metric("Normal (≥ 10 e ≤ 15 MCA)", normal)
+    k6.metric("Alta Pressão (> 15 MCA)", alta_pressao)
 
 else:
 
@@ -3269,8 +3259,8 @@ st.subheader(
     "🗺️ Mapa de Baixa Pressão"
 )
 
-c_map1, c_map2, c_map3, c_map4 = st.columns(
-    [2, 2.2, 2, 2]
+c_map1, c_map2, c_map_faixas, c_map3, c_map4 = st.columns(
+    [2, 2.2, 2.3, 1.55, 1.15]
 )
 
 
@@ -3304,6 +3294,21 @@ with c_map2:
     )
 
 
+with c_map_faixas:
+    faixas_mapa = st.multiselect(
+        "🎛️ Faixas de pressão",
+        options=BP_FAIXAS_PRESSAO,
+        default=[],
+        placeholder="Todas as faixas",
+        help=(
+            "Selecione uma ou mais faixas para exibir apenas esses pontos "
+            "no mapa. Sem seleção, exibe todas as faixas. "
+            "Os indicadores, a tabela e o PDF não são alterados por este filtro."
+        ),
+        key="bp_faixas_mapa_v1",
+    )
+
+
 with c_map3:
 
     st.checkbox(
@@ -3332,17 +3337,21 @@ with c_map4:
     )
 
 
+# Este segundo filtro é EXCLUSIVO do mapa. O filtro geral da sidebar
+# permanece aplicado ao restante da interface.
+df_mapa = bp_filtrar_por_faixas(df_filtrado, faixas_mapa)
+
 if (
-    not df_filtrado.empty
-    and df_filtrado["Latitude"].notna().any()
+    not df_mapa.empty
+    and df_mapa["Latitude"].notna().any()
 ):
 
     centro_lat = float(
-        df_filtrado["Latitude"].mean()
+        df_mapa["Latitude"].mean()
     )
 
     centro_lon = float(
-        df_filtrado["Longitude"].mean()
+        df_mapa["Longitude"].mean()
     )
 
     zoom = 13
@@ -3512,9 +3521,9 @@ def gerar_pin_svg(
 # ============================================================
 # VISUALIZAÇÃO DOS MARCADORES
 # ============================================================
-if not df_filtrado.empty:
+if not df_mapa.empty:
 
-    validos = df_filtrado.dropna(
+    validos = df_mapa.dropna(
         subset=[
             "Latitude",
             "Longitude"
@@ -3715,7 +3724,7 @@ if not df_filtrado.empty:
                     marker_html = f"""
                     <div
                         class="bp-marker-wrapper bp-individual-marker-wrapper"
-                        data-bp-priority="{4 if pressao == 0 else 3 if pressao <= 5 else 2 if pressao <= 15 else 1}"
+                        data-bp-priority="{5 if pressao == 0 else 4 if pressao <= 5 else 3 if pressao < 10 else 2 if pressao <= 15 else 1}"
                         style="
                             position:relative;
                             width:42px;
@@ -3751,7 +3760,7 @@ if not df_filtrado.empty:
                     marker_html = f"""
                     <div
                         class="bp-marker-wrapper bp-individual-marker-wrapper"
-                        data-bp-priority="{4 if pressao == 0 else 3 if pressao <= 5 else 2 if pressao <= 15 else 1}"
+                        data-bp-priority="{5 if pressao == 0 else 4 if pressao <= 5 else 3 if pressao < 10 else 2 if pressao <= 15 else 1}"
                         style="
                             position:relative;
                             width:42px;
@@ -4643,7 +4652,7 @@ legend_html = f"""
     font-family: Arial, sans-serif;
     font-size: 10px;
     line-height: 1.35;
-    width: 176px;
+    width: 194px;
     color: #1f2937;
 ">
 
@@ -4700,7 +4709,23 @@ legend_html = f"""
             vertical-align:middle;
         "></span>
 
-        Em Atenção (&gt; 5 e ≤ 15 MCA)
+        Em Atenção (&gt; 5 e &lt; 10 MCA)
+    </div>
+
+    <div style="
+        white-space: nowrap;
+    ">
+        <span style="
+            display:inline-block;
+            width:9px;
+            height:9px;
+            border-radius:50%;
+            background:{COR_NORMAL};
+            margin-right:5px;
+            vertical-align:middle;
+        "></span>
+
+        Normal (≥ 10 e ≤ 15 MCA)
     </div>
 
     <div style="
@@ -4994,12 +5019,19 @@ if not df_all.empty:
                     )
 
                     fig.add_hline(
+                        y=10,
+                        line_dash="dash",
+                        line_color=COR_NORMAL,
+                        annotation_text="Normal a partir de 10 MCA",
+                        annotation_position="top left"
+                    )
+
+                    fig.add_hline(
                         y=15,
                         line_dash="dash",
                         line_color=COR_ALTA_PRESSAO,
                         annotation_text=(
-                            "Limite: "
-                            "Alta Pressão (15 MCA)"
+                            "Limite superior da faixa normal (15 MCA)"
                         ),
                         annotation_position="top left"
                     )
