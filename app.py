@@ -335,6 +335,33 @@ def aplicar_layout_login_prisma():
     [class*="st-key-prisma_login_right"] [data-testid="stForm"] {
         border:0 !important; padding:0 !important; background:transparent;
     }
+    /* A cor herdada pelo Streamlit estava deixando os rótulos brancos
+       sobre o painel branco. Forçamos contraste apenas no login PRISMA. */
+    [class*="st-key-prisma_login_right"] [data-testid="stWidgetLabel"],
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] label {
+        color:#24354e !important;
+        -webkit-text-fill-color:#24354e !important;
+        opacity:1 !important;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stWidgetLabel"] p,
+    [class*="st-key-prisma_login_right"] [data-testid="stWidgetLabel"] span,
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] label p,
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] label span {
+        color:#24354e !important;
+        -webkit-text-fill-color:#24354e !important;
+        opacity:1 !important;
+        font-size:0.91rem !important;
+        font-weight:650 !important;
+        line-height:1.45 !important;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] {
+        margin-bottom:0.14rem;
+    }
+    [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] input::placeholder {
+        color:#68778a !important;
+        -webkit-text-fill-color:#68778a !important;
+        opacity:1 !important;
+    }
     [class*="st-key-prisma_login_right"] [data-testid="stTextInput"] input {
         min-height:44px;
         border-radius:11px;
