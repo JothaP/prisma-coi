@@ -1848,8 +1848,43 @@ def gerar_pin_svg(
 
 
 
+def mp_preparar_marcadores_sem_duplicatas(df_mapa: pd.DataFrame) -> pd.DataFrame:
+    """Exibe um só pin/rótulo por localização + pressão visualmente iguais.
+
+    O mapa de um período pode conter várias linhas para a mesma medição,
+    inclusive em datas diferentes. Esses registros não devem produzir dois
+    cartões idênticos sobre a mesma gota. Esta consolidação é EXCLUSIVA do
+    mapa: nenhum registro do Google Sheets, indicadores ou tabelas é alterado.
+
+    Coordenadas a 6 casas (~0,11 m) e MCA a 2 casas (precisão do rótulo).
+    Leituras de valores diferentes permanecem como marcadores distintos.
+    """
+    if df_mapa.empty:
+        return df_mapa.copy()
+
+    base = df_mapa.dropna(subset=["Latitude", "Longitude", "MCA"]).copy()
+    if base.empty:
+        return base
+    base["_mp_mca_num"] = pd.to_numeric(base["MCA"], errors="coerce")
+    base = base[base["_mp_mca_num"].map(math.isfinite) & (base["_mp_mca_num"] >= 0)].copy()
+    if base.empty:
+        return base
+
+    base["_mp_chave_marcador"] = list(zip(
+        base["Latitude"].astype(float).round(6),
+        base["Longitude"].astype(float).round(6),
+        base["_mp_mca_num"].round(2),
+    ))
+    contagens = base.groupby("_mp_chave_marcador", sort=False).size()
+    representantes = base.drop_duplicates(subset=["_mp_chave_marcador"], keep="first").copy()
+    representantes["_mp_registros_coincidentes"] = (
+        representantes["_mp_chave_marcador"].map(contagens).astype(int)
+    )
+    return representantes
+
+
 if not df_filtrado.empty:
-    validos = df_filtrado.dropna(subset=["Latitude", "Longitude"]).copy()
+    validos = mp_preparar_marcadores_sem_duplicatas(df_filtrado)
     # Cotas reais do DSM onde houver cobertura; nenhuma interpolação inventada.
     cotas_mp = (None,) * len(validos)
     if not validos.empty and MP_DEM_CAMINHO.is_file():
@@ -1881,6 +1916,15 @@ if not df_filtrado.empty:
             f'<div style="margin-top:10px;color:#475569;font-size:11px">'
             f'<b>Observação:</b> {observacao}</div>' if observacao else ""
         )
+        qtd_coincidentes = int(row.get("_mp_registros_coincidentes", 1))
+        info_coincidentes = (
+            f'<div style="margin-top:9px;padding:7px 9px;background:#eff6ff;'
+            f'border-radius:6px;color:#1e40af;font-size:11px">'
+            f'{qtd_coincidentes} registros com a mesma localização e pressão '
+            f'estão representados por um único marcador. Os dados originais '
+            f'continuam disponíveis na tabela.</div>'
+            if qtd_coincidentes > 1 else ""
+        )
         popup = f"""
         <div style="font-family:Arial,sans-serif;min-width:220px;max-width:300px;color:#1f2937">
           <div style="font-size:14px;font-weight:800;margin-bottom:5px">{ponto}</div>
@@ -1894,7 +1938,7 @@ if not df_filtrado.empty:
           <div style="font-size:11px;line-height:1.6;color:#475569">
             <b>Classificação:</b> {classificacao}<br>
             <b>Cota da superfície (DSM):</b> {texto_cota}
-          </div>{observacao_html}
+          </div>{observacao_html}{info_coincidentes}
         </div>"""
         rotulo = ""
         if mostrar_rotulos:
