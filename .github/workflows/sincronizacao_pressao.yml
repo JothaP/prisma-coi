@@ -39,5 +39,5 @@ jobs:
           SAI_DRIVE_FOLDER_ID: ${{ secrets.SAI_DRIVE_FOLDER_ID }}
           SAI_MAX_FILES_PER_RUN: '20'
           SAI_MAX_FILE_MB: '20'
-          SAI_DRY_RUN: 'true'
+          SAI_DRY_RUN: 'false'
         run: python sai_sincronizar_pressao.py
