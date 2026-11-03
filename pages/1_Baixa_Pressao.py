@@ -2740,7 +2740,7 @@ with st.sidebar:
             60,
             120
         ],
-        value=30
+        value=120
     )
 
     if intervalo > 0:
@@ -3197,6 +3197,7 @@ with c_map2:
             "Por bairro",
             "Medições individuais"
         ],
+        index=1,  # Abertura padrão: exibir as medições individuais no mapa.
         key="modo_visualizacao_mapa_bp",
         help=(
             "Por bairro mostra uma visão gerencial consolidada. "
