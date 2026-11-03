@@ -1,36 +1,38 @@
-streamlit
-gspread
-google-auth
-pandas
-folium
-streamlit-folium
-simplekml
+# PRISMA — dependencias da aplicacao Streamlit
+# Interface e componente de mapas com versoes fixas para evitar atualizacoes inesperadas.
+streamlit==1.66.1
+streamlit-folium==0.27.4
 streamlit-autorefresh
 streamlit-cookies-controller
-plotly
-openpyxl
-matplotlib
-pillow
-numpy
-pyxlsb
-xlrd
-reportlab
+
+# Mapas e geoprocessamento
+folium
+branca
+jinja2
+simplekml
 shapely
 pyproj
-playwright
-fpdf2
-xlrd>=2.0.1
-python-docx>=1.1.0
-lxml>=4.9
-streamlit>=1.59.0
-Pillow>=10.0
 rasterio
-pyproj
+
+# Dados, Google Sheets e integracoes
 pandas>=2.2,<3
-openpyxl>=3.1,<4
+numpy
 requests>=2.32,<3
 gspread>=6,<7
 google-auth>=2.35,<3
 google-api-python-client>=2.150,<3
 
-requests>=2.32,<3
+# Planilhas e documentos
+openpyxl>=3.1,<4
+pyxlsb
+xlrd>=2.0.1
+python-docx>=1.1.0
+lxml>=4.9
+reportlab
+fpdf2
+
+# Graficos, imagens e exportacao
+plotly
+matplotlib
+Pillow>=10.0
+playwright
