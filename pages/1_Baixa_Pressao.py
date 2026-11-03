@@ -3110,14 +3110,75 @@ st.divider()
 # ============================================================
 # COTAS DO TERRENO NOS RÓTULOS DAS MEDIÇÕES INDIVIDUAIS
 # ============================================================
-# A superfície topográfica já versionada no SAI é usada exclusivamente
-# para consultar a cota do terreno no ponto de cada medição. Não alteramos
-# pressão, posição dos pinos, classes, cores ou informações do Google Sheets.
-# Cota do DSM/MDE não é a cota da tubulação nem pressão piezométrica.
-BP_DEM_CAMINHO = BP_RAIZ_SAI / "dados" / "topografia" / "teresina_dem.tif"
+# Descoberta automática de TODOS os GeoTIFFs em dados/topografia, inclusive
+# subpastas. A cobertura é identificada pelas coordenadas e pelo CRS real
+# de cada raster — nunca pelo nome do arquivo ou do município.
+# Sem cobertura/valor válido, omite a cota; não inventa valores.
+# A cota DSM/MDE é da superfície, não da rede de distribuição.
+BP_DEM_DIRETORIO = BP_RAIZ_SAI / "dados" / "topografia"
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
+@st.cache_data(show_spinner=False, max_entries=128)
+def bp_dem_limites_geograficos(caminho: str, versao: int, tamanho: int) -> tuple:
+    """Obtém limites WGS84 uma vez por versão de um GeoTIFF georreferenciado.
+
+    Alterações no arquivo invalidam o cache por mtime_ns e tamanho.
+    """
+    _ = (versao, tamanho)
+    import rasterio
+    from rasterio.warp import transform_bounds
+
+    with rasterio.open(caminho) as origem:
+        if origem.crs is None or origem.count < 1:
+            raise ValueError("GeoTIFF sem sistema de coordenadas ou banda válida")
+        limites = transform_bounds(
+            origem.crs, "EPSG:4326", *origem.bounds, densify_pts=21
+        )
+        if (not all(math.isfinite(float(v)) for v in limites)
+                or limites[0] >= limites[2] or limites[1] >= limites[3]):
+            raise ValueError("Limites geográficos inválidos no GeoTIFF")
+        return tuple(float(v) for v in limites)  # oeste, sul, leste, norte
+
+
+def bp_catalogo_topografia() -> tuple:
+    """Descobre GeoTIFFs a cada execução; metadados válidos ficam em cache.
+
+    Arquivos de menor cobertura são consultados primeiro em sobreposições;
+    um raster maior pode complementar pixels sem dados (NoData).
+    Retorna (catálogo, alertas) sem impedir que o mapa seja exibido.
+    """
+    if not BP_DEM_DIRETORIO.is_dir():
+        return (), ()
+
+    arquivos = sorted(
+        (arquivo for arquivo in BP_DEM_DIRETORIO.rglob("*")
+         if arquivo.is_file() and arquivo.suffix.lower() in (".tif", ".tiff")),
+        key=lambda arquivo: str(arquivo).casefold(),
+    )
+    catalogo = []
+    alertas = []
+    for arquivo in arquivos:
+        try:
+            stat = arquivo.stat()
+            oeste, sul, leste, norte = bp_dem_limites_geograficos(
+                str(arquivo), stat.st_mtime_ns, stat.st_size
+            )
+            catalogo.append((
+                str(arquivo), stat.st_mtime_ns, stat.st_size,
+                oeste, sul, leste, norte,
+            ))
+        except (OSError, ValueError, TypeError, RuntimeError, ImportError) as erro:
+            alertas.append(f"{arquivo.name}: {erro}")
+
+    # Prefere recortes de maior detalhe espacial, preservando ordenação
+    # determinística se dois arquivos cobrirem áreas do mesmo tamanho.
+    catalogo.sort(key=lambda x: (
+        (x[5] - x[3]) * (x[6] - x[4]), x[0].casefold()
+    ))
+    return tuple(catalogo), tuple(alertas)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
 def bp_cotas_terreno(caminho: str, versao: int, coordenadas: tuple) -> tuple:
     """Amostra cotas do GeoTIFF em lote, retornando None quando não houver valor.
 
@@ -3162,6 +3223,43 @@ def bp_cotas_terreno(caminho: str, versao: int, coordenadas: tuple) -> tuple:
                 continue
             resultado[indice] = cota
         return tuple(resultado)
+
+
+def bp_cotas_automaticas(coordenadas: tuple) -> tuple:
+    """Consulta em lote o GeoTIFF que cobre cada (latitude, longitude).
+
+    O catálogo é refeito a cada rerun (novos arquivos são detectados sem
+    alterações no código). Só abre rasters com pontos dentro dos seus limites.
+    Em áreas sobrepostas, um pixel NoData permite tentar o próximo arquivo.
+    """
+    catalogo, alertas_catalogo = bp_catalogo_topografia()
+    if not coordenadas or not catalogo:
+        return (None,) * len(coordenadas), alertas_catalogo
+
+    cotas = [None] * len(coordenadas)
+    alertas = list(alertas_catalogo)
+    for caminho, versao, _tamanho, oeste, sul, leste, norte in catalogo:
+        pendentes = [
+            i for i, (lat, lon) in enumerate(coordenadas)
+            if cotas[i] is None
+            and math.isfinite(lat) and math.isfinite(lon)
+            and oeste <= lon <= leste and sul <= lat <= norte
+        ]
+        if not pendentes:
+            continue
+        amostras_coords = tuple(coordenadas[i] for i in pendentes)
+        try:
+            amostras = bp_cotas_terreno(caminho, versao, amostras_coords)
+        except (OSError, ValueError, TypeError, RuntimeError, ImportError) as erro:
+            alertas.append(f"{Path(caminho).name}: {erro}")
+            continue
+        for indice, valor in zip(pendentes, amostras):
+            if valor is not None and math.isfinite(float(valor)):
+                cotas[indice] = float(valor)
+
+        if all(cota is not None for cota in cotas):
+            break
+    return tuple(cotas), tuple(alertas)
 
 
 # ============================================================
@@ -3460,17 +3558,20 @@ if not df_filtrado.empty:
             # medições ou pela média de um bairro. Sem DEM/cobertura, deixa
             # apenas a pressão no rótulo, sem inventar altitude.
             bp_cotas_individuais = (None,) * len(validos)
-            if mostrar_rotulos and BP_DEM_CAMINHO.is_file():
+            if mostrar_rotulos:
                 try:
                     bp_coords = tuple(
                         (float(lat), float(lon))
                         for lat, lon in zip(validos["Latitude"], validos["Longitude"])
                     )
-                    bp_cotas_individuais = bp_cotas_terreno(
-                        str(BP_DEM_CAMINHO), BP_DEM_CAMINHO.stat().st_mtime_ns,
-                        bp_coords,
-                    )
-                except (OSError, ValueError, TypeError, ImportError) as bp_erro_cota:
+                    bp_cotas_individuais, bp_alertas_dem = bp_cotas_automaticas(bp_coords)
+                    if bp_alertas_dem:
+                        st.warning(
+                            "Alguns arquivos topográficos não puderam ser utilizados: "
+                            + "; ".join(bp_alertas_dem[:3])
+                            + (f" (e mais {len(bp_alertas_dem)-3})" if len(bp_alertas_dem)>3 else "")
+                        )
+                except (OSError, ValueError, TypeError, RuntimeError, ImportError) as bp_erro_cota:
                     st.warning(f"Cota do terreno indisponível nos rótulos: {bp_erro_cota}")
 
             for (_, registro), bp_cota in zip(validos.iterrows(), bp_cotas_individuais):
