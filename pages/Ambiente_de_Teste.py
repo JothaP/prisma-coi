@@ -6,6 +6,13 @@ O sistema persiste projetos exclusivamente por download/upload .prismageo.
 from __future__ import annotations
 
 import csv
+import hashlib
+import os
+import tempfile
+import threading
+import unicodedata
+
+import pandas as pd
 import io
 import json
 import math
@@ -34,6 +41,15 @@ MAX_UPLOAD = 15 * 1024 * 1024
 MAX_PROJECT = 24 * 1024 * 1024
 MAX_FEATURES = 4000
 HOME = [-42.8019, -5.0892]
+
+# Usa a mesma base do Módulo 8; o índice de matrículas é temporário e local.
+# Nenhum banco de projetos é criado e a base original permanece intacta.
+PASTA_DADOS = ROOT / "dados"
+COLUNAS_MATRICULAS = (
+    "CATEGORIA", "NUM_LIGACAO", "BAIRRO",
+    "COD_LATITUDE", "COD_LONGITUDE", "END_LIGACAO",
+)
+_BLOQUEIO_INDICE = threading.Lock()
 
 
 def novo_projeto(nome="Meu mapa"):
@@ -230,43 +246,292 @@ def abrir_projeto(dados):
     return projeto
 
 
+def _normalizar_texto(valor: object) -> str:
+    texto = unicodedata.normalize("NFKD", str(valor if valor is not None else "").strip().upper())
+    return "".join(c for c in texto if not unicodedata.combining(c))
+
+
+def _normalizar_cabecalho(valor: object) -> str:
+    return re.sub(r"[^A-Z0-9]", "", _normalizar_texto(valor))
+
+
+def _matricula(valor: object) -> str:
+    """Não remove zeros à esquerda que estejam armazenados como texto."""
+    valor = str(valor if valor is not None else "").strip()
+    if re.fullmatch(r"\d+\.0+", valor):
+        return valor.split(".", 1)[0]
+    return valor
+
+
+def _coordenada(valor: object, tipo: str) -> float | None:
+    if valor is None or pd.isna(valor):
+        return None
+    bruto = str(valor).strip().replace(" ", "")
+    if not bruto:
+        return None
+    if "," in bruto and "." in bruto:
+        bruto = (bruto.replace(".", "").replace(",", ".")
+                 if bruto.rfind(",") > bruto.rfind(".") else bruto.replace(",", ""))
+    else:
+        bruto = bruto.replace(",", ".")
+    try:
+        numero = float(bruto)
+    except (ValueError, TypeError, OverflowError):
+        return None
+    if not math.isfinite(numero) or numero == 0:
+        return None
+    if tipo == "lat" and not -90 <= numero <= 90:
+        return None
+    if tipo == "lon" and not -180 <= numero <= 180:
+        return None
+    return numero
+
+
+def _assinatura(caminho: Path) -> tuple[str, int, int]:
+    info = caminho.stat()
+    return str(caminho), info.st_size, info.st_mtime_ns
+
+
+def _arquivo_matriculas() -> Path | None:
+    if not PASTA_DADOS.is_dir():
+        return None
+    arquivos = {p.name.lower(): p for p in PASTA_DADOS.iterdir() if p.is_file()}
+    return arquivos.get("matriculas.xls") or arquivos.get("matriculas.xlsx")
+
+
+def _arquivo_sqlite_publicado() -> Path | None:
+    """Arquivo indexado opcional previamente produzido pelo conversor."""
+    if not PASTA_DADOS.is_dir():
+        return None
+    arquivos = {p.name.lower(): p for p in PASTA_DADOS.iterdir() if p.is_file()}
+    return arquivos.get("matriculas.sqlite") or arquivos.get("matriculas.db")
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _resumo_hash(assinatura: tuple[str, int, int]) -> str:
+    """Hash de leitura sequencial, sem interpretar planilha nem carregar tudo na RAM."""
+    h = hashlib.sha256()
+    with open(assinatura[0], "rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(2 * 1024 * 1024), b""):
+            h.update(bloco)
+    return h.hexdigest()
+
+
+def _conexao_leitura(db: Path):
+    """Abre o SQLite SEM permitir gravação pelo mecanismo de consulta."""
+    return sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
+
+
+def _metadados_indice(db: Path) -> dict[str, str] | None:
+    try:
+        with _conexao_leitura(db) as con:
+            meta = dict(con.execute("SELECT chave, valor FROM metadados"))
+            # Evita considerar um arquivo incompleto como base válida.
+            con.execute("SELECT NUM_LIGACAO FROM matriculas LIMIT 1").fetchone()
+            return meta if meta.get("versao") == "3" else None
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+
+
+def _linhas_excel(caminho: Path):
+    """Percorre TODAS as abas com cabeçalho esperado sem montar um DataFrame gigante.
+
+    Detecta o formato real pelo cabeçalho do arquivo, inclusive arquivo XLSX
+    indevidamente nomeado .xls. Um .xls antigo suporta no máximo 65.536 linhas por aba.
+    """
+    with caminho.open("rb") as f:
+        assinatura = f.read(8)
+    if assinatura.startswith(b"PK"):
+        try:
+            from openpyxl import load_workbook
+        except ImportError as e:
+            raise RuntimeError("Adicione openpyxl ao requirements.txt.") from e
+        # Arquivo binário, não caminho: aceita conteúdo XLSX mesmo se nomeado .xls.
+        entrada = caminho.open("rb")
+        try:
+            workbook = load_workbook(entrada, read_only=True, data_only=True)
+            for aba in workbook.worksheets:
+                linhas = aba.iter_rows(values_only=True)
+                cabecalho = next(linhas, None)
+                if cabecalho is None:
+                    continue
+                campos = {_normalizar_cabecalho(v): i for i, v in enumerate(cabecalho)}
+                if any(_normalizar_cabecalho(c) not in campos for c in COLUNAS_MATRICULAS):
+                    continue
+                indices = [campos[_normalizar_cabecalho(c)] for c in COLUNAS_MATRICULAS]
+                yield aba.title, (tuple((linha[i] if i < len(linha) and linha[i] is not None else "")
+                                      for i in indices) for linha in linhas)
+        finally:
+            if "workbook" in locals():
+                workbook.close()
+            entrada.close()
+    elif assinatura.startswith(b"\xd0\xcf\x11\xe0"):
+        try:
+            import xlrd
+        except ImportError as e:
+            raise RuntimeError("Adicione xlrd>=2.0.1 ao requirements.txt para ler .xls.") from e
+        workbook = xlrd.open_workbook(str(caminho), on_demand=True)
+        try:
+            for aba in workbook.sheets():
+                if aba.nrows < 1:
+                    continue
+                campos = {_normalizar_cabecalho(v): i for i, v in enumerate(aba.row_values(0))}
+                if any(_normalizar_cabecalho(c) not in campos for c in COLUNAS_MATRICULAS):
+                    continue
+                indices = [campos[_normalizar_cabecalho(c)] for c in COLUNAS_MATRICULAS]
+                def obter(worksheet=aba, cols=indices):
+                    for r in range(1, worksheet.nrows):
+                        yield tuple(worksheet.cell_value(r, i) if i < worksheet.ncols else "" for i in cols)
+                yield aba.name, obter()
+        finally:
+            workbook.release_resources()
+    else:
+        raise ValueError("Formato Excel desconhecido. Envie uma planilha .xls ou .xlsx válida.")
+
+
+def _texto_celula(valor: object) -> str:
+    if valor is None:
+        return ""
+    if isinstance(valor, float) and valor.is_integer():
+        return str(int(valor))
+    return str(valor).strip()
+
+
+def _construir_indice_excel(excel: Path, destino: Path, digest: str) -> int:
+    """Índice local descartável. Nunca grava sobre o Excel nem sobre base existente."""
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    temporario = destino.with_name(destino.name + "." + uuid.uuid4().hex + ".tmp")
+    total = 0
+    abas_validas = 0
+    try:
+        os.close(os.open(temporario, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        con = sqlite3.connect(temporario)
+        try:
+            con.execute("PRAGMA journal_mode=OFF")
+            con.execute("PRAGMA synchronous=OFF")
+            con.execute("CREATE TABLE matriculas ("
+                        "CATEGORIA TEXT, NUM_LIGACAO TEXT NOT NULL, BAIRRO TEXT, "
+                        "COD_LATITUDE TEXT, COD_LONGITUDE TEXT, END_LIGACAO TEXT)")
+            con.execute("CREATE TABLE metadados (chave TEXT PRIMARY KEY, valor TEXT)")
+            lote = []
+            for nome_aba, linhas in _linhas_excel(excel):
+                abas_validas += 1
+                for linha in linhas:
+                    valores = [_texto_celula(c) for c in linha]
+                    valores[1] = _matricula(valores[1])
+                    if not valores[1]:
+                        continue
+                    lote.append(valores)
+                    if len(lote) >= 5000:
+                        con.executemany("INSERT INTO matriculas VALUES (?,?,?,?,?,?)", lote)
+                        total += len(lote)
+                        lote.clear()
+                if lote:
+                    con.executemany("INSERT INTO matriculas VALUES (?,?,?,?,?,?)", lote)
+                    total += len(lote)
+                    lote.clear()
+            if not abas_validas:
+                raise ValueError("Nenhuma aba tem as seis colunas esperadas do cadastro de matrículas.")
+            con.execute("CREATE INDEX idx_num_ligacao ON matriculas(NUM_LIGACAO)")
+            con.executemany("INSERT INTO metadados(chave,valor) VALUES (?,?)", [
+                ("versao", "3"), ("fonte", excel.name), ("sha256", digest),
+                ("quantidade", str(total)), ("abas_validas", str(abas_validas)),
+            ])
+            con.commit()
+        finally:
+            con.close()
+        os.replace(temporario, destino)
+        os.chmod(destino, 0o600)
+        return total
+    finally:
+        if temporario.exists():
+            temporario.unlink()
+
+
+def _indice_matriculas() -> tuple[Path, dict[str, str]]:
+    """Executada somente após o clique em Pesquisar.
+
+    Usa base SQLite publicada e verificada; senão índice local em /tmp,
+    gerado uma única vez por versão da planilha durante a vida do ambiente.
+    """
+    fonte = _arquivo_matriculas()
+    publicado = _arquivo_sqlite_publicado()
+    if fonte is None and publicado is None:
+        raise FileNotFoundError("Adicione dados/matriculas.xls, .xlsx ou matriculas.sqlite.")
+
+    if fonte is None:
+        meta = _metadados_indice(publicado)
+        if meta is None:
+            raise ValueError(f"O índice {publicado.name} é inválido. Gere-o novamente.")
+        return publicado, meta
+
+    assinatura = _assinatura(fonte)
+    digest = _resumo_hash(assinatura)
+    if publicado is not None:
+        meta = _metadados_indice(publicado)
+        if meta and meta.get("sha256") == digest:
+            return publicado, meta
+
+    codigo = hashlib.sha256((str(fonte.resolve()) + "|" + str(assinatura[1]) + "|" + digest).encode()).hexdigest()[:20]
+    destino = Path(tempfile.gettempdir()) / "coi_consulta_operacional" / f"matriculas_{codigo}.sqlite"
+    meta = _metadados_indice(destino)
+    if meta and meta.get("sha256") == digest:
+        return destino, meta
+    with _BLOQUEIO_INDICE:
+        meta = _metadados_indice(destino)
+        if not meta or meta.get("sha256") != digest:
+            _construir_indice_excel(fonte, destino, digest)
+        meta = _metadados_indice(destino)
+    if meta is None:
+        raise RuntimeError("Não foi possível gerar o índice de matrículas.")
+    return destino, meta
+
+
+def _buscar_matriculas(codigos: list[str]) -> tuple[pd.DataFrame, dict[str, str]]:
+    caminho, meta = _indice_matriculas()
+    if not codigos:
+        return pd.DataFrame(columns=COLUNAS_MATRICULAS), meta
+    with _conexao_leitura(caminho) as con:
+        sql = ("SELECT CATEGORIA, NUM_LIGACAO, BAIRRO, COD_LATITUDE, COD_LONGITUDE, END_LIGACAO "
+               f"FROM matriculas WHERE NUM_LIGACAO IN ({','.join('?' for _ in codigos)})")
+        base = pd.read_sql_query(sql, con, params=codigos, dtype=str).fillna("")
+    # Converter apenas coordenadas dos registros solicitados.
+    base["_lat"] = base["COD_LATITUDE"].map(lambda v: _coordenada(v, "lat"))
+    base["_lon"] = base["COD_LONGITUDE"].map(lambda v: _coordenada(v, "lon"))
+    ordem = {codigo: i for i, codigo in enumerate(codigos)}
+    if not base.empty:
+        base["_ord"] = base["NUM_LIGACAO"].map(ordem)
+        base = base.sort_values("_ord", kind="stable").drop(columns="_ord")
+    return base, meta
+
+
+
 def matriculas_por_codigo(codigos):
-    db=next((ROOT/"dados"/nome for nome in ("matriculas.sqlite","matriculas.db") if (ROOT/"dados"/nome).is_file()),None)
-    if db is None:
-        raise FileNotFoundError("Índice SQLite não publicado. Consulte as matrículas no Módulo 8 original ou prepare dados/matriculas.sqlite.")
-    with sqlite3.connect(db.resolve().as_uri()+"?mode=ro",uri=True) as conn:
-        query="SELECT NUM_LIGACAO, BAIRRO, COD_LATITUDE, COD_LONGITUDE, END_LIGACAO FROM matriculas WHERE NUM_LIGACAO IN (" + ",".join("?" for _ in codigos) + ")"
-        linhas=conn.execute(query,codigos).fetchall()
-    features=[]
-    for mat,bairro,lat,lon,endereco in linhas:
-        y,x=valor_coord(lat,90),valor_coord(lon,180)
-        if x is None or y is None:continue
-        features.append({"type":"Feature","geometry":{"type":"Point","coordinates":[x,y]},"properties":{"Matrícula":str(mat),"Bairro":str(bairro),"Endereço":str(endereco)}})
-    return checar_geojson({"type":"FeatureCollection","features":features})
+    """Pesquisa pontual no mesmo cadastro do Módulo 8, sem varrer a planilha em cada busca.
 
-
-@st.cache_data(show_spinner=False, max_entries=6)
-def ativos_sob_demanda(caminho: str, tamanho: int, mtime: int, tipo: str):
-    """Lê CSV somente quando usuário habilita a camada; sem escrever na fonte."""
-    _ = (tamanho, mtime)
-    with open(caminho, "r", encoding="utf-8-sig", newline="") as f:
-        amostra = f.read(4096)
-        f.seek(0)
-        delim = ";" if amostra.count(";") > amostra.count(",") else ","
-        rows = csv.DictReader(f, delimiter=delim)
-        features = []
-        for row in rows:
-            cols = {str(k).strip().upper(): v for k, v in row.items()}
-            y, x = valor_coord(cols.get("LATITUDE"), 90), valor_coord(cols.get("LONGITUDE"), 180)
-            if x is None or y is None or x == 0 or y == 0:
-                continue
-            label = cols.get("NOME_POCO") or cols.get("ENDERECO") or cols.get("IDENTIFICACAO_ATIVO") or tipo
-            features.append({"type": "Feature", "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{tipo}:{x},{y}:{label}").hex,
-                "geometry": {"type": "Point", "coordinates": [x, y]},
-                "properties": {"Tipo": tipo, "Nome": str(label)[:160], "Código": str(cols.get("IDENTIFICACAO_ATIVO", ""))[:120]}})
-            if len(features) > MAX_FEATURES:
-                raise ValueError(f"A camada {tipo} ultrapassa {MAX_FEATURES} elementos. Utilize um recorte espacial.")
-    return features
+    A primeira consulta pode criar índice local descartável em /tmp; as seguintes
+    utilizam o índice já criado. A base XLS/XLSX nunca é alterada.
+    """
+    if not codigos:
+        return []
+    encontrados, _meta = _buscar_matriculas(codigos)
+    features = []
+    for _, linha in encontrados.iterrows():
+        lat = linha["_lat"]
+        lon = linha["_lon"]
+        if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+            continue
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Point", "coordinates": [float(lon), float(lat)]},
+            "properties": {
+                "Matrícula": str(linha["NUM_LIGACAO"]),
+                "Bairro": str(linha["BAIRRO"]),
+                "Endereço": str(linha["END_LIGACAO"]),
+                "Categoria": str(linha["CATEGORIA"]),
+            },
+        })
+    return checar_geojson({"type": "FeatureCollection", "features": features})
 
 
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
@@ -434,7 +699,7 @@ with st.sidebar:
     st.caption("As bases oficiais não são carregadas automaticamente.")
     mostrar_pocos = st.checkbox("Mostrar poços e ativos", value=False, key="pg_pocos")
     mostrar_loggers = st.checkbox("Mostrar loggers", value=False, key="pg_loggers")
-    st.caption("Nesta etapa, a consulta de matrículas utiliza apenas o índice SQLite publicado.")
+    st.caption("A pesquisa usa a base XLS/XLSX do Módulo 8. Um índice temporário é criado somente na primeira consulta, quando necessário.")
 
 with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
     busca=st.text_input("Matrículas (separadas por vírgula, espaço ou ponto e vírgula)",key="pg_matriculas",placeholder="Digite as matrículas")
@@ -444,14 +709,15 @@ with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
             st.warning("Informe matrículas numéricas válidas.")
         else:
             try:
-                features=matriculas_por_codigo(codigos)
+                with st.spinner("Consultando matrículas (a primeira pesquisa pode preparar o índice local)..."):
+                    features=matriculas_por_codigo(codigos)
                 st.session_state.prisma_geo_consulta=features
                 st.session_state.prisma_geo_foco=features[0]["geometry"]["coordinates"] if features else None
                 st.session_state.prisma_geo_revisao+=1
                 st.success(f"{len(features)} registro(s) localizado(s).")
-            except (sqlite3.Error,FileNotFoundError,ValueError) as exc:
+            except (sqlite3.Error,FileNotFoundError,ValueError,RuntimeError,ImportError,OSError) as exc:
                 st.warning(str(exc))
-                st.info("A consulta completa do Módulo 8 permanece disponível durante o desenvolvimento.")
+                st.info("Confirme que dados/matriculas.xls ou dados/matriculas.xlsx está disponível. A consulta do Módulo 8 original continua independente.")
     st.caption("Pesquisar não altera o banco nem adiciona automaticamente os resultados ao projeto.")
 
 left,right=st.columns([4.8,1.2],gap="medium")
