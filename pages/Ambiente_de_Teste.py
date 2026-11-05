@@ -59,12 +59,103 @@ def novo_projeto(nome="Meu mapa"):
             # Referências e visibilidade apenas; nenhuma cópia das bases oficiais.
             "official": {"pocos": False, "loggers": False, "rede": False,
                          "topografia": False, "topo_file": ""},
+            "network_area": None,  # Polígono selecionado (somente coordenadas)
             "layers": [{"id": "desenhos", "name": "Meus desenhos", "source": "manual", "visible": True, "features": []}]}
 
 
 def camada_geojson(nome, features, origem="importado"):
     return {"id": "c_" + uuid.uuid4().hex[:12], "name": str(nome)[:120], "source": origem,
             "visible": True, "features": features}
+
+
+# ============================================================
+# HISTÓRICO LOCAL DE EDIÇÃO — comandos reversíveis, sem duplicar projetos
+# ============================================================
+PG_LIMITE_HISTORICO = 30
+
+
+def pg_registrar(operacao):
+    """Registra só o objeto editado, evitando copiar todas as camadas."""
+    st.session_state.setdefault("pg_desfazer", []).append(operacao)
+    st.session_state["pg_desfazer"] = st.session_state["pg_desfazer"][-PG_LIMITE_HISTORICO:]
+    st.session_state["pg_refazer"] = []
+
+
+def pg_limpar_historico():
+    st.session_state["pg_desfazer"] = []
+    st.session_state["pg_refazer"] = []
+    st.session_state.pop("pg_nome_elemento", None)
+    st.session_state.prisma_geo_selecionado = None
+
+
+def pg_encontrar_elemento(projeto, identificador):
+    for camada in projeto.get("layers", []):
+        for elemento in camada.get("features", []):
+            if str(elemento.get("id", "")) == str(identificador):
+                return camada, elemento
+    return None, None
+
+
+def pg_aplicar_operacao(projeto, operacao, desfazer):
+    """Aplica inversão/retorno de uma operação registrada pelo usuário."""
+    tipo = operacao["tipo"]
+    if tipo == "criar_elemento":
+        camada = next((c for c in projeto["layers"] if c["id"] == operacao["camada"]), None)
+        if camada is None:
+            return
+        fid = str(operacao["elemento"]["id"])
+        if desfazer:
+            camada["features"] = [f for f in camada["features"] if str(f.get("id")) != fid]
+        elif not any(str(f.get("id")) == fid for f in camada["features"]):
+            camada["features"].insert(min(operacao["posicao"], len(camada["features"])), operacao["elemento"])
+    elif tipo == "renomear_elemento":
+        _, elemento = pg_encontrar_elemento(projeto, operacao["id"])
+        if elemento is not None:
+            elemento.setdefault("properties", {})["nome"] = operacao["antes"] if desfazer else operacao["depois"]
+    elif tipo in ("adicionar_camada", "remover_camada"):
+        incluir = (tipo == "adicionar_camada" and not desfazer) or (tipo == "remover_camada" and desfazer)
+        lid = operacao["camada"]["id"]
+        if incluir and not any(c["id"] == lid for c in projeto["layers"]):
+            projeto["layers"].insert(min(operacao["posicao"], len(projeto["layers"])), operacao["camada"])
+        elif not incluir:
+            projeto["layers"] = [c for c in projeto["layers"] if c["id"] != lid]
+    elif tipo == "limpar_desenhos":
+        for camada in projeto["layers"]:
+            if camada["source"] == "manual":
+                camada["features"] = (operacao["anteriores"].get(camada["id"], []) if desfazer else [])
+    elif tipo == "selecionar_rede":
+        projeto["network_area"] = operacao["antes"] if desfazer else operacao["depois"]
+    else:
+        raise ValueError("Operação não reconhecida no histórico.")
+
+
+def pg_historico(modo):
+    origem, destino = ("pg_desfazer", "pg_refazer") if modo == "desfazer" else ("pg_refazer", "pg_desfazer")
+    if not st.session_state.get(origem):
+        return False
+    comando = st.session_state[origem].pop()
+    pg_aplicar_operacao(st.session_state.prisma_geo_projeto, comando, modo == "desfazer")
+    st.session_state.setdefault(destino, []).append(comando)
+    st.session_state.prisma_geo_selecionado = None
+    st.session_state.pop("pg_nome_elemento", None)
+    st.session_state.prisma_geo_foco = None
+    return True
+
+
+def pg_evento_novo(tipo, mensagem):
+    """Protege contra reprocessar triggers de um componente após st.rerun."""
+    if not isinstance(mensagem, dict):
+        return False
+    token = str(mensagem.get("event") or mensagem.get("id") or "")
+    if not token:
+        return False
+    assinatura = tipo + ":" + token
+    historico = st.session_state.setdefault("pg_eventos_processados", [])
+    if assinatura in historico:
+        return False
+    historico.append(assinatura)
+    st.session_state["pg_eventos_processados"] = historico[-100:]
+    return True
 
 
 def valor_coord(v, limite):
@@ -254,6 +345,12 @@ def abrir_projeto(dados):
     if not isinstance(center,list) or len(center)!=2 or valor_coord(center[0],180) is None or valor_coord(center[1],90) is None:
         projeto["center"]=HOME[:]
     projeto["zoom"]=max(2,min(20,float(projeto.get("zoom",11))))
+    area_salva = projeto.get("network_area")
+    if area_salva is not None:
+        try:
+            _validar_area_rede(area_salva)
+        except (ValueError, TypeError):
+            projeto["network_area"] = None
     return projeto
 
 
@@ -786,103 +883,204 @@ def _db_rede(caminho: Path) -> Path:
                 tmp.unlink()
 
 
-def _bbox_camera(centro, zoom):
-    # Aproximação para a primeira abertura, antes de o navegador informar a área exata.
-    z = max(6.0, min(18.0, float(zoom)))
-    span_x = min(3.0, 0.25 * 2 ** (11 - z))
-    span_y = min(3.0, 0.19 * 2 ** (11 - z))
-    return [float(centro[0]) - span_x / 2, float(centro[1]) - span_y / 2,
-            float(centro[0]) + span_x / 2, float(centro[1]) + span_y / 2]
+# Uma seleção espacial explícita deve preceder QUALQUER leitura do KMZ.
+# Só índices técnicos locais em /tmp: nenhum banco de projetos.
+REDE_AREA_MAX_KM2 = 30.0
+REDE_MAX_TRECHOS_SELECAO = 2800
+REDE_MAX_VERTICES_SELECAO = 48000
 
 
-@st.cache_data(show_spinner=False, max_entries=5)
-def _rede_por_area(db_caminho: str, bbox: tuple[float, float, float, float], zoom: int):
-    """Devolve APENAS trechos da janela solicitada, com simplificação por escala."""
-    from shapely.geometry import LineString
-    minx, miny, maxx, maxy = bbox
-    if minx >= maxx or miny >= maxy:
-        return [], False
-    # Limitar a resposta; nunca transferir toda a rede para o navegador.
+def _validar_area_rede(coordenadas):
+    """Valida área desenhada, inclusive anéis e limite geodésico de segurança."""
+    from shapely.geometry import Polygon
+    from pyproj import Geod
+    if not isinstance(coordenadas, list) or len(coordenadas) != 1:
+        raise ValueError("A área da rede deve ter um polígono externo.")
+    anel = coordenadas[0]
+    if not isinstance(anel, list) or not 4 <= len(anel) <= 180:
+        raise ValueError("Desenhe um polígono de 3 a 179 vértices.")
+    vertices = []
+    for pt in anel:
+        if (not isinstance(pt, list) or len(pt) != 2 or
+                not all(isinstance(x, (int, float)) and math.isfinite(x) for x in pt) or
+                not (-180 <= pt[0] <= 180 and -90 <= pt[1] <= 90)):
+            raise ValueError("A seleção contém coordenadas inválidas.")
+        vertices.append((float(pt[0]), float(pt[1])))
+    if vertices[0] != vertices[-1]:
+        raise ValueError("O polígono precisa estar fechado.")
+    poligono = Polygon(vertices)
+    if not poligono.is_valid or poligono.is_empty or poligono.area <= 0:
+        raise ValueError("O polígono possui cruzamentos ou limites inválidos; redesenhe a área.")
+    geod = Geod(ellps="WGS84")
+    area_m2, _ = geod.geometry_area_perimeter(poligono)
+    area_km2 = abs(area_m2) / 1_000_000
+    if area_km2 < 0.0001:
+        raise ValueError("Selecione uma região maior para consultar a rede.")
+    if area_km2 > REDE_AREA_MAX_KM2:
+        raise ValueError(f"Área de {area_km2:.1f} km² excede o limite de {REDE_AREA_MAX_KM2:g} km². Selecione um bairro ou setor menor.")
+    return poligono, area_km2
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _rede_por_poligono(db_caminho: str, area_json: str, zoom: int):
+    """RTree por envelope + interseção REAL e recorte no polígono definido.
+
+    Nunca retorna lista truncada como se a rede estivesse completa: se passar
+    do limite, devolve vazio e solicita reduzir a área.
+    """
+    from shapely.geometry import LineString, Polygon
+    from shapely.geometry import MultiLineString, GeometryCollection
+
+    coordenadas = json.loads(area_json)
+    area, _km2 = _validar_area_rede(coordenadas)
+    minx, miny, maxx, maxy = area.bounds
+    saida = []
+    vertices_usados = 0
+    trechos_encontrados = 0
+    tolerancia = 0.0 if zoom >= 16 else 0.000005 * (2 ** max(0, 15-zoom))
+
     with sqlite3.connect(f"file:{Path(db_caminho).resolve()}?mode=ro", uri=True) as con:
         linhas = con.execute(
             "SELECT l.fid, l.nome, l.coordenadas FROM limites r "
             "JOIN linhas l ON l.fid=r.fid "
-            "WHERE r.maxx>=? AND r.minx<=? AND r.maxy>=? AND r.miny<=? "
-            "LIMIT ?",
-            (minx, maxx, miny, maxy, REDE_MAX_TRECHOS_MAPA + 1),
-        ).fetchall()
-    excedeu = len(linhas) > REDE_MAX_TRECHOS_MAPA
-    resultado = []
-    n_vertices = 0
-    # Tolerância visual; nunca grava geometrias simplificadas na base original.
-    tolerancia = 0.0 if zoom >= 16 else 0.000012 * (2 ** max(0, 15 - zoom))
-    for fid, nome, texto in linhas[:REDE_MAX_TRECHOS_MAPA]:
-        coords = json.loads(texto)
-        if tolerancia > 0 and len(coords) > 3:
-            coords = [list(p) for p in LineString(coords).simplify(tolerancia, preserve_topology=False).coords]
-        if len(coords) < 2:
-            continue
-        if n_vertices + len(coords) > REDE_MAX_VERTICES_MAPA:
-            excedeu = True
-            break
-        n_vertices += len(coords)
-        resultado.append({
-            "type": "Feature", "id": fid,
-            "geometry": {"type": "LineString", "coordinates": coords},
-            "properties": {"Nome": nome, "pg_tipo": "Rede de abastecimento"},
-        })
-    return resultado, excedeu
+            "WHERE r.maxx>=? AND r.minx<=? AND r.maxy>=? AND r.miny<=?",
+            (minx, maxx, miny, maxy),
+        )
+        for fid, nome, texto in linhas:
+            linha = LineString(json.loads(texto))
+            if not linha.intersects(area):
+                continue
+            recorte = linha.intersection(area)
+            geometrias = ([recorte] if recorte.geom_type == "LineString" else
+                           list(recorte.geoms) if hasattr(recorte, "geoms") else [])
+            segmentos = []
+            for geom in geometrias:
+                if geom.geom_type != "LineString" or geom.is_empty:
+                    continue
+                if tolerancia and len(geom.coords) > 3:
+                    geom = geom.simplify(tolerancia, preserve_topology=False)
+                coords = [[round(x, 7), round(y, 7)] for x,y in geom.coords]
+                if len(coords) >= 2:
+                    segmentos.append(coords)
+            if not segmentos:
+                continue
+            trechos_encontrados += 1
+            vertices_usados += sum(len(v) for v in segmentos)
+            if trechos_encontrados > REDE_MAX_TRECHOS_SELECAO or vertices_usados > REDE_MAX_VERTICES_SELECAO:
+                return [], True, trechos_encontrados
+            geom_saida = ({"type":"LineString", "coordinates":segmentos[0]} if len(segmentos)==1
+                          else {"type":"MultiLineString","coordinates":segmentos})
+            saida.append({
+                "type":"Feature", "id":fid,
+                "geometry":geom_saida,
+                "properties":{"Nome":nome, "pg_tipo":"Rede de abastecimento"},
+            })
+    return saida, False, trechos_encontrados
 
 
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
 # Componente de mapa V2; tudo é renderizado pelo MapLibre, sem marcadores HTML.
-GEO_HTML='''<div class="pg-frame"><div class="pg-tools"><button data-mode="pan">✋ Navegar</button><button data-mode="point">📍 Ponto</button><button data-mode="line">〰 Linha</button><button data-mode="polygon">⬡ Polígono</button><button data-act="finish">✓ Concluir</button><button data-act="cancel">✕ Cancelar</button><button data-act="refresh">↻ Atualizar área</button></div><div class="pg-map"></div><div class="pg-status">Iniciando mapa…</div></div>'''
+GEO_HTML='''
+<div class="pg-frame" tabindex="0">
+ <div class="pg-tools">
+  <button data-mode="pan">✋ Navegar</button>
+  <button data-mode="point">📍 Ponto</button>
+  <button data-mode="line">〰 Linha</button>
+  <button data-mode="polygon">⬡ Polígono</button>
+  <button data-mode="network-area" title="Delimite exatamente onde deseja visualizar a rede">▱ Selecionar área da rede</button>
+  <button data-act="finish">✓ Concluir</button>
+  <button data-act="cancel">✕ Cancelar</button>
+  <button data-act="undo" title="Desfazer último vértice ou alteração (Ctrl+Z)">↶ Desfazer</button>
+  <button data-act="redo" title="Refazer (Ctrl+Y ou Ctrl+Shift+Z)">↷ Refazer</button>
+ </div>
+ <div class="pg-map"></div>
+ <div class="pg-status">Iniciando mapa…</div>
+</div>
+'''
 GEO_CSS='''
-.pg-frame{position:relative;width:100%;height:100%;font:13px system-ui,sans-serif;overflow:hidden;border-radius:12px;border:1px solid #dce3ed}
+.pg-frame{position:relative;width:100%;height:100%;font:13px system-ui,sans-serif;overflow:hidden;border-radius:12px;border:1px solid #dce3ed;outline:none}
 .pg-map{height:100%;width:100%;min-height:480px}
-.pg-tools{position:absolute;z-index:15;top:10px;left:10px;display:flex;flex-wrap:wrap;gap:5px;background:rgba(255,255,255,.96);padding:7px;border-radius:9px;box-shadow:0 3px 15px #0002;max-width:90%}
+.pg-tools{position:absolute;z-index:15;top:10px;left:10px;display:flex;flex-wrap:wrap;gap:5px;background:rgba(255,255,255,.97);padding:7px;border-radius:9px;box-shadow:0 3px 15px #0002;max-width:95%}
 .pg-tools button{border:1px solid #cbd5e1;border-radius:6px;background:#fff;color:#152c42;padding:6px 9px;cursor:pointer;font-size:12px}
 .pg-tools button.pg-active{background:#164e77;color:white}
-.pg-status{position:absolute;bottom:6px;left:10px;z-index:12;padding:5px 9px;background:#fff;color:#203348;border-radius:6px;max-width:80%;font-size:11px}
+.pg-tools button:disabled{opacity:.45;cursor:not-allowed}
+.pg-status{position:absolute;bottom:6px;left:10px;z-index:12;padding:5px 9px;background:rgba(255,255,255,.96);color:#203348;border-radius:6px;max-width:85%;font-size:11px}
 '''
 GEO_JS=r'''
 export default function(component) {
  const {parentElement, data, setTriggerValue} = component;
- const mapNode=parentElement.querySelector('.pg-map');
- const status=parentElement.querySelector('.pg-status');
  const root=parentElement;
- const cssLink=document.createElement('link'); cssLink.rel='stylesheet';
- cssLink.href='https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css';
- root.appendChild(cssLink);
- let map=null, alive=true, mode='pan', draft=[];
+ const mapNode=root.querySelector('.pg-map');
+ const status=root.querySelector('.pg-status');
+ const css=document.createElement('link');css.rel='stylesheet';
+ css.href='https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css';root.appendChild(css);
+ let map=null, alive=true, mode='pan', draft=[], draftRedo=[];
  const modes=[...root.querySelectorAll('[data-mode]')];
+ const undoButton=root.querySelector('[data-act="undo"]');
+ const redoButton=root.querySelector('[data-act="redo"]');
  const fc=(features)=>({type:'FeatureCollection',features:features||[]});
- const sets=(id,geodata)=>{if(map?.getSource(id))map.getSource(id).setData(geodata);};
+ const sets=(id,geo)=>{if(map?.getSource(id)) map.getSource(id).setData(geo);};
+ const eventId=()=>crypto.randomUUID();
+ const viewport=()=>{const c=map.getCenter();return {center:[c.lng,c.lat],zoom:map.getZoom()};};
  const refreshDraft=()=>{
-    if(!map || !map.getSource('pg-draft'))return;
-    const feats=[];
-    if(draft.length>1)feats.push({type:'Feature',geometry:{type:'LineString',coordinates:draft},properties:{}});
-    for(const c of draft)feats.push({type:'Feature',geometry:{type:'Point',coordinates:c},properties:{}});
-    sets('pg-draft',fc(feats));
+   if(!map?.getSource('pg-draft'))return;
+   const feats=[];
+   if(draft.length>1) feats.push({type:'Feature',geometry:{type:'LineString',coordinates:draft},properties:{}});
+   if(draft.length>=3 && (mode==='polygon'||mode==='network-area'))
+      feats.push({type:'Feature',geometry:{type:'Polygon',coordinates:[[...draft,draft[0]]]},properties:{}});
+   for(const c of draft)feats.push({type:'Feature',geometry:{type:'Point',coordinates:c},properties:{}});
+   sets('pg-draft',fc(feats));
  };
- const setMode=(v)=>{mode=v;draft=[];modes.forEach(b=>b.classList.toggle('pg-active',b.dataset.mode===v));if(map)refreshDraft();status.textContent=v==='pan'?'Mapa pronto. Clique em um marcador ou trecho para consultar.':v==='point'?'Clique para posicionar um ponto.':'Clique nos vértices e depois em Concluir.';};
+ const refreshButtons=()=>{
+   undoButton.disabled=draft.length===0 && !(data.canUndo||false);
+   redoButton.disabled=draftRedo.length===0 && !(data.canRedo||false);
+ };
+ const setMode=(v)=>{
+   mode=v;draft=[];draftRedo=[];
+   modes.forEach(b=>b.classList.toggle('pg-active',b.dataset.mode===v));
+   if(map){map.doubleClickZoom[v==='pan'?'enable':'disable']();refreshDraft();}
+   status.textContent= v==='pan'?'Mapa pronto. Selecione elementos ou use as ferramentas.':
+     v==='point'?'Clique para posicionar um ponto.':
+     v==='network-area'?'Delimite a rede por polígono; clique em Concluir. A rede só será carregada nessa área.':
+     'Marque os vértices e clique em Concluir.';
+   refreshButtons();
+ };
  const add=(geometry)=>{
-   setTriggerValue('created',{type:'Feature',id:'f_'+crypto.randomUUID(),geometry,properties:{nome:'Novo elemento',pg_tipo:'Desenho'}});
-   draft=[];setMode('pan');
+   const nome=geometry.type==='Polygon'?'Novo polígono':geometry.type==='LineString'?'Nova linha':'Novo ponto';
+   const id='f_'+eventId();
+   setTriggerValue('created',{type:'Feature',id,geometry,properties:{nome,pg_tipo:'Desenho'},viewport:viewport()});
+   setMode('pan');
  };
  const finish=()=>{
-  if(mode==='line' && draft.length>=2)add({type:'LineString',coordinates:draft});
-  else if(mode==='polygon' && draft.length>=3)add({type:'Polygon',coordinates:[[...draft,draft[0]]]});
-  else status.textContent='Marque mais vértices antes de concluir.';
+   if(mode==='network-area' && draft.length>=3){
+     const geom={type:'Polygon',coordinates:[[...draft,draft[0]]]};
+     setTriggerValue('network_area',{event:eventId(),geometry:geom,viewport:viewport()});
+     setMode('pan');return;
+   }
+   if(mode==='line' && draft.length>=2){add({type:'LineString',coordinates:draft});return;}
+   if(mode==='polygon' && draft.length>=3){add({type:'Polygon',coordinates:[[...draft,draft[0]]]});return;}
+   status.textContent='Marque mais vértices antes de concluir.';
+ };
+ const undo=()=>{
+   if(draft.length){draftRedo.push(draft.pop());refreshDraft();refreshButtons();return;}
+   if(data.canUndo)setTriggerValue('history_action',{event:eventId(),action:'undo',viewport:viewport()});
+ };
+ const redo=()=>{
+   if(draftRedo.length){draft.push(draftRedo.pop());refreshDraft();refreshButtons();return;}
+   if(data.canRedo)setTriggerValue('history_action',{event:eventId(),action:'redo',viewport:viewport()});
  };
  modes.forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
  root.querySelector('[data-act="finish"]').onclick=finish;
  root.querySelector('[data-act="cancel"]').onclick=()=>setMode('pan');
- root.querySelector('[data-act="refresh"]').onclick=()=>{
-    if(!map)return;
-    const b=map.getBounds(),c=map.getCenter();
-    setTriggerValue('viewport',{bbox:[b.getWest(),b.getSouth(),b.getEast(),b.getNorth()],center:[c.lng,c.lat],zoom:map.getZoom()});
+ undoButton.onclick=undo;
+ redoButton.onclick=redo;
+ const onKey=(e)=>{
+   if((e.ctrlKey||e.metaKey)&&!e.altKey){
+     if(e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();}
+     else if(e.key.toLowerCase()==='y'){e.preventDefault();redo();}
+   }
  };
+ root.addEventListener('keydown',onKey);
  let ro=null;
  import('https://esm.sh/maplibre-gl@5.6.2').then(module=>{
   if(!alive)return;
@@ -895,22 +1093,24 @@ export default function(component) {
    if(!alive)return;
    if(data.topography?.url && data.topography?.coordinates){
      map.addSource('pg-topo',{type:'image',url:data.topography.url,coordinates:data.topography.coordinates});
-     map.addLayer({id:'pg-topo-layer',type:'raster',source:'pg-topo',paint:{'raster-opacity':0.35,'raster-fade-duration':0}});
+     map.addLayer({id:'pg-topo-layer',type:'raster',source:'pg-topo',paint:{'raster-opacity':.35,'raster-fade-duration':0}});
    }
    const all=[...(data.project||[]),...(data.lookup||[])];
    const points=all.filter(f=>f.geometry?.type==='Point'||f.geometry?.type==='MultiPoint');
    const lines=all.filter(f=>f.geometry?.type==='LineString'||f.geometry?.type==='MultiLineString');
    const polygons=all.filter(f=>f.geometry?.type==='Polygon'||f.geometry?.type==='MultiPolygon');
-   // Camada da rede desenhada abaixo dos marcadores, sem criar HTML para cada trecho.
+   const area=data.networkArea?.length? [{type:'Feature',geometry:{type:'Polygon',coordinates:data.networkArea},properties:{}}]:[];
+   map.addSource('pg-network-area',{type:'geojson',data:fc(area)});
+   map.addLayer({id:'pg-area-fill',type:'fill',source:'pg-network-area',paint:{'fill-color':'#21BCA4','fill-opacity':.10}});
+   map.addLayer({id:'pg-area-outline',type:'line',source:'pg-network-area',paint:{'line-color':'#059669','line-width':2.5,'line-dasharray':[3,2]}});
    map.addSource('pg-network',{type:'geojson',data:fc(data.network||[])});
    map.addLayer({id:'pg-network-layer',type:'line',source:'pg-network',paint:{
-     'line-color':'#1279AE','line-opacity':0.72,'line-width':['interpolate',['linear'],['zoom'],10,0.8,14,1.5,17,2.3]}});
-   // Sem clustering: nenhum círculo de 19px cobrindo os bairros.
+      'line-color':'#1279AE','line-opacity':.78,'line-width':['interpolate',['linear'],['zoom'],10,.8,14,1.5,17,2.3]}});
    map.addSource('pg-points',{type:'geojson',data:fc(points)});
    map.addSource('pg-lines',{type:'geojson',data:fc(lines)});
    map.addSource('pg-poly',{type:'geojson',data:fc(polygons)});
    map.addSource('pg-draft',{type:'geojson',data:fc([])});
-   map.addLayer({id:'pg-fill',type:'fill',source:'pg-poly',paint:{'fill-color':'#18b3b1','fill-opacity':0.2}});
+   map.addLayer({id:'pg-fill',type:'fill',source:'pg-poly',paint:{'fill-color':'#18b3b1','fill-opacity':.2}});
    map.addLayer({id:'pg-outline',type:'line',source:'pg-poly',paint:{'line-color':'#00889b','line-width':2}});
    map.addLayer({id:'pg-lines-layer',type:'line',source:'pg-lines',paint:{'line-color':'#2563eb','line-width':2.5}});
    map.addLayer({id:'pg-points-layer',type:'circle',source:'pg-points',paint:{
@@ -919,25 +1119,37 @@ export default function(component) {
        'Desenho','#A855F7','#16A34A'],
       'circle-stroke-color':'#FFFFFF','circle-stroke-width':1.1,
       'circle-radius':['match',['get','pg_tipo'],'Matrícula',5.5,'Poço / Ativo',4.5,'Logger',4.5,4.5],
-      'circle-opacity':0.94}});
-   map.addLayer({id:'pg-draft-line',type:'line',source:'pg-draft',filter:['==',['geometry-type'],'LineString'],paint:{'line-color':'#e67e22','line-width':2,'line-dasharray':[2,2]}});
-   map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-color':'#e67e22','circle-radius':4}});
+      'circle-opacity':.94}});
+   map.addLayer({id:'pg-poly-names',type:'symbol',source:'pg-poly',minzoom:12,
+     filter:['has','nome'],layout:{'text-field':['get','nome'],'text-size':11,'text-allow-overlap':false},
+     paint:{'text-color':'#14566D','text-halo-color':'#FFFFFF','text-halo-width':1.7}});
+   map.addLayer({id:'pg-draft-fill',type:'fill',source:'pg-draft',filter:['==',['geometry-type'],'Polygon'],
+     paint:{'fill-color':'#E67E22','fill-opacity':.13}});
+   map.addLayer({id:'pg-draft-line',type:'line',source:'pg-draft',filter:['==',['geometry-type'],'LineString'],
+     paint:{'line-color':'#e67e22','line-width':2,'line-dasharray':[2,2]}});
+   map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],
+     paint:{'circle-color':'#e67e22','circle-radius':4}});
    map.on('click',(e)=>{
+     root.focus();
      if(mode!=='pan'){
-      const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
-      if(mode==='point')add({type:'Point',coordinates:p});else{draft.push(p);refreshDraft();}
-      return;
+       const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
+       if(mode==='point')add({type:'Point',coordinates:p});
+       else {draft.push(p);draftRedo=[];refreshDraft();refreshButtons();}
+       return;
      }
-     const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-fill','pg-network-layer']});
-     if(hits.length){const f=hits[0];setTriggerValue('selected',{id:String(f.id||f.properties?.pg_id||''),properties:f.properties||{}});}
+     const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-poly-names','pg-fill','pg-network-layer']});
+     if(hits.length){
+       const f=hits[0];
+       setTriggerValue('selected',{event:eventId(),id:String(f.properties?.pg_id??f.id??''),properties:f.properties||{},viewport:viewport()});
+     }
    });
    if(data.focus?.length===2)map.flyTo({center:data.focus,zoom:15});
    setMode('pan');
   });
-  map.on('error',()=>{if(alive)status.textContent='Falha no mapa ou nos mosaicos cartográficos. Verifique sua conexão.';});
+  map.on('error',()=>{if(alive)status.textContent='Falha no mapa ou nos mosaicos. Verifique sua conexão.';});
   ro=new ResizeObserver(()=>map?.resize());ro.observe(mapNode);
- }).catch(()=>{if(alive)status.textContent='Não foi possível carregar MapLibre. Verifique sua conexão.';});
- return ()=>{alive=false;if(ro)ro.disconnect();if(map)map.remove();};
+ }).catch(()=>{if(alive)status.textContent='Não foi possível carregar MapLibre. Verifique a conexão.';});
+ return ()=>{alive=false;root.removeEventListener('keydown',onKey);if(ro)ro.disconnect();if(map)map.remove();};
 }
 '''
 
@@ -951,6 +1163,16 @@ if "prisma_geo_selecionado" not in st.session_state:
     st.session_state.prisma_geo_selecionado=None
 if "prisma_geo_revisao" not in st.session_state:
     st.session_state.prisma_geo_revisao=0
+
+if "pg_desfazer" not in st.session_state:
+    st.session_state.pg_desfazer=[]
+if "pg_refazer" not in st.session_state:
+    st.session_state.pg_refazer=[]
+if "pg_alerta_area" not in st.session_state:
+    st.session_state.pg_alerta_area=""
+# A caixa pg_rede é um widget: seu valor só pode mudar ANTES da instanciação.
+if st.session_state.pop("pg_ativar_rede_proxima_execucao", False):
+    st.session_state["pg_rede"] = True
 
 p=st.session_state.prisma_geo_projeto
 st.title("🗺️ PRISMA GEO")
@@ -966,7 +1188,8 @@ with st.sidebar:
         st.session_state.prisma_geo_projeto=novo_projeto()
         st.session_state.prisma_geo_consulta=[]
         st.session_state.prisma_geo_foco=None
-        st.session_state.pop("pg_rede_bbox", None)
+        pg_limpar_historico()
+        st.session_state["pg_alerta_area"] = ""
         st.session_state.prisma_geo_revisao+=1
         st.session_state.pop("pg_nome", None)
         st.session_state.pop("pg_visible_desenhos", None)
@@ -979,6 +1202,8 @@ with st.sidebar:
             st.session_state.prisma_geo_projeto=abrir_projeto(abrir.getvalue())
             st.session_state.prisma_geo_consulta=[]
             st.session_state.prisma_geo_foco=None
+            pg_limpar_historico()
+            st.session_state["pg_alerta_area"] = ""
             st.session_state.prisma_geo_revisao+=1
             st.session_state.pop("pg_nome", None)
             for kk in list(st.session_state):
@@ -1008,6 +1233,17 @@ with st.sidebar:
     except ValueError as exc:
         st.warning(str(exc))
     st.caption("Salve o arquivo antes de sair: projetos não são gravados em banco de dados.")
+    col_undo, col_refazer = st.columns(2)
+    with col_undo:
+        if st.button("↶ Desfazer", key="pg_desfazer_botao", disabled=not st.session_state.pg_desfazer,
+                     use_container_width=True):
+            pg_historico("desfazer")
+            st.rerun()
+    with col_refazer:
+        if st.button("↷ Refazer", key="pg_refazer_botao", disabled=not st.session_state.pg_refazer,
+                     use_container_width=True):
+            pg_historico("refazer")
+            st.rerun()
     st.divider()
     st.subheader("Camadas de trabalho")
     for layer in p["layers"]:
@@ -1020,6 +1256,7 @@ with st.sidebar:
     if st.button("➕ Adicionar camada",use_container_width=True,disabled=adicionada is None):
         try:
             layer=importar_camadas(adicionada.name,adicionada.getvalue())
+            pg_registrar({"tipo":"adicionar_camada", "camada":layer, "posicao":len(p["layers"])})
             p["layers"].append(layer)
             st.session_state.prisma_geo_revisao+=1
             st.success(f"Camada {layer['name']} adicionada.")
@@ -1038,8 +1275,24 @@ with st.sidebar:
             st.session_state[chave] = bool(p["official"].get(campo,False))
     mostrar_pocos = st.checkbox("Mostrar poços e ativos", key="pg_pocos")
     mostrar_loggers = st.checkbox("Mostrar loggers", key="pg_loggers")
-    mostrar_rede = st.checkbox("Mostrar rede de abastecimento (THE)", key="pg_rede")
-    st.caption("A rede é carregada por região. Após mover o mapa, use ↻ Atualizar área para ver os trechos da nova região.")
+    mostrar_rede = st.checkbox("Exibir rede da área selecionada", key="pg_rede")
+    st.caption("Para consultar a rede, clique no mapa em **▱ Selecionar área da rede**, desenhe o polígono e pressione **✓ Concluir**. A rede só será lida após essa seleção.")
+    area_rede = p.get("network_area")
+    if st.session_state.pg_alerta_area:
+        st.warning(st.session_state.pg_alerta_area)
+    if area_rede:
+        try:
+            _, km2 = _validar_area_rede(area_rede)
+            st.caption(f"Área selecionada: {km2:.2f} km² (máximo: {REDE_AREA_MAX_KM2:g} km²).")
+        except ValueError:
+            st.warning("Área inválida. Selecione novamente.")
+        if st.button("✕ Limpar área da rede", key="pg_limpar_area", use_container_width=True):
+            pg_registrar({"tipo":"selecionar_rede", "antes":area_rede, "depois":None})
+            p["network_area"] = None
+            st.session_state["pg_alerta_area"] = ""
+            st.rerun()
+    elif mostrar_rede:
+        st.info("Aguardando você selecionar um polígono no mapa. Nenhum trecho foi carregado.")
     topografias = _pasta_topografias()
     mostrar_topografia = st.checkbox("Mostrar relevo/topografia", key="pg_topografia")
     selecionada_topo = None
@@ -1071,7 +1324,6 @@ with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
                 if features:
                     p["center"] = list(st.session_state.prisma_geo_foco)
                     p["zoom"] = 15
-                    st.session_state.pop("pg_rede_bbox", None)
                 st.session_state.prisma_geo_revisao+=1
                 st.success(f"{len(features)} registro(s) localizado(s).")
             except (sqlite3.Error,FileNotFoundError,ValueError,RuntimeError,ImportError,OSError) as exc:
@@ -1081,8 +1333,11 @@ with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
 
 left,right=st.columns([4.8,1.2],gap="medium")
 with left:
-    st.info("Ferramentas: Navegar · Ponto · Linha · Polígono. Para linhas e polígonos, clique nos vértices e em Concluir.")
-    features=[feature for layer in p["layers"] if layer.get("visible") for feature in layer["features"]]
+    st.info("Use **▱ Selecionar área da rede** para delimitar os trechos. Para criar desenhos, use Ponto, Linha ou Polígono; conclua e nomeie o elemento no painel direito. **Desfazer/Refazer** funciona tanto durante o traçado quanto após salvar o desenho.")
+    # pg_id é enviado apenas ao mapa: torna a seleção confiável, sem alterar o arquivo salvo.
+    features=[{**feature, "properties":{**feature.get("properties", {}),
+                                        "pg_id":str(feature.get("id", ""))}}
+              for layer in p["layers"] if layer.get("visible") for feature in layer["features"]]
     for habilitada, arquivo, tipo in ((mostrar_pocos, "pocos.csv", "Poço / Ativo"), (mostrar_loggers, "loggers.csv", "Logger")):
         if habilitada:
             path = ROOT / "dados" / arquivo
@@ -1106,61 +1361,111 @@ with left:
             st.warning(f"Topografia indisponível: {exc}")
 
     dados_rede = []
-    if mostrar_rede:
+    area_rede = p.get("network_area")
+    if mostrar_rede and area_rede:
         arquivo_rede = PASTA_DADOS / "Rede_Agua_THE.kmz"
         if not arquivo_rede.is_file():
             st.warning("Rede não encontrada: dados/Rede_Agua_THE.kmz")
         else:
             try:
-                with st.spinner("Preparando rede de abastecimento (somente na primeira abertura do arquivo)..."):
+                _, _km2 = _validar_area_rede(area_rede)
+                # A indexação só ocorre após uma área válida ter sido desenhada.
+                with st.spinner("Consultando os trechos da rede na área selecionada..."):
                     db = _db_rede(arquivo_rede)
-                vista = st.session_state.get("pg_rede_bbox")
-                if not vista:
-                    vista = _bbox_camera(p["center"], p["zoom"])
-                zoom_rede = int(round(float(p["zoom"])))
-                dados_rede, limite_rede = _rede_por_area(str(db), tuple(round(float(v), 6) for v in vista), zoom_rede)
-                st.caption(f"Rede THE: {len(dados_rede):,} trechos na região selecionada.".replace(",", "."))
-                if limite_rede:
-                    st.warning("A região tem mais trechos do que o limite de visualização. Aproxime o zoom e clique em ↻ Atualizar área.")
-            except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError, sqlite3.Error) as exc:
-                st.warning(f"Não foi possível abrir a rede: {exc}")
+                    dados_rede, excesso, qtd = _rede_por_poligono(
+                        str(db), json.dumps(area_rede, separators=(",", ":")), int(round(float(p["zoom"])))
+                    )
+                if excesso:
+                    st.warning("A seleção contém trechos demais para exibir com segurança. Desenhe uma área menor; nenhum trecho foi exibido parcialmente.")
+                else:
+                    st.caption(f"Rede THE: {qtd:,} trecho(s) no polígono selecionado.".replace(",", "."))
+            except (OSError, ValueError, TypeError, RuntimeError, zipfile.BadZipFile,
+                    ET.ParseError, sqlite3.Error) as exc:
+                st.warning(f"Não foi possível consultar a rede: {exc}")
     if len(features)>MAX_FEATURES*10:
         st.error("Mapa muito grande. Oculte camadas ou reduza os arquivos importados.")
         st.stop()
     try:
-        comp=st.components.v2.component("prisma_geo_editor_v1",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
+        comp=st.components.v2.component("prisma_geo_editor_v2",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
         response=comp(data={"project":features,"lookup":st.session_state.prisma_geo_consulta,
-                             "network":dados_rede,"topography":dados_topografia,
+                             "network":dados_rede,"networkArea":p.get("network_area"),
+                             "topography":dados_topografia,
                              "focus":st.session_state.prisma_geo_foco,
-                             "center":p["center"],"zoom":p["zoom"]},
-                       key="prisma_geo_mapa_componente",width="stretch",height=600,
+                             "center":p["center"],"zoom":p["zoom"],
+                             "canUndo":bool(st.session_state.pg_desfazer),
+                             "canRedo":bool(st.session_state.pg_refazer)},
+                       key="prisma_geo_mapa_componente_v2",width="stretch",height=600,
                        on_created_change=lambda:None,on_selected_change=lambda:None,
-                       on_viewport_change=lambda:None)
-        if response.viewport:
-            camera = response.viewport
-            caixa = camera.get("bbox") if isinstance(camera, dict) else None
-            centro = camera.get("center") if isinstance(camera, dict) else None
-            zoom_v = camera.get("zoom") if isinstance(camera, dict) else None
-            if (isinstance(caixa, list) and len(caixa) == 4
-                and isinstance(centro, list) and len(centro) == 2
-                and all(isinstance(v, (int, float)) and math.isfinite(v) for v in caixa + centro)
-                and isinstance(zoom_v, (int, float)) and math.isfinite(zoom_v)):
-                st.session_state["pg_rede_bbox"] = caixa
-                p["center"] = [float(v) for v in centro]
-                p["zoom"] = max(2.0, min(20.0, float(zoom_v)))
+                       on_network_area_change=lambda:None,on_history_action_change=lambda:None)
+        if response.network_area and pg_evento_novo("area", response.network_area):
+            evento = response.network_area
+            geometria = evento.get("geometry", {})
+            try:
+                if geometria.get("type") != "Polygon":
+                    raise ValueError("Área recebida não é um polígono.")
+                coords = geometria.get("coordinates")
+                _, km2 = _validar_area_rede(coords)
+                pg_registrar({"tipo":"selecionar_rede", "antes":p.get("network_area"), "depois":coords})
+                p["network_area"] = coords
+                st.session_state["pg_ativar_rede_proxima_execucao"] = True
+                st.session_state["pg_alerta_area"] = ""
+                cam = evento.get("viewport") or {}
+                centro, zoom = cam.get("center"), cam.get("zoom")
+                if (isinstance(centro,list) and len(centro)==2 and
+                    all(isinstance(v,(int,float)) and math.isfinite(v) for v in centro)):
+                    p["center"] = [float(v) for v in centro]
+                if isinstance(zoom,(int,float)) and math.isfinite(zoom):
+                    p["zoom"] = max(2., min(20., float(zoom)))
                 st.session_state.prisma_geo_foco = None
                 st.rerun()
-        if response.created:
+            except (ValueError, TypeError) as exc:
+                st.session_state["pg_alerta_area"] = str(exc)
+                st.rerun()
+        if response.history_action and pg_evento_novo("hist", response.history_action):
+            evento = response.history_action
+            modo = "desfazer" if evento.get("action") == "undo" else "refazer"
+            cam = evento.get("viewport") or {}
+            centro, zoom = cam.get("center"), cam.get("zoom")
+            if (isinstance(centro,list) and len(centro)==2 and
+                all(isinstance(v,(int,float)) and math.isfinite(v) for v in centro)):
+                p["center"] = [float(v) for v in centro]
+            if isinstance(zoom,(int,float)) and math.isfinite(zoom):
+                p["zoom"] = max(2., min(20., float(zoom)))
+            if pg_historico(modo):
+                st.rerun()
+        if response.created and pg_evento_novo("draw", response.created):
+            cam = response.created.get("viewport") or {}
+            centro, zoom = cam.get("center"), cam.get("zoom")
+            if (isinstance(centro,list) and len(centro)==2 and
+                all(isinstance(v,(int,float)) and math.isfinite(v) for v in centro)):
+                p["center"] = [float(v) for v in centro]
+            if isinstance(zoom,(int,float)) and math.isfinite(zoom):
+                p["zoom"] = max(2., min(20., float(zoom)))
+            st.session_state.prisma_geo_foco = None
             item=checar_geojson({"type":"FeatureCollection","features":[response.created]})[0]
             target=next((l for l in p["layers"] if l["id"]=="desenhos"),None)
             if not target:
                 target=camada_geojson("Meus desenhos",[],"manual")
                 p["layers"].insert(0,target)
+            pg_registrar({"tipo":"criar_elemento","camada":target["id"],
+                          "elemento":item,"posicao":len(target["features"])})
             target["features"].append(item)
-            st.toast("Elemento adicionado. Salve seu projeto para conservar o trabalho.")
+            st.session_state.prisma_geo_selecionado={"id":str(item["id"]),"properties":item["properties"]}
+            st.session_state.pop("pg_nome_elemento",None)
+            st.toast("Elemento criado. Dê um nome no painel à direita e salve seu projeto.")
             st.rerun()
-        if response.selected:
+        if response.selected and pg_evento_novo("select", response.selected):
+            cam = response.selected.get("viewport") or {}
+            centro, zoom = cam.get("center"), cam.get("zoom")
+            if (isinstance(centro,list) and len(centro)==2 and
+                all(isinstance(v,(int,float)) and math.isfinite(v) for v in centro)):
+                p["center"] = [float(v) for v in centro]
+            if isinstance(zoom,(int,float)) and math.isfinite(zoom):
+                p["zoom"] = max(2., min(20., float(zoom)))
+            st.session_state.prisma_geo_foco = None
             st.session_state.prisma_geo_selecionado=response.selected
+            st.session_state.pop("pg_nome_elemento",None)
+            st.rerun()
     except AttributeError:
         st.error("Este protótipo exige Streamlit com suporte a Components V2.")
     st.caption("Mapa-base: OpenStreetMap · Marcadores: matrícula verde, poços azul, loggers laranja. A rede e a topografia são camadas somente de leitura.")
@@ -1173,6 +1478,31 @@ with right:
     selecionado=st.session_state.prisma_geo_selecionado
     if selecionado:
         st.markdown("**Seleção no mapa**")
+        id_selecionado = str(selecionado.get("id", ""))
+        camada_editavel, elemento_editavel = pg_encontrar_elemento(p, id_selecionado)
+        if camada_editavel is not None and elemento_editavel is not None:
+            st.caption(f"Camada: {camada_editavel['name']}")
+            nome_atual = str(elemento_editavel.get("properties", {}).get("nome") or
+                             elemento_editavel.get("properties", {}).get("Nome") or "Sem nome")
+            with st.form("pg_form_nome_elemento"):
+                nome_novo = st.text_input("Nome do elemento", value=nome_atual,
+                                         max_chars=120, key="pg_nome_elemento")
+                if st.form_submit_button("💾 Aplicar nome", use_container_width=True):
+                    nome_novo = nome_novo.strip()
+                    if not nome_novo:
+                        st.warning("Informe um nome para o elemento.")
+                    elif nome_novo != nome_atual:
+                        pg_registrar({"tipo":"renomear_elemento", "id":id_selecionado,
+                                      "antes":nome_atual, "depois":nome_novo})
+                        elemento_editavel.setdefault("properties", {})["nome"] = nome_novo
+                        st.session_state.prisma_geo_selecionado = {
+                            "id":id_selecionado, "properties":elemento_editavel["properties"]}
+                        st.toast("Nome atualizado. Baixe o projeto para conservar a alteração.")
+                        st.rerun()
+                    else:
+                        st.info("O nome não foi alterado.")
+        else:
+            st.caption("Elemento oficial ou resultado de consulta: somente leitura.")
         for k,v in list((selecionado.get("properties") or {}).items())[:8]:
             st.caption(f"{k}: {v}")
     st.divider()
@@ -1181,12 +1511,22 @@ with right:
     if lista:
         alvo=st.selectbox("Remover camada importada",[v[0] for v in lista],format_func=lambda x:dict(lista)[x])
         if st.button("Remover camada",key="pg_excluir_camada"):
+            camada_removida = next((l for l in p["layers"] if l["id"]==alvo), None)
+            if camada_removida is not None:
+                pg_registrar({"tipo":"remover_camada", "camada":camada_removida,
+                              "posicao":p["layers"].index(camada_removida)})
             p["layers"]=[l for l in p["layers"] if l["id"]!=alvo]
             st.session_state.prisma_geo_revisao+=1
             st.rerun()
     if st.button("Limpar desenhos",use_container_width=True):
+        anteriores={l["id"]:l["features"] for l in p["layers"]
+                    if l["source"]=="manual" and l["features"]}
+        if anteriores:
+            pg_registrar({"tipo":"limpar_desenhos", "anteriores":anteriores})
         for layer in p["layers"]:
             if layer["source"]=="manual":layer["features"]=[]
+        st.session_state.prisma_geo_selecionado=None
+        st.session_state.pop("pg_nome_elemento", None)
         st.session_state.prisma_geo_revisao+=1
         st.rerun()
 
