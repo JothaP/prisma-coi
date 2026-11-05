@@ -144,7 +144,8 @@ def bootstrap_admin(user):
     if admin_atual:return
     _tabela("prisma_perfis",method="PATCH",params={"id":"eq."+user["id"]},
             payload={"perfil":"admin","status":"ativo"},prefer="return=minimal")
-    auditar(user["id"],"bootstrap_admin",user["id"],"Primeira conta administrativa")
+    auditar(user["id"], "bootstrap_admin", user["id"], "Primeira conta administrativa",
+            modulo="gestao", tipo="ALTERACAO")
 
 def permissoes_usuario(user_id):
     return _tabela("prisma_permissoes",params={"usuario_id":"eq."+str(user_id),"select":"modulo,acao,permitido"})
@@ -167,9 +168,44 @@ def permissoes_efetivas(perfil,linhas):
 def listar_perfis():
     return _tabela("prisma_perfis",params={"select":"id,email,nome,perfil,status,criado_em","order":"criado_em.desc","limit":"500"})
 
-def auditar(ator,acao,alvo,detalhes=""):
-    _tabela("prisma_auditoria",method="POST",payload={"autor_id":str(ator),"acao":acao,
-              "alvo_id":str(alvo) if alvo else None,"detalhes":str(detalhes)[:500]},prefer="return=minimal")
+def auditar(ator, acao, alvo=None, detalhes="", *, modulo=None, tipo=None,
+            resultado="SUCESSO", registro_id=None):
+    """Grava um evento persistente de auditoria no Supabase (somente servidor).
+
+    Preserva os quatro argumentos posicionais utilizados pela Gestão de Acessos.
+    Não registrar senhas, tokens, conteúdo de planilhas ou dados sensíveis em detalhes.
+    """
+    if not ator or not str(acao).strip():
+        raise ErroPRISMA("Evento de auditoria sem autor ou ação.")
+    acao = str(acao).strip().lower()
+    tipos_legados = {
+        "bootstrap_admin": "ALTERACAO", "alterar_conta": "ALTERACAO",
+        "alterar_permissoes": "ALTERACAO", "login": "LOGIN",
+    }
+    if tipo is None:
+        tipo = tipos_legados.get(acao)
+    if modulo is None and acao in ("bootstrap_admin", "alterar_conta", "alterar_permissoes"):
+        modulo = "gestao"
+    resultado = str(resultado).strip().upper()
+    if resultado not in ("SUCESSO", "FALHA"):
+        raise ErroPRISMA("Resultado de auditoria inválido.")
+    if tipo is not None:
+        tipo = str(tipo).strip().upper()
+        if tipo not in ("LOGIN", "CRIACAO", "GRAVACAO", "ALTERACAO", "EXCLUSAO"):
+            raise ErroPRISMA("Tipo de auditoria inválido.")
+    payload = {
+        "autor_id": str(ator), "acao": acao,
+        "alvo_id": str(alvo) if alvo else None,
+        "detalhes": str(detalhes or "")[:500],
+        "modulo": str(modulo).strip() if modulo else None,
+        "tipo": tipo, "resultado": resultado,
+        "registro_id": str(registro_id)[:160] if registro_id is not None else (
+            str(alvo) if alvo else None),
+    }
+    # A identificação nominal do autor é preenchida pelo banco via trigger,
+    # para manter um retrato histórico mesmo se a conta for posteriormente excluída.
+    _tabela("prisma_auditoria", method="POST", payload=payload,
+            prefer="return=minimal")
 
 def atualizar_usuario(ator,alvo,perfil,status):
     if perfil not in {"admin","usuario","operador"} or status not in {"pendente","ativo","bloqueado"}:
@@ -183,7 +219,8 @@ def atualizar_usuario(ator,alvo,perfil,status):
         if len(outros)<2:raise ErroPRISMA("Não é possível bloquear o último administrador.")
     _tabela("prisma_perfis",method="PATCH",params={"id":"eq."+str(alvo)},
             payload={"perfil":perfil,"status":status},prefer="return=minimal")
-    auditar(ator,"alterar_conta",alvo,f"Perfil={perfil}; Status={status}")
+    auditar(ator, "alterar_conta", alvo, f"Perfil={perfil}; Status={status}",
+            modulo="gestao", tipo="ALTERACAO")
 
 def salvar_permissoes(ator,alvo,matriz):
     if str(ator)==str(alvo):raise ErroPRISMA("Permissões administrativas próprias não podem ser alteradas aqui.")
@@ -194,4 +231,5 @@ def salvar_permissoes(ator,alvo,matriz):
             if m in MODULOS and m!="gestao" and a in ACOES]
     _tabela("prisma_permissoes",method="POST",params={"on_conflict":"usuario_id,modulo,acao"},
             payload=itens,prefer="resolution=merge-duplicates,return=minimal")
-    auditar(ator,"alterar_permissoes",alvo,f"{len(itens)} permissões atualizadas")
+    auditar(ator, "alterar_permissoes", alvo, f"{len(itens)} permissões atualizadas",
+            modulo="gestao", tipo="ALTERACAO")
