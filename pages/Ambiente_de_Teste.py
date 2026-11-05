@@ -979,10 +979,10 @@ def _rede_por_poligono(db_caminho: str, area_json: str, zoom: int):
 
 
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
-# Interação V3: mouse esquerdo navega/seleciona; direito abre menu/cria vértices.
+# Interação V4: captura DOM do mouse independente do contextmenu do MapLibre.
 # Componente de mapa V2; tudo é renderizado pelo MapLibre, sem marcadores HTML.
 GEO_HTML='''
-<div class="pg-frame" tabindex="0">
+<div class="pg-frame" tabindex="0" data-pg-versao="4">
  <div class="pg-tools">
   <button data-mode="pan">✋ Navegar</button>
   <button data-mode="point">📍 Ponto</button>
@@ -1002,7 +1002,7 @@ GEO_HTML='''
   <button type="button" data-context-mode="polygon" role="menuitem">⬡ Desenhar polígono</button>
   <button type="button" data-context-mode="network-area" role="menuitem">▱ Selecionar área da rede</button>
  </div>
- <div class="pg-status">Botão esquerdo: navegar e selecionar · Botão direito: desenhar e escolher ferramentas.</div>
+ <div class="pg-status">V4 · Esquerdo: navegar/selecionar · Direito: menu e vértices.</div>
 </div>
 '''
 GEO_CSS='''
@@ -1029,6 +1029,7 @@ export default function(component) {
  const css=document.createElement('link');css.rel='stylesheet';
  css.href='https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css';root.appendChild(css);
  let map=null, alive=true, mode='pan', draft=[], draftRedo=[];
+ let mapReady=false, lastSecondaryAt=-1, lastSecondaryPoint=null, leftDown=null;
  const modes=[...root.querySelectorAll('[data-mode]')];
  const undoButton=root.querySelector('[data-act="undo"]');
  const redoButton=root.querySelector('[data-act="redo"]');
@@ -1037,7 +1038,14 @@ export default function(component) {
  const closeContextMenu=()=>{contextMenu.hidden=true;contextPosition=null;};
  const fc=(features)=>({type:'FeatureCollection',features:features||[]});
  const sets=(id,geo)=>{if(map?.getSource(id)) map.getSource(id).setData(geo);};
- const eventId=()=>crypto.randomUUID();
+ // No componente isolado do Streamlit, crypto.randomUUID pode estar ausente.
+ // Identificadores locais não exigem aleatoriedade criptográfica.
+ let eventCounter=0;
+ const eventId=()=>{
+   if(typeof crypto!=='undefined' && typeof crypto.randomUUID==='function')return crypto.randomUUID();
+   eventCounter++;
+   return `pg_${Date.now().toString(36)}_${eventCounter}_${Math.random().toString(36).slice(2,10)}`;
+ };
  const viewport=()=>{const c=map.getCenter();return {center:[c.lng,c.lat],zoom:map.getZoom()};};
  const refreshDraft=()=>{
    if(!map?.getSource('pg-draft'))return;
@@ -1135,6 +1143,64 @@ export default function(component) {
    }
  };
  root.addEventListener('keydown',onKey);
+
+ const mapTarget=(event)=>Boolean(event.target?.closest?.('.pg-map'));
+ const pointFromPointer=(event)=>{
+   if(!map || !mapReady)return null;
+   const rect=map.getCanvas().getBoundingClientRect();
+   const x=event.clientX-rect.left, y=event.clientY-rect.top;
+   if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>rect.width||y>rect.height)return null;
+   const ll=map.unproject([x,y]);
+   return {pixel:{x,y}, coord:[Number(ll.lng.toFixed(7)),Number(ll.lat.toFixed(7))]};
+ };
+ const handleRight=(event)=>{
+   if(!mapTarget(event))return;
+   event.preventDefault();
+   event.stopPropagation();
+   if(!mapReady)return;
+   const point=pointFromPointer(event);
+   if(!point)return;
+   // O navegador pode gerar pointerup e contextmenu para o mesmo clique.
+   // Evita abrir o menu duas vezes ou inserir dois vértices.
+   const now=performance.now();
+   if(lastSecondaryAt>=0 && now-lastSecondaryAt<500 && lastSecondaryPoint &&
+      Math.abs(lastSecondaryPoint.x-point.pixel.x)<4 && Math.abs(lastSecondaryPoint.y-point.pixel.y)<4)return;
+   lastSecondaryAt=now;lastSecondaryPoint=point.pixel;
+   root.focus({preventScroll:true});
+   if(mode==='pan' || event.shiftKey){
+     openContextMenu(point.coord, point.pixel);
+   }else{
+     closeContextMenu();
+     addVertex(point.coord);
+     status.textContent=mode==='pan'?'Ponto incluído.':'Vértice registrado com botão direito. Use Concluir quando terminar.';
+   }
+ };
+ const handlePointerDown=(event)=>{
+   if(event.button===0 && mapTarget(event))leftDown={x:event.clientX,y:event.clientY};
+ };
+ const handleLeftClick=(event)=>{
+   if(event.button!==0 || !mapTarget(event) || !mapReady)return;
+   if(leftDown && Math.hypot(event.clientX-leftDown.x,event.clientY-leftDown.y)>6)return;
+   root.focus({preventScroll:true});
+   if(!contextMenu.hidden){closeContextMenu();return;}
+   const point=pointFromPointer(event);
+   if(!point)return;
+   const layers=['pg-points-layer','pg-lines-layer','pg-poly-names','pg-fill','pg-network-layer'];
+   const hits=map.queryRenderedFeatures([point.pixel.x,point.pixel.y],{layers});
+   if(hits.length){
+     const f=hits[0];
+     setTriggerValue('selected',{event:eventId(),id:String(f.properties?.pg_id??f.id??''),properties:f.properties||{},viewport:viewport()});
+     status.textContent='Elemento selecionado. Consulte suas propriedades no painel à direita.';
+   }else{
+     status.textContent='Clique esquerdo detectado. Arraste para navegar; botão direito abre as ferramentas.';
+   }
+ };
+ // Fallback para Edge, Chrome e menus do sistema operacional.
+ root.addEventListener('pointerdown',handlePointerDown,true);
+ const handlePointerUp=(e)=>{if(e.button===2)handleRight(e);};
+ root.addEventListener('pointerup',handlePointerUp,true);
+ root.addEventListener('contextmenu',handleRight,true);
+ root.addEventListener('click',handleLeftClick,true);
  let ro=null;
  import('https://esm.sh/maplibre-gl@5.6.2').then(module=>{
   if(!alive)return;
@@ -1186,37 +1252,17 @@ export default function(component) {
      paint:{'line-color':'#e67e22','line-width':2,'line-dasharray':[2,2]}});
    map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],
      paint:{'circle-color':'#e67e22','circle-radius':4}});
-   // Clique esquerdo: NÃO cria geometrias, mesmo com ferramenta ativa.
-   // Navegação, arraste e seleção de objetos continuam disponíveis.
-   map.on('click',(e)=>{
-     if(e.originalEvent?.button!==0)return;
-     root.focus();
-     if(!contextMenu.hidden){closeContextMenu();return;}
-     const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-poly-names','pg-fill','pg-network-layer']});
-     if(hits.length){
-       const f=hits[0];
-       setTriggerValue('selected',{event:eventId(),id:String(f.properties?.pg_id??f.id??''),properties:f.properties||{},viewport:viewport()});
-     }
-   });
-   // Contextmenu é o evento nativo do MapLibre para o botão direito.
-   // Ao desenhar, clique direito marca vértices; Shift + direito reabre o menu.
-   map.on('contextmenu',(e)=>{
-     root.focus();
-     const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
-     if(mode==='pan' || e.originalEvent.shiftKey){
-       openContextMenu(p,e.point);
-     }else{
-       closeContextMenu();
-       addVertex(p);
-     }
-   });
+   // Interações são capturadas pelo DOM do contêiner do mapa.
+   // Isso funciona mesmo se o navegador não encaminhar "contextmenu" ao MapLibre.
+   // A navegação/arraste continua a cargo do MapLibre, com o botão ESQUERDO.
+   mapReady=true;
    if(data.focus?.length===2)map.flyTo({center:data.focus,zoom:15});
    setMode('pan');
   });
   map.on('error',()=>{if(alive)status.textContent='Falha no mapa ou nos mosaicos. Verifique sua conexão.';});
   ro=new ResizeObserver(()=>map?.resize());ro.observe(mapNode);
  }).catch(()=>{if(alive)status.textContent='Não foi possível carregar MapLibre. Verifique a conexão.';});
- return ()=>{alive=false;root.removeEventListener('keydown',onKey);if(ro)ro.disconnect();if(map)map.remove();};
+ return ()=>{alive=false;mapReady=false;root.removeEventListener('keydown',onKey);root.removeEventListener('pointerdown',handlePointerDown,true);root.removeEventListener('pointerup',handlePointerUp,true);root.removeEventListener('contextmenu',handleRight,true);root.removeEventListener('click',handleLeftClick,true);if(ro)ro.disconnect();if(map)map.remove();};
 }
 '''
 
@@ -1453,7 +1499,7 @@ with left:
         st.error("Mapa muito grande. Oculte camadas ou reduza os arquivos importados.")
         st.stop()
     try:
-        comp=st.components.v2.component("prisma_geo_editor_v3",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
+        comp=st.components.v2.component("prisma_geo_editor_v4",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
         response=comp(data={"project":features,"lookup":st.session_state.prisma_geo_consulta,
                              "network":dados_rede,"networkArea":p.get("network_area"),
                              "topography":dados_topografia,
@@ -1461,7 +1507,7 @@ with left:
                              "center":p["center"],"zoom":p["zoom"],
                              "canUndo":bool(st.session_state.pg_desfazer),
                              "canRedo":bool(st.session_state.pg_refazer)},
-                       key="prisma_geo_mapa_componente_v3",width="stretch",height=600,
+                       key="prisma_geo_mapa_componente_v4",width="stretch",height=600,
                        on_created_change=lambda:None,on_selected_change=lambda:None,
                        on_network_area_change=lambda:None,on_history_action_change=lambda:None)
         if response.network_area and pg_evento_novo("area", response.network_area):
