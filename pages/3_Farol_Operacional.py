@@ -1504,6 +1504,13 @@ def identificar_bairro_por_ponto(lat, lon, bairros):
 # CONCENTRAÇÕES / ANÁLISE ESPACIAL
 # ============================================================
 
+# Contrato da tabela de concentrações, inclusive quando nenhum grupo atende
+# ao mínimo de O.S. Evita KeyError em mapas, seleção e relatórios.
+CABECALHO_CONCENTRACOES = [
+    "ID_CONCENTRACAO", "GRUPO", "LATITUDE", "LONGITUDE",
+    "QTD_OS", "QTD_MATRICULAS", "BAIRROS",
+]
+
 @st.cache_data(ttl=180, show_spinner=False, max_entries=12)
 def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MINIMO_OS_CONCENTRACAO_PADRAO):
     df = df_pontos.copy()
@@ -1511,7 +1518,10 @@ def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MI
     df["_lon"] = df["Longitude"].map(parse_float)
     df = df.dropna(subset=["_lat", "_lon"]).reset_index(drop=True)
     if df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        # Há O.S. no período, mas nenhuma coordenada utilizável.
+        # Mesmo sem registros, ambas as tabelas precisam manter seu esquema.
+        df["_grupo"] = pd.Series(dtype="int64")
+        return pd.DataFrame(columns=CABECALHO_CONCENTRACOES), df
     # Não agrupa pontos de unidades diferentes (THE / API / TIM).
     # Preserva a lógica de proximidade entre municípios da mesma unidade.
     unidades_os = df["Cidade"].fillna("").map(unidade_da_cidade_farol).tolist()
@@ -1558,7 +1568,9 @@ def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MI
     df = df[df["_grupo"].isin(grupos_validos)].copy()
 
     if df.empty:
-        return pd.DataFrame(), df
+        # Coordenadas válidas, mas nenhum grupo atingiu minimo_os.
+        # Retornar colunas conhecidas para que a interface não falhe.
+        return pd.DataFrame(columns=CABECALHO_CONCENTRACOES), df
 
     concentracoes = []
     for grupo, bloco in df.groupby("_grupo"):
@@ -1577,7 +1589,9 @@ def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MI
             "BAIRROS": ", ".join(bairros),
         })
 
-    cdf = pd.DataFrame(concentracoes).sort_values(["QTD_OS", "QTD_MATRICULAS"], ascending=False).reset_index(drop=True)
+    cdf = (pd.DataFrame(concentracoes, columns=CABECALHO_CONCENTRACOES)
+           .sort_values(["QTD_OS", "QTD_MATRICULAS"], ascending=False)
+           .reset_index(drop=True))
     # Numeração independente THE / API / TIM. O GRUPO é preservado para
     # vínculos das O.S., eventos, ativos e acompanhamentos já existentes.
     contador = {"THE": 0, "API": 0, "TIM": 0}
@@ -4016,15 +4030,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         _tempo_analise = tempo_execucao.perf_counter() - _inicio_analise
 
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("O.S. analisadas", len(analise))
-        k2.metric("O.S. com coordenada", int(analise[["Latitude", "Longitude"]].notna().all(axis=1).sum()))
+        # Mostrar separadamente o volume recebido do Field/BI e os pontos
+        # georreferenciados, para identificar importações com coordenadas vazias.
+        k1.metric("O.S. no período", len(df_pontos))
+        k2.metric("O.S. com coordenada", len(analise))
         k3.metric("Concentrações", len(concentracoes))
         k4.metric("Pontos operacionais próximos", len(proximidades))
 
         # Panorama sem O.S./equipamentos, mas com bairros e eventos de todos os municípios analisados.
         st.caption("Panorama: limites de bairros e áreas impactadas por eventos; selecione o símbolo circular azul para abrir a concentração.")
         _inicio_renderizacao = tempo_execucao.perf_counter()
-        codigos_validos = set(concentracoes["ID_CONCENTRACAO"].astype(str))
+        # A seleção anterior pode ter deixado um ID em sessão mesmo quando
+        # o dia consultado já não contém nenhuma concentração.
+        codigos_validos = (set(concentracoes["ID_CONCENTRACAO"].astype(str))
+                           if not concentracoes.empty else set())
         selecionada = str(st.session_state.get("farol_v2_concentracao", "") or "")
         if selecionada not in codigos_validos:
             selecionada = ""
@@ -4195,7 +4214,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     st.write(f"Análise espacial: {_tempo_analise:.2f} s")
                     st.write(f"Montagem e exibição do mapa: {_tempo_mapa:.2f} s")
         if concentracoes.empty:
-            st.warning("Nenhuma concentração atingiu o mínimo configurado.")
+            if analise.empty:
+                st.warning(
+                    "Nenhuma O.S. do período consultado possui latitude e longitude válidas. "
+                    "Confira as coordenadas da base importada do Field/BI na aba PONTOS."
+                )
+            else:
+                st.warning(
+                    f"Nenhuma concentração identificada com pelo menos {int(minimo_os)} O.S. "
+                    f"interligadas a até {int(raio_concentracao)} m no período consultado."
+                )
+                st.caption(
+                    f"Foram encontradas {len(analise)} O.S. com coordenadas válidas. "
+                    "Isso não indica falha na importação: os registros podem estar dispersos."
+                )
         else:
             st.markdown("### 📋 Análise das Concentrações")
             st.caption("Expanda uma concentração para consultar O.S., equipamentos, eventos relacionados e baixar o PDF.")
