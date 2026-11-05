@@ -6,8 +6,9 @@ na próxima consulta de perfil (máx. 30 segundos).
 """
 from datetime import datetime, timedelta, timezone
 import streamlit as st
-from prisma_backend import (ErroPRISMA, MODULOS, permissoes_efetivas, permissoes_usuario,
-                           perfil_de_usuario, bootstrap_admin, renovar, usuario_autenticado)
+from prisma_backend import (ErroPRISMA, MODULOS, auditar, permissoes_efetivas,
+                           permissoes_usuario, perfil_de_usuario, bootstrap_admin,
+                           renovar, usuario_autenticado)
 
 _REVALIDAR_SEGUNDOS=25
 
@@ -18,11 +19,26 @@ def _limpar():
         st.session_state.pop(k,None)
 
 def iniciar_sessao(tokens):
+    """Valida uma nova sessão e registra um único login autorizado.
+
+    O registro ocorre apenas aqui, e não em verificar_autenticacao(), pois essa
+    função é executada repetidamente pelo Streamlit e durante a revalidação.
+    Se o banco não confirmar o log, a sessão não é liberada sem auditoria.
+    """
     _limpar()
     if not isinstance(tokens,dict) or not tokens.get("access_token") or not tokens.get("refresh_token"):
         return False
     st.session_state["prisma_tokens"]=tokens
-    return verificar_autenticacao(forcar=True)
+    if not verificar_autenticacao(forcar=True):
+        return False
+    try:
+        auditar(st.session_state["prisma_usuario_id"], "login", detalhes="Login autorizado no PRISMA",
+                modulo="autenticacao", tipo="LOGIN")
+    except ErroPRISMA:
+        _limpar()
+        raise ErroPRISMA("Não foi possível registrar o login na auditoria. "
+                         "O acesso não foi liberado; contate a administração.") from None
+    return True
 
 def verificar_autenticacao(forcar=False):
     tokens=st.session_state.get("prisma_tokens")
@@ -89,6 +105,33 @@ def obter_modulos_perfil(perfil):
 
 def obter_modulos_usuario():
     return list(st.session_state.get("modulos",[])) if verificar_autenticacao() else []
+
+# Cada módulo deverá chamar esta função DEPOIS da alteração efetivamente concluída.
+# A chamada não substitui exigir_acao nem torna uma gravação externa atômica.
+_TIPOS_OPERACIONAIS = {
+    "criar": "CRIACAO", "gravar": "GRAVACAO", "importar": "GRAVACAO",
+    "editar": "ALTERACAO", "excluir": "EXCLUSAO",
+}
+
+
+def registrar_atividade(modulo, acao, *, registro_id=None, detalhes=""):
+    """Audita uma criação, gravação, edição ou exclusão realizada com sucesso.
+
+    Uso futuro: registrar_atividade("3", "editar", registro_id="evento-152",
+                                   detalhes="Evento operacional atualizado")
+    Não registrar consultas, exportações ou apenas navegação.
+    """
+    if not verificar_autenticacao():
+        raise ErroPRISMA("Não foi possível identificar o usuário para a auditoria.")
+    modulo = str(modulo).strip()
+    acao = str(acao).strip().lower()
+    if modulo not in MODULOS:
+        raise ErroPRISMA("Módulo inválido no registro de auditoria.")
+    if acao not in _TIPOS_OPERACIONAIS:
+        raise ErroPRISMA("A auditoria aceita somente ações que modificam dados.")
+    auditar(st.session_state["prisma_usuario_id"], acao, detalhes=detalhes,
+            modulo=modulo, tipo=_TIPOS_OPERACIONAIS[acao], registro_id=registro_id)
+
 
 def fazer_logout():
     _limpar()
