@@ -534,6 +534,56 @@ def matriculas_por_codigo(codigos):
     return checar_geojson({"type": "FeatureCollection", "features": features})
 
 
+@st.cache_data(show_spinner=False, max_entries=6)
+def ativos_sob_demanda(caminho: str, tamanho: int, mtime: int, tipo: str):
+    """Consulta CSV oficial somente ao habilitar a camada; sem alterar a base.
+
+    Os parâmetros tamanho e mtime invalidam o cache quando o CSV é atualizado.
+    Coordenadas com vírgula decimal são aceitas pela função valor_coord.
+    """
+    _ = (tamanho, mtime)
+    features = []
+    with open(caminho, "r", encoding="utf-8-sig", newline="") as arquivo:
+        amostra = arquivo.read(4096)
+        arquivo.seek(0)
+        delimitador = ";" if amostra.count(";") > amostra.count(",") else ","
+        linhas = csv.DictReader(arquivo, delimiter=delimitador)
+        for linha in linhas:
+            colunas = {str(chave).strip().upper(): valor for chave, valor in linha.items()}
+            lat = valor_coord(colunas.get("LATITUDE"), 90)
+            lon = valor_coord(colunas.get("LONGITUDE"), 180)
+            if lat is None or lon is None or lat == 0 or lon == 0:
+                continue
+
+            identificacao = str(colunas.get("IDENTIFICACAO_ATIVO") or "").strip()
+            if tipo == "Logger":
+                nome = identificacao or str(colunas.get("ID_LOGGER") or "").strip()
+                if not nome:
+                    nome = str(colunas.get("ENDERECO") or tipo).strip()
+            else:
+                nome = str(colunas.get("NOME_POCO") or colunas.get("NOME_POCOS") or "").strip()
+                if not nome:
+                    nome = identificacao or str(colunas.get("ENDERECO") or tipo).strip()
+
+            chave = f"{tipo}:{lon},{lat}:{identificacao or nome}"
+            features.append({
+                "type": "Feature",
+                "id": uuid.uuid5(uuid.NAMESPACE_URL, chave).hex,
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                "properties": {
+                    "Tipo": tipo,
+                    "Nome": nome[:160],
+                    "Código": identificacao[:120],
+                },
+            })
+            if len(features) > MAX_FEATURES:
+                raise ValueError(
+                    f"A camada {tipo} ultrapassa {MAX_FEATURES} elementos. "
+                    "Utilize um recorte espacial para manter o mapa leve."
+                )
+    return features
+
+
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
 GEO_HTML='''<div class="pg-frame"><div class="pg-tools"><button data-mode="pan">✋ Navegar</button><button data-mode="point">📍 Ponto</button><button data-mode="line">〰 Linha</button><button data-mode="polygon">⬡ Polígono</button><button data-act="finish">✓ Concluir</button><button data-act="cancel">✕ Cancelar</button></div><div class="pg-map"></div><div class="pg-status">Iniciando mapa…</div></div>'''
 GEO_CSS='''
