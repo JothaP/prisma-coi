@@ -6,6 +6,7 @@ O sistema persiste projetos exclusivamente por download/upload .prismageo.
 from __future__ import annotations
 
 import csv
+import base64
 import hashlib
 import os
 import tempfile
@@ -55,6 +56,9 @@ _BLOQUEIO_INDICE = threading.Lock()
 def novo_projeto(nome="Meu mapa"):
     return {"format": "prismageo", "version": 1, "name": nome,
             "center": HOME[:], "zoom": 11,
+            # Referências e visibilidade apenas; nenhuma cópia das bases oficiais.
+            "official": {"pocos": False, "loggers": False, "rede": False,
+                         "topografia": False, "topo_file": ""},
             "layers": [{"id": "desenhos", "name": "Meus desenhos", "source": "manual", "visible": True, "features": []}]}
 
 
@@ -239,6 +243,13 @@ def abrir_projeto(dados):
         layer["name"]=str(layer.get("name","Camada"))[:100]
         layer["visible"]=bool(layer.get("visible",True))
     projeto["name"]=str(projeto.get("name","Meu mapa"))[:120]
+    # Compatível com projetos V1 anteriores: official não é obrigatório.
+    estado_oficial = projeto.get("official") if isinstance(projeto.get("official"), dict) else {}
+    projeto["official"] = {"pocos": bool(estado_oficial.get("pocos", False)),
+                           "loggers": bool(estado_oficial.get("loggers", False)),
+                           "rede": bool(estado_oficial.get("rede", False)),
+                           "topografia": bool(estado_oficial.get("topografia", False)),
+                           "topo_file": str(estado_oficial.get("topo_file", ""))[:300]}
     center=projeto.get("center",HOME)
     if not isinstance(center,list) or len(center)!=2 or valor_coord(center[0],180) is None or valor_coord(center[1],90) is None:
         projeto["center"]=HOME[:]
@@ -529,6 +540,7 @@ def matriculas_por_codigo(codigos):
                 "Bairro": str(linha["BAIRRO"]),
                 "Endereço": str(linha["END_LIGACAO"]),
                 "Categoria": str(linha["CATEGORIA"]),
+                "pg_tipo": "Matrícula",
             },
         })
     return checar_geojson({"type": "FeatureCollection", "features": features})
@@ -572,6 +584,7 @@ def ativos_sob_demanda(caminho: str, tamanho: int, mtime: int, tipo: str):
                 "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 "properties": {
                     "Tipo": tipo,
+                    "pg_tipo": tipo,
                     "Nome": nome[:160],
                     "Código": identificacao[:120],
                 },
@@ -584,8 +597,246 @@ def ativos_sob_demanda(caminho: str, tamanho: int, mtime: int, tipo: str):
     return features
 
 
+
+# ============================================================
+# PRISMA GEO — REDE DE ABASTECIMENTO (KMZ) E TOPOGRAFIA (GeoTIFF)
+# Camadas estritamente sob demanda. Nenhum dado oficial é modificado.
+# O SQLite abaixo é um ÍNDICE TÉCNICO DESCARTÁVEL em /tmp, não é
+# armazenamento de projetos.
+# ============================================================
+
+_BLOQUEIO_REDE = threading.Lock()
+REDE_MAX_TRECHOS_MAPA = 5500
+REDE_MAX_VERTICES_MAPA = 90000
+REDE_MAX_COORDENADAS_INDICE = 4_000_000
+REDE_MAX_TRECHOS_INDICE = 500_000
+TOPO_MAX_PIXELS = 700
+
+
+def _pasta_topografias() -> list[Path]:
+    """Descobre DEMs em dados/topografias; aceita também a pasta antiga topografia."""
+    encontrados = []
+    for pasta in (PASTA_DADOS / "topografias", PASTA_DADOS / "topografia"):
+        if pasta.is_dir():
+            encontrados.extend(p for p in pasta.rglob("*") if p.is_file() and p.suffix.lower() in (".tif", ".tiff"))
+    return sorted(set(encontrados), key=lambda p: str(p).lower())
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def _topografia_previa(caminho: str, tamanho: int, mtime_ns: int):
+    """Produz uma imagem sombreada de até 700 px; nunca envia o DEM bruto ao navegador.
+
+    Reprojeta para EPSG:4326 para encaixar a imagem no MapLibre; usa rasterio
+    (já presente nas dependências do PRISMA). A imagem é apenas visualização.
+    """
+    _ = (tamanho, mtime_ns)
+    import numpy as np
+    from PIL import Image
+    import rasterio
+    from rasterio.enums import Resampling
+    from rasterio.vrt import WarpedVRT
+
+    with rasterio.open(caminho) as src:
+        if src.crs is None:
+            raise ValueError("GeoTIFF sem sistema de referência (CRS). Corrija a fonte antes de exibir.")
+        with WarpedVRT(src, crs="EPSG:4326", resampling=Resampling.bilinear) as vrt:
+            escala = min(1.0, TOPO_MAX_PIXELS / max(vrt.width, vrt.height))
+            w = max(2, int(vrt.width * escala))
+            h = max(2, int(vrt.height * escala))
+            dados = vrt.read(1, out_shape=(h, w), masked=True, resampling=Resampling.bilinear)
+            limite = vrt.bounds
+    valores = dados.filled(np.nan).astype("float32", copy=False)
+    validos = np.isfinite(valores) & (~np.ma.getmaskarray(dados))
+    validos &= (valores > -1000) & (valores < 10000)
+    if not np.any(validos):
+        raise ValueError("O arquivo topográfico não possui elevações válidas.")
+    elev = valores[validos]
+    baixo, alto = np.percentile(elev, [2, 98])
+    if alto - baixo < 1e-4:
+        alto = baixo + 1.0
+    z = np.clip((valores - baixo) / (alto - baixo), 0, 1)
+    z = np.where(validos, z, 0.5)
+    # Hillshade visual leve; esta prévia não substitui um MDE para cálculos.
+    gy, gx = np.gradient(z)
+    gradiente = np.sqrt(gx * gx + gy * gy)
+    luz = np.clip(0.85 - gx * 5.0 - gy * 5.0, 0.35, 1.0)
+    # Paleta discreta, para não esconder marcadores nem rede.
+    r = np.clip(176 + z * 42, 0, 255) * luz
+    g = np.clip(194 - z * 35, 0, 255) * luz
+    b = np.clip(156 - z * 65, 0, 255) * luz
+    a = np.where(validos, 205, 0).astype("uint8")
+    rgba = np.stack([r, g, b, a], axis=-1).astype("uint8")
+    img = Image.fromarray(rgba, "RGBA")
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG", optimize=True)
+    return {
+        "url": "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii"),
+        "coordinates": [
+            [float(limite.left), float(limite.top)],
+            [float(limite.right), float(limite.top)],
+            [float(limite.right), float(limite.bottom)],
+            [float(limite.left), float(limite.bottom)],
+        ],
+        "size": (w, h),
+        "elevation_range": (round(float(np.min(elev)), 1), round(float(np.max(elev)), 1)),
+    }
+
+
+def _local_tag(elemento) -> str:
+    return elemento.tag.rsplit("}", 1)[-1] if isinstance(elemento.tag, str) else ""
+
+
+def _kml_linha(coordenadas: str) -> list[list[float]]:
+    """Converte coordenadas KML lon,lat[,alt], descartando altitude para o mapa 2D."""
+    saida = []
+    for bloco in (coordenadas or "").split():
+        partes = bloco.split(",")
+        if len(partes) < 2:
+            continue
+        lon, lat = valor_coord(partes[0], 180), valor_coord(partes[1], 90)
+        if lon is not None and lat is not None:
+            ponto = [lon, lat]
+            if not saida or ponto != saida[-1]:
+                saida.append(ponto)
+    return saida
+
+
+def _db_rede(caminho: Path) -> Path:
+    """Indexa linhas de um KMZ em SQLite/RTree local descartável sob demanda.
+
+    Não carrega o conteúdo descompactado completo em memória.
+    """
+    info = caminho.stat()
+    assinatura = f"{caminho.resolve()}:{info.st_size}:{info.st_mtime_ns}:rede_v2"
+    chave = hashlib.sha256(assinatura.encode()).hexdigest()[:20]
+    pasta = Path(tempfile.gettempdir()) / "prisma_geo_rede"
+    pasta.mkdir(parents=True, exist_ok=True)
+    destino = pasta / f"rede_{chave}.sqlite"
+
+    def pronto(db):
+        if not db.is_file():
+            return False
+        try:
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as con:
+                return con.execute("SELECT valor FROM metadata WHERE chave='versao'").fetchone() == ("2",)
+        except (sqlite3.Error, OSError):
+            return False
+
+    if pronto(destino):
+        return destino
+
+    with _BLOQUEIO_REDE:
+        if pronto(destino):
+            return destino
+        tmp = pasta / f"{chave}_{uuid.uuid4().hex}.tmp"
+        total_trechos = 0
+        total_vertices = 0
+        try:
+            con = sqlite3.connect(tmp)
+            try:
+                con.execute("CREATE TABLE linhas (fid INTEGER PRIMARY KEY, nome TEXT, coordenadas TEXT)")
+                con.execute("CREATE VIRTUAL TABLE limites USING rtree(fid, minx, maxx, miny, maxy)")
+                con.execute("CREATE TABLE metadata(chave TEXT PRIMARY KEY, valor TEXT)")
+                with zipfile.ZipFile(caminho, "r") as arquivo:
+                    entradas = [i for i in arquivo.infolist() if i.filename.lower().endswith(".kml") and not i.is_dir()]
+                    if not entradas:
+                        raise ValueError("Rede_Agua_THE.kmz não contém arquivo KML.")
+                    # A rede pode estar organizada em vários arquivos internos KML.
+                    if sum(i.file_size for i in entradas) > 600 * 1024 * 1024:
+                        raise ValueError("Rede muito grande para indexação no servidor de testes (limite 600 MB descompactados).")
+                    for entrada in entradas:
+                        with arquivo.open(entrada, "r") as fluxo:
+                            # Limpa o nó-raiz periodicamente, evitando acumular
+                            # centenas de milhares de Placemarks vazios na RAM.
+                            contexto = ET.iterparse(fluxo, events=("start", "end"))
+                            _, raiz_xml = next(contexto)
+                            for evento, elem in contexto:
+                                if evento != "end" or _local_tag(elem) != "Placemark":
+                                    continue
+                                nome = next((e.text or "" for e in elem.iter() if _local_tag(e) == "name"), "Trecho da rede")
+                                for linha in elem.iter():
+                                    if _local_tag(linha) != "LineString":
+                                        continue
+                                    texto = next((e.text or "" for e in linha.iter() if _local_tag(e) == "coordinates"), "")
+                                    coordenadas = _kml_linha(texto)
+                                    if len(coordenadas) < 2:
+                                        continue
+                                    total_trechos += 1
+                                    total_vertices += len(coordenadas)
+                                    if total_trechos > REDE_MAX_TRECHOS_INDICE or total_vertices > REDE_MAX_COORDENADAS_INDICE:
+                                        raise ValueError("Rede acima do limite do protótipo. Será necessário gerar mosaicos vetoriais para esta base.")
+                                    xs = [p[0] for p in coordenadas]
+                                    ys = [p[1] for p in coordenadas]
+                                    con.execute("INSERT INTO linhas(fid,nome,coordenadas) VALUES (?,?,?)",
+                                                (total_trechos, nome[:140], json.dumps(coordenadas, separators=(",", ":"))))
+                                    con.execute("INSERT INTO limites(fid,minx,maxx,miny,maxy) VALUES (?,?,?,?,?)",
+                                                (total_trechos, min(xs), max(xs), min(ys), max(ys)))
+                                elem.clear()
+                                raiz_xml.clear()
+                con.execute("INSERT INTO metadata VALUES ('versao','2')")
+                con.execute("INSERT INTO metadata VALUES ('trechos',?)", (str(total_trechos),))
+                con.execute("INSERT INTO metadata VALUES ('vertices',?)", (str(total_vertices),))
+                con.commit()
+            finally:
+                con.close()
+            os.replace(tmp, destino)
+            return destino
+        finally:
+            if tmp.exists():
+                tmp.unlink()
+
+
+def _bbox_camera(centro, zoom):
+    # Aproximação para a primeira abertura, antes de o navegador informar a área exata.
+    z = max(6.0, min(18.0, float(zoom)))
+    span_x = min(3.0, 0.25 * 2 ** (11 - z))
+    span_y = min(3.0, 0.19 * 2 ** (11 - z))
+    return [float(centro[0]) - span_x / 2, float(centro[1]) - span_y / 2,
+            float(centro[0]) + span_x / 2, float(centro[1]) + span_y / 2]
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
+def _rede_por_area(db_caminho: str, bbox: tuple[float, float, float, float], zoom: int):
+    """Devolve APENAS trechos da janela solicitada, com simplificação por escala."""
+    from shapely.geometry import LineString
+    minx, miny, maxx, maxy = bbox
+    if minx >= maxx or miny >= maxy:
+        return [], False
+    # Limitar a resposta; nunca transferir toda a rede para o navegador.
+    with sqlite3.connect(f"file:{Path(db_caminho).resolve()}?mode=ro", uri=True) as con:
+        linhas = con.execute(
+            "SELECT l.fid, l.nome, l.coordenadas FROM limites r "
+            "JOIN linhas l ON l.fid=r.fid "
+            "WHERE r.maxx>=? AND r.minx<=? AND r.maxy>=? AND r.miny<=? "
+            "LIMIT ?",
+            (minx, maxx, miny, maxy, REDE_MAX_TRECHOS_MAPA + 1),
+        ).fetchall()
+    excedeu = len(linhas) > REDE_MAX_TRECHOS_MAPA
+    resultado = []
+    n_vertices = 0
+    # Tolerância visual; nunca grava geometrias simplificadas na base original.
+    tolerancia = 0.0 if zoom >= 16 else 0.000012 * (2 ** max(0, 15 - zoom))
+    for fid, nome, texto in linhas[:REDE_MAX_TRECHOS_MAPA]:
+        coords = json.loads(texto)
+        if tolerancia > 0 and len(coords) > 3:
+            coords = [list(p) for p in LineString(coords).simplify(tolerancia, preserve_topology=False).coords]
+        if len(coords) < 2:
+            continue
+        if n_vertices + len(coords) > REDE_MAX_VERTICES_MAPA:
+            excedeu = True
+            break
+        n_vertices += len(coords)
+        resultado.append({
+            "type": "Feature", "id": fid,
+            "geometry": {"type": "LineString", "coordinates": coords},
+            "properties": {"Nome": nome, "pg_tipo": "Rede de abastecimento"},
+        })
+    return resultado, excedeu
+
+
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
-GEO_HTML='''<div class="pg-frame"><div class="pg-tools"><button data-mode="pan">✋ Navegar</button><button data-mode="point">📍 Ponto</button><button data-mode="line">〰 Linha</button><button data-mode="polygon">⬡ Polígono</button><button data-act="finish">✓ Concluir</button><button data-act="cancel">✕ Cancelar</button></div><div class="pg-map"></div><div class="pg-status">Iniciando mapa…</div></div>'''
+# Componente de mapa V2; tudo é renderizado pelo MapLibre, sem marcadores HTML.
+GEO_HTML='''<div class="pg-frame"><div class="pg-tools"><button data-mode="pan">✋ Navegar</button><button data-mode="point">📍 Ponto</button><button data-mode="line">〰 Linha</button><button data-mode="polygon">⬡ Polígono</button><button data-act="finish">✓ Concluir</button><button data-act="cancel">✕ Cancelar</button><button data-act="refresh">↻ Atualizar área</button></div><div class="pg-map"></div><div class="pg-status">Iniciando mapa…</div></div>'''
 GEO_CSS='''
 .pg-frame{position:relative;width:100%;height:100%;font:13px system-ui,sans-serif;overflow:hidden;border-radius:12px;border:1px solid #dce3ed}
 .pg-map{height:100%;width:100%;min-height:480px}
@@ -603,11 +854,10 @@ export default function(component) {
  const cssLink=document.createElement('link'); cssLink.rel='stylesheet';
  cssLink.href='https://unpkg.com/maplibre-gl@5.6.2/dist/maplibre-gl.css';
  root.appendChild(cssLink);
- let map=null, alive=true, mode='pan', draft=[], selected=null;
+ let map=null, alive=true, mode='pan', draft=[];
  const modes=[...root.querySelectorAll('[data-mode]')];
- const setMode=(v)=>{mode=v;draft=[];modes.forEach(b=>b.classList.toggle('pg-active',b.dataset.mode===v)); if(map)refreshDraft(); status.textContent= v==='pan'?'Mapa pronto. Clique em um elemento para selecioná-lo.': v==='point'?'Clique para posicionar um ponto.':'Clique nos vértices e depois em Concluir.';};
- const sets=(id,geodata)=>{const s=map.getSource(id); if(s)s.setData(geodata);};
  const fc=(features)=>({type:'FeatureCollection',features:features||[]});
+ const sets=(id,geodata)=>{if(map?.getSource(id))map.getSource(id).setData(geodata);};
  const refreshDraft=()=>{
     if(!map || !map.getSource('pg-draft'))return;
     const feats=[];
@@ -615,9 +865,10 @@ export default function(component) {
     for(const c of draft)feats.push({type:'Feature',geometry:{type:'Point',coordinates:c},properties:{}});
     sets('pg-draft',fc(feats));
  };
+ const setMode=(v)=>{mode=v;draft=[];modes.forEach(b=>b.classList.toggle('pg-active',b.dataset.mode===v));if(map)refreshDraft();status.textContent=v==='pan'?'Mapa pronto. Clique em um marcador ou trecho para consultar.':v==='point'?'Clique para posicionar um ponto.':'Clique nos vértices e depois em Concluir.';};
  const add=(geometry)=>{
-   setTriggerValue('created',{type:'Feature',id:'f_'+crypto.randomUUID(),geometry,properties:{nome:'Novo elemento'}});
-   draft=[]; setMode('pan');
+   setTriggerValue('created',{type:'Feature',id:'f_'+crypto.randomUUID(),geometry,properties:{nome:'Novo elemento',pg_tipo:'Desenho'}});
+   draft=[];setMode('pan');
  };
  const finish=()=>{
   if(mode==='line' && draft.length>=2)add({type:'LineString',coordinates:draft});
@@ -627,6 +878,11 @@ export default function(component) {
  modes.forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
  root.querySelector('[data-act="finish"]').onclick=finish;
  root.querySelector('[data-act="cancel"]').onclick=()=>setMode('pan');
+ root.querySelector('[data-act="refresh"]').onclick=()=>{
+    if(!map)return;
+    const b=map.getBounds(),c=map.getCenter();
+    setTriggerValue('viewport',{bbox:[b.getWest(),b.getSouth(),b.getEast(),b.getNorth()],center:[c.lng,c.lat],zoom:map.getZoom()});
+ };
  let ro=null;
  import('https://esm.sh/maplibre-gl@5.6.2').then(module=>{
   if(!alive)return;
@@ -637,38 +893,50 @@ export default function(component) {
   map.addControl(new gl.NavigationControl(),'bottom-right');
   map.on('load',()=>{
    if(!alive)return;
-   const project=data.project||[]; const lookup=data.lookup||[];
-   const all=[...project,...lookup];
+   if(data.topography?.url && data.topography?.coordinates){
+     map.addSource('pg-topo',{type:'image',url:data.topography.url,coordinates:data.topography.coordinates});
+     map.addLayer({id:'pg-topo-layer',type:'raster',source:'pg-topo',paint:{'raster-opacity':0.35,'raster-fade-duration':0}});
+   }
+   const all=[...(data.project||[]),...(data.lookup||[])];
    const points=all.filter(f=>f.geometry?.type==='Point'||f.geometry?.type==='MultiPoint');
    const lines=all.filter(f=>f.geometry?.type==='LineString'||f.geometry?.type==='MultiLineString');
    const polygons=all.filter(f=>f.geometry?.type==='Polygon'||f.geometry?.type==='MultiPolygon');
-   map.addSource('pg-points',{type:'geojson',data:fc(points),cluster:points.length>150,clusterRadius:45,clusterMaxZoom:13});
+   // Camada da rede desenhada abaixo dos marcadores, sem criar HTML para cada trecho.
+   map.addSource('pg-network',{type:'geojson',data:fc(data.network||[])});
+   map.addLayer({id:'pg-network-layer',type:'line',source:'pg-network',paint:{
+     'line-color':'#1279AE','line-opacity':0.72,'line-width':['interpolate',['linear'],['zoom'],10,0.8,14,1.5,17,2.3]}});
+   // Sem clustering: nenhum círculo de 19px cobrindo os bairros.
+   map.addSource('pg-points',{type:'geojson',data:fc(points)});
    map.addSource('pg-lines',{type:'geojson',data:fc(lines)});
    map.addSource('pg-poly',{type:'geojson',data:fc(polygons)});
    map.addSource('pg-draft',{type:'geojson',data:fc([])});
    map.addLayer({id:'pg-fill',type:'fill',source:'pg-poly',paint:{'fill-color':'#18b3b1','fill-opacity':0.2}});
-   map.addLayer({id:'pg-outline',type:'line',source:'pg-poly',paint:{'line-color':'#00889b','line-width':3}});
-   map.addLayer({id:'pg-lines-layer',type:'line',source:'pg-lines',paint:{'line-color':'#2563eb','line-width':3}});
-   map.addLayer({id:'pg-clusters',type:'circle',source:'pg-points',filter:['has','point_count'],paint:{'circle-color':'#164e77','circle-radius':19}});
-   map.addLayer({id:'pg-cluster-label',type:'symbol',source:'pg-points',filter:['has','point_count'],layout:{'text-field':['get','point_count_abbreviated'],'text-size':12},paint:{'text-color':'#ffffff'}});
-   map.addLayer({id:'pg-points-layer',type:'circle',source:'pg-points',filter:['!',['has','point_count']],paint:{'circle-color':'#16a34a','circle-stroke-color':'#fff','circle-stroke-width':1.5,'circle-radius':6}});
+   map.addLayer({id:'pg-outline',type:'line',source:'pg-poly',paint:{'line-color':'#00889b','line-width':2}});
+   map.addLayer({id:'pg-lines-layer',type:'line',source:'pg-lines',paint:{'line-color':'#2563eb','line-width':2.5}});
+   map.addLayer({id:'pg-points-layer',type:'circle',source:'pg-points',paint:{
+      'circle-color':['match',['get','pg_tipo'],
+       'Poço / Ativo','#2563EB','Logger','#F59E0B','Matrícula','#22C55E',
+       'Desenho','#A855F7','#16A34A'],
+      'circle-stroke-color':'#FFFFFF','circle-stroke-width':1.1,
+      'circle-radius':['match',['get','pg_tipo'],'Matrícula',5.5,'Poço / Ativo',4.5,'Logger',4.5,4.5],
+      'circle-opacity':0.94}});
    map.addLayer({id:'pg-draft-line',type:'line',source:'pg-draft',filter:['==',['geometry-type'],'LineString'],paint:{'line-color':'#e67e22','line-width':2,'line-dasharray':[2,2]}});
-   map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-color':'#e67e22','circle-radius':5}});
+   map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],paint:{'circle-color':'#e67e22','circle-radius':4}});
    map.on('click',(e)=>{
-    if(mode!=='pan'){
-     const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
-     if(mode==='point')add({type:'Point',coordinates:p}); else {draft.push(p);refreshDraft();}
-     return;
-    }
-    const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-fill']});
-    if(hits.length){const f=hits[0];setTriggerValue('selected',{id:String(f.id||f.properties?.pg_id||''),properties:f.properties||{}});}
+     if(mode!=='pan'){
+      const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
+      if(mode==='point')add({type:'Point',coordinates:p});else{draft.push(p);refreshDraft();}
+      return;
+     }
+     const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-fill','pg-network-layer']});
+     if(hits.length){const f=hits[0];setTriggerValue('selected',{id:String(f.id||f.properties?.pg_id||''),properties:f.properties||{}});}
    });
-   if(data.focus?.length===2) map.flyTo({center:data.focus,zoom:15});
+   if(data.focus?.length===2)map.flyTo({center:data.focus,zoom:15});
    setMode('pan');
   });
-  map.on('error',(err)=>{ if(alive)status.textContent='Falha no mapa ou nos mosaicos cartográficos. Verifique sua conexão.'; });
+  map.on('error',()=>{if(alive)status.textContent='Falha no mapa ou nos mosaicos cartográficos. Verifique sua conexão.';});
   ro=new ResizeObserver(()=>map?.resize());ro.observe(mapNode);
- }).catch(err=>{if(alive)status.textContent='Não foi possível carregar MapLibre. Verifique a conexão com o servidor de componentes.';});
+ }).catch(()=>{if(alive)status.textContent='Não foi possível carregar MapLibre. Verifique sua conexão.';});
  return ()=>{alive=false;if(ro)ro.disconnect();if(map)map.remove();};
 }
 '''
@@ -698,9 +966,12 @@ with st.sidebar:
         st.session_state.prisma_geo_projeto=novo_projeto()
         st.session_state.prisma_geo_consulta=[]
         st.session_state.prisma_geo_foco=None
+        st.session_state.pop("pg_rede_bbox", None)
         st.session_state.prisma_geo_revisao+=1
         st.session_state.pop("pg_nome", None)
         st.session_state.pop("pg_visible_desenhos", None)
+        for chave_off in ("pg_pocos", "pg_loggers", "pg_rede", "pg_topografia", "pg_topo_arquivo"):
+            st.session_state.pop(chave_off, None)
         st.rerun()
     abrir=st.file_uploader("Abrir projeto (.prismageo)",type=["prismageo"],key="pg_abertura")
     if st.button("📂 Abrir arquivo",disabled=abrir is None,use_container_width=True):
@@ -711,13 +982,25 @@ with st.sidebar:
             st.session_state.prisma_geo_revisao+=1
             st.session_state.pop("pg_nome", None)
             for kk in list(st.session_state):
-                if kk.startswith("pg_visible_"):
+                if kk.startswith("pg_visible_") or kk in ("pg_pocos", "pg_loggers", "pg_rede", "pg_topografia", "pg_topo_arquivo"):
                     st.session_state.pop(kk, None)
             st.success("Projeto aberto.")
             st.rerun()
         except (ValueError,KeyError,zipfile.BadZipFile,json.JSONDecodeError) as exc:
             st.error(f"Falha ao abrir: {exc}")
     try:
+        # Salva também referências às camadas oficiais habilitadas, sem
+        # embutir milhares de marcadores nem arquivos topográficos no projeto.
+        of=p.setdefault("official", {})
+        for campo,chave in (("pocos","pg_pocos"),("loggers","pg_loggers"),
+                            ("rede","pg_rede"),("topografia","pg_topografia")):
+            of[campo] = bool(st.session_state.get(chave,of.get(campo,False)))
+        caminho_topo_atual=st.session_state.get("pg_topo_arquivo")
+        if isinstance(caminho_topo_atual, Path):
+            try:
+                of["topo_file"] = str(caminho_topo_atual.relative_to(ROOT))
+            except ValueError:
+                pass
         salvar=pacote_projeto(p)
         nome_arquivo=re.sub(r"[^a-zA-Z0-9_-]+","_",p["name"]).strip("_") or "meu_mapa"
         st.download_button("💾 Salvar projeto no computador",data=salvar,
@@ -747,8 +1030,30 @@ with st.sidebar:
     st.divider()
     st.subheader("Camadas oficiais")
     st.caption("As bases oficiais não são carregadas automaticamente.")
-    mostrar_pocos = st.checkbox("Mostrar poços e ativos", value=False, key="pg_pocos")
-    mostrar_loggers = st.checkbox("Mostrar loggers", value=False, key="pg_loggers")
+    if "official" not in p or not isinstance(p["official"], dict):
+        p["official"] = novo_projeto()["official"]
+    for campo,chave in (("pocos","pg_pocos"),("loggers","pg_loggers"),
+                        ("rede","pg_rede"),("topografia","pg_topografia")):
+        if chave not in st.session_state:
+            st.session_state[chave] = bool(p["official"].get(campo,False))
+    mostrar_pocos = st.checkbox("Mostrar poços e ativos", key="pg_pocos")
+    mostrar_loggers = st.checkbox("Mostrar loggers", key="pg_loggers")
+    mostrar_rede = st.checkbox("Mostrar rede de abastecimento (THE)", key="pg_rede")
+    st.caption("A rede é carregada por região. Após mover o mapa, use ↻ Atualizar área para ver os trechos da nova região.")
+    topografias = _pasta_topografias()
+    mostrar_topografia = st.checkbox("Mostrar relevo/topografia", key="pg_topografia")
+    selecionada_topo = None
+    if mostrar_topografia:
+        if topografias:
+            if "pg_topo_arquivo" not in st.session_state:
+                salvo_topo = p["official"].get("topo_file", "")
+                st.session_state["pg_topo_arquivo"] = next(
+                    (arq for arq in topografias if str(arq.relative_to(ROOT)) == salvo_topo), topografias[0]
+                )
+            selecionada_topo = st.selectbox("Arquivo topográfico", topografias,
+                                           format_func=lambda f: str(f.relative_to(ROOT)), key="pg_topo_arquivo")
+        else:
+            st.warning("Nenhum GeoTIFF encontrado em dados/topografias (ou dados/topografia).")
     st.caption("A pesquisa usa a base XLS/XLSX do Módulo 8. Um índice temporário é criado somente na primeira consulta, quando necessário.")
 
 with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
@@ -763,6 +1068,10 @@ with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
                     features=matriculas_por_codigo(codigos)
                 st.session_state.prisma_geo_consulta=features
                 st.session_state.prisma_geo_foco=features[0]["geometry"]["coordinates"] if features else None
+                if features:
+                    p["center"] = list(st.session_state.prisma_geo_foco)
+                    p["zoom"] = 15
+                    st.session_state.pop("pg_rede_bbox", None)
                 st.session_state.prisma_geo_revisao+=1
                 st.success(f"{len(features)} registro(s) localizado(s).")
             except (sqlite3.Error,FileNotFoundError,ValueError,RuntimeError,ImportError,OSError) as exc:
@@ -785,16 +1094,62 @@ with left:
                     st.warning(f"Camada {tipo}: {exc}")
             else:
                 st.warning(f"Base oficial não localizada: dados/{arquivo}")
+    # Bases grandes são carregadas somente quando habilitadas.
+    dados_topografia = None
+    if mostrar_topografia and selecionada_topo is not None:
+        try:
+            info_topo = selecionada_topo.stat()
+            with st.spinner("Preparando prévia leve da topografia..."):
+                dados_topografia = _topografia_previa(str(selecionada_topo), info_topo.st_size, info_topo.st_mtime_ns)
+            st.caption(f"Topografia: {selecionada_topo.name} · amplitude: {dados_topografia['elevation_range'][0]}–{dados_topografia['elevation_range'][1]} m")
+        except (OSError, ValueError, RuntimeError, ImportError) as exc:
+            st.warning(f"Topografia indisponível: {exc}")
+
+    dados_rede = []
+    if mostrar_rede:
+        arquivo_rede = PASTA_DADOS / "Rede_Agua_THE.kmz"
+        if not arquivo_rede.is_file():
+            st.warning("Rede não encontrada: dados/Rede_Agua_THE.kmz")
+        else:
+            try:
+                with st.spinner("Preparando rede de abastecimento (somente na primeira abertura do arquivo)..."):
+                    db = _db_rede(arquivo_rede)
+                vista = st.session_state.get("pg_rede_bbox")
+                if not vista:
+                    vista = _bbox_camera(p["center"], p["zoom"])
+                zoom_rede = int(round(float(p["zoom"])))
+                dados_rede, limite_rede = _rede_por_area(str(db), tuple(round(float(v), 6) for v in vista), zoom_rede)
+                st.caption(f"Rede THE: {len(dados_rede):,} trechos na região selecionada.".replace(",", "."))
+                if limite_rede:
+                    st.warning("A região tem mais trechos do que o limite de visualização. Aproxime o zoom e clique em ↻ Atualizar área.")
+            except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError, sqlite3.Error) as exc:
+                st.warning(f"Não foi possível abrir a rede: {exc}")
     if len(features)>MAX_FEATURES*10:
         st.error("Mapa muito grande. Oculte camadas ou reduza os arquivos importados.")
         st.stop()
     try:
         comp=st.components.v2.component("prisma_geo_editor_v1",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
         response=comp(data={"project":features,"lookup":st.session_state.prisma_geo_consulta,
+                             "network":dados_rede,"topography":dados_topografia,
                              "focus":st.session_state.prisma_geo_foco,
                              "center":p["center"],"zoom":p["zoom"]},
                        key="prisma_geo_mapa_componente",width="stretch",height=600,
-                       on_created_change=lambda:None,on_selected_change=lambda:None)
+                       on_created_change=lambda:None,on_selected_change=lambda:None,
+                       on_viewport_change=lambda:None)
+        if response.viewport:
+            camera = response.viewport
+            caixa = camera.get("bbox") if isinstance(camera, dict) else None
+            centro = camera.get("center") if isinstance(camera, dict) else None
+            zoom_v = camera.get("zoom") if isinstance(camera, dict) else None
+            if (isinstance(caixa, list) and len(caixa) == 4
+                and isinstance(centro, list) and len(centro) == 2
+                and all(isinstance(v, (int, float)) and math.isfinite(v) for v in caixa + centro)
+                and isinstance(zoom_v, (int, float)) and math.isfinite(zoom_v)):
+                st.session_state["pg_rede_bbox"] = caixa
+                p["center"] = [float(v) for v in centro]
+                p["zoom"] = max(2.0, min(20.0, float(zoom_v)))
+                st.session_state.prisma_geo_foco = None
+                st.rerun()
         if response.created:
             item=checar_geojson({"type":"FeatureCollection","features":[response.created]})[0]
             target=next((l for l in p["layers"] if l["id"]=="desenhos"),None)
@@ -808,13 +1163,13 @@ with left:
             st.session_state.prisma_geo_selecionado=response.selected
     except AttributeError:
         st.error("Este protótipo exige Streamlit com suporte a Components V2.")
-    st.caption("Mapa-base: OpenStreetMap (somente para teste). O editor não grava dados oficiais.")
+    st.caption("Mapa-base: OpenStreetMap · Marcadores: matrícula verde, poços azul, loggers laranja. A rede e a topografia são camadas somente de leitura.")
 with right:
     st.subheader("Elementos")
     total=sum(len(l["features"]) for l in p["layers"])
     st.metric("No projeto",total)
     st.metric("Na consulta",len(st.session_state.prisma_geo_consulta))
-    st.caption("Somente camadas ativas são enviadas ao mapa.")
+    st.caption("Camadas oficiais aparecem apenas quando habilitadas. Rede carregada por área; topografia em imagem reduzida.")
     selecionado=st.session_state.prisma_geo_selecionado
     if selecionado:
         st.markdown("**Seleção no mapa**")
@@ -836,4 +1191,4 @@ with right:
         st.rerun()
 
 st.divider()
-st.caption("PRISMA GEO · protótipo inicial do Ambiente de Teste. Recursos avançados de edição, indexação espacial e análises serão integrados após validar o motor cartográfico e o desempenho.")
+st.caption("PRISMA GEO · Ambiente de Teste · Projetos locais · Rede e relevo apenas para consulta · Nenhuma alteração nas bases oficiais.")
