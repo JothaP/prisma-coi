@@ -979,6 +979,7 @@ def _rede_por_poligono(db_caminho: str, area_json: str, zoom: int):
 
 
 # Componente V2: o mapa não recria milhares de marcadores em Folium a cada clique.
+# Interação V3: mouse esquerdo navega/seleciona; direito abre menu/cria vértices.
 # Componente de mapa V2; tudo é renderizado pelo MapLibre, sem marcadores HTML.
 GEO_HTML='''
 <div class="pg-frame" tabindex="0">
@@ -994,7 +995,14 @@ GEO_HTML='''
   <button data-act="redo" title="Refazer (Ctrl+Y ou Ctrl+Shift+Z)">↷ Refazer</button>
  </div>
  <div class="pg-map"></div>
- <div class="pg-status">Iniciando mapa…</div>
+ <div class="pg-context-menu" hidden role="menu" aria-label="Ferramentas do mapa">
+  <div class="pg-context-caption">Ações do botão direito</div>
+  <button type="button" data-context-mode="point" role="menuitem">📍 Adicionar ponto</button>
+  <button type="button" data-context-mode="line" role="menuitem">〰 Desenhar linha</button>
+  <button type="button" data-context-mode="polygon" role="menuitem">⬡ Desenhar polígono</button>
+  <button type="button" data-context-mode="network-area" role="menuitem">▱ Selecionar área da rede</button>
+ </div>
+ <div class="pg-status">Botão esquerdo: navegar e selecionar · Botão direito: desenhar e escolher ferramentas.</div>
 </div>
 '''
 GEO_CSS='''
@@ -1005,6 +1013,12 @@ GEO_CSS='''
 .pg-tools button.pg-active{background:#164e77;color:white}
 .pg-tools button:disabled{opacity:.45;cursor:not-allowed}
 .pg-status{position:absolute;bottom:6px;left:10px;z-index:12;padding:5px 9px;background:rgba(255,255,255,.96);color:#203348;border-radius:6px;max-width:85%;font-size:11px}
+.pg-context-menu{position:absolute;z-index:30;min-width:205px;max-width:235px;background:rgba(255,255,255,.99);border:1px solid #cbd5e1;border-radius:10px;box-shadow:0 8px 26px #13243d40;padding:6px;display:flex;flex-direction:column;gap:2px}
+.pg-context-menu[hidden]{display:none!important}
+.pg-context-caption{font-size:10px;color:#64748b;padding:5px 8px 3px;font-weight:700;letter-spacing:.3px}
+.pg-context-menu button{border:0;text-align:left;background:transparent;border-radius:6px;padding:9px 10px;color:#152c42;font-size:12px;cursor:pointer}
+.pg-context-menu button:hover,.pg-context-menu button:focus{background:#e9f2f9;outline:none}
+.pg-map.pg-drawing .maplibregl-canvas{cursor:crosshair!important}
 '''
 GEO_JS=r'''
 export default function(component) {
@@ -1018,6 +1032,9 @@ export default function(component) {
  const modes=[...root.querySelectorAll('[data-mode]')];
  const undoButton=root.querySelector('[data-act="undo"]');
  const redoButton=root.querySelector('[data-act="redo"]');
+ const contextMenu=root.querySelector('.pg-context-menu');
+ let contextPosition=null;
+ const closeContextMenu=()=>{contextMenu.hidden=true;contextPosition=null;};
  const fc=(features)=>({type:'FeatureCollection',features:features||[]});
  const sets=(id,geo)=>{if(map?.getSource(id)) map.getSource(id).setData(geo);};
  const eventId=()=>crypto.randomUUID();
@@ -1036,13 +1053,17 @@ export default function(component) {
    redoButton.disabled=draftRedo.length===0 && !(data.canRedo||false);
  };
  const setMode=(v)=>{
+   closeContextMenu();
    mode=v;draft=[];draftRedo=[];
    modes.forEach(b=>b.classList.toggle('pg-active',b.dataset.mode===v));
-   if(map){map.doubleClickZoom[v==='pan'?'enable':'disable']();refreshDraft();}
-   status.textContent= v==='pan'?'Mapa pronto. Selecione elementos ou use as ferramentas.':
-     v==='point'?'Clique para posicionar um ponto.':
-     v==='network-area'?'Delimite a rede por polígono; clique em Concluir. A rede só será carregada nessa área.':
-     'Marque os vértices e clique em Concluir.';
+   mapNode.classList.toggle('pg-drawing',v!=='pan');
+   // O duplo clique esquerdo continua servindo para aproximar o mapa.
+   if(map){map.doubleClickZoom.enable();refreshDraft();}
+   status.textContent= v==='pan'?
+     'Esquerdo: navegar, arrastar e selecionar · Direito: abrir menu de ferramentas.':
+     v==='point'?'Clique DIREITO na posição do ponto. O esquerdo continua navegando e selecionando.':
+     v==='network-area'?'Clique DIREITO para cada vértice da área da rede e depois Concluir.':
+     'Clique DIREITO para cada vértice, depois Concluir. O esquerdo navega e seleciona.';
    refreshButtons();
  };
  const add=(geometry)=>{
@@ -1069,12 +1090,45 @@ export default function(component) {
    if(draftRedo.length){draft.push(draftRedo.pop());refreshDraft();refreshButtons();return;}
    if(data.canRedo)setTriggerValue('history_action',{event:eventId(),action:'redo',viewport:viewport()});
  };
+ // O botão direito abre o menu quando se está navegando. Depois de
+ // escolher uma ferramenta, cada novo clique direito adiciona um vértice.
+ // A escolha inicial já utiliza a coordenada em que o menu foi aberto.
+ const addVertex=(p)=>{
+   if(mode==='pan')return;
+   if(mode==='point'){add({type:'Point',coordinates:p});return;}
+   draft.push(p);draftRedo=[];refreshDraft();refreshButtons();
+ };
+ const openContextMenu=(p,mousePoint)=>{
+   contextPosition=p;
+   const largura=225, altura=218, margem=6;
+   contextMenu.style.left=`${Math.max(margem,Math.min(mousePoint.x,root.clientWidth-largura-margem))}px`;
+   contextMenu.style.top=`${Math.max(margem,Math.min(mousePoint.y,root.clientHeight-altura-margem))}px`;
+   contextMenu.hidden=false;
+   status.textContent='Escolha uma ferramenta. O primeiro ponto será marcado aqui.';
+ };
+ root.querySelectorAll('[data-context-mode]').forEach(b=>b.addEventListener('click',()=>{
+   const p=contextPosition;
+   const ferramenta=b.dataset.contextMode;
+   setMode(ferramenta);
+   if(p)addVertex(p);
+   root.focus();
+ }));
  modes.forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
  root.querySelector('[data-act="finish"]').onclick=finish;
  root.querySelector('[data-act="cancel"]').onclick=()=>setMode('pan');
  undoButton.onclick=undo;
  redoButton.onclick=redo;
  const onKey=(e)=>{
+   if(e.key==='Escape'){
+     e.preventDefault();
+     if(!contextMenu.hidden)closeContextMenu();
+     else if(mode!=='pan')setMode('pan');
+     return;
+   }
+   if(e.key==='Enter' && (mode==='line'||mode==='polygon'||mode==='network-area') &&
+      (e.target===root || e.target===mapNode)){
+     e.preventDefault();finish();return;
+   }
    if((e.ctrlKey||e.metaKey)&&!e.altKey){
      if(e.key.toLowerCase()==='z'){e.preventDefault();e.shiftKey?redo():undo();}
      else if(e.key.toLowerCase()==='y'){e.preventDefault();redo();}
@@ -1089,6 +1143,9 @@ export default function(component) {
    style:{version:8,sources:{osm:{type:'raster',tiles:['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],tileSize:256,attribution:'© OpenStreetMap contributors'}},layers:[{id:'osm',type:'raster',source:'osm'}]},
    attributionControl:true});
   map.addControl(new gl.NavigationControl(),'bottom-right');
+  // Reserva o botão direito para o PRISMA GEO, sem girar/inclinar o mapa.
+  map.dragRotate.disable();
+  map.touchZoomRotate.disableRotation();
   map.on('load',()=>{
    if(!alive)return;
    if(data.topography?.url && data.topography?.coordinates){
@@ -1129,18 +1186,28 @@ export default function(component) {
      paint:{'line-color':'#e67e22','line-width':2,'line-dasharray':[2,2]}});
    map.addLayer({id:'pg-draft-point',type:'circle',source:'pg-draft',filter:['==',['geometry-type'],'Point'],
      paint:{'circle-color':'#e67e22','circle-radius':4}});
+   // Clique esquerdo: NÃO cria geometrias, mesmo com ferramenta ativa.
+   // Navegação, arraste e seleção de objetos continuam disponíveis.
    map.on('click',(e)=>{
+     if(e.originalEvent?.button!==0)return;
      root.focus();
-     if(mode!=='pan'){
-       const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
-       if(mode==='point')add({type:'Point',coordinates:p});
-       else {draft.push(p);draftRedo=[];refreshDraft();refreshButtons();}
-       return;
-     }
+     if(!contextMenu.hidden){closeContextMenu();return;}
      const hits=map.queryRenderedFeatures(e.point,{layers:['pg-points-layer','pg-lines-layer','pg-poly-names','pg-fill','pg-network-layer']});
      if(hits.length){
        const f=hits[0];
        setTriggerValue('selected',{event:eventId(),id:String(f.properties?.pg_id??f.id??''),properties:f.properties||{},viewport:viewport()});
+     }
+   });
+   // Contextmenu é o evento nativo do MapLibre para o botão direito.
+   // Ao desenhar, clique direito marca vértices; Shift + direito reabre o menu.
+   map.on('contextmenu',(e)=>{
+     root.focus();
+     const p=[Number(e.lngLat.lng.toFixed(7)),Number(e.lngLat.lat.toFixed(7))];
+     if(mode==='pan' || e.originalEvent.shiftKey){
+       openContextMenu(p,e.point);
+     }else{
+       closeContextMenu();
+       addVertex(p);
      }
    });
    if(data.focus?.length===2)map.flyTo({center:data.focus,zoom:15});
@@ -1276,7 +1343,7 @@ with st.sidebar:
     mostrar_pocos = st.checkbox("Mostrar poços e ativos", key="pg_pocos")
     mostrar_loggers = st.checkbox("Mostrar loggers", key="pg_loggers")
     mostrar_rede = st.checkbox("Exibir rede da área selecionada", key="pg_rede")
-    st.caption("Para consultar a rede, clique no mapa em **▱ Selecionar área da rede**, desenhe o polígono e pressione **✓ Concluir**. A rede só será lida após essa seleção.")
+    st.caption("Para consultar a rede: clique com o **botão direito** no mapa, escolha **Selecionar área da rede**, marque os vértices também com o botão direito e pressione **✓ Concluir**. O botão esquerdo segue livre para navegar.")
     area_rede = p.get("network_area")
     if st.session_state.pg_alerta_area:
         st.warning(st.session_state.pg_alerta_area)
@@ -1333,7 +1400,7 @@ with st.expander("🔎 Consulta rápida por matrícula",expanded=False):
 
 left,right=st.columns([4.8,1.2],gap="medium")
 with left:
-    st.info("Use **▱ Selecionar área da rede** para delimitar os trechos. Para criar desenhos, use Ponto, Linha ou Polígono; conclua e nomeie o elemento no painel direito. **Desfazer/Refazer** funciona tanto durante o traçado quanto após salvar o desenho.")
+    st.info("**Botão esquerdo:** navegar, arrastar e selecionar elementos. **Botão direito:** abrir o menu, criar pontos e marcar vértices de linhas, polígonos ou áreas da rede. Use **Concluir** e nomeie o elemento no painel direito. **Desfazer/Refazer** funciona durante o traçado e após a criação.")
     # pg_id é enviado apenas ao mapa: torna a seleção confiável, sem alterar o arquivo salvo.
     features=[{**feature, "properties":{**feature.get("properties", {}),
                                         "pg_id":str(feature.get("id", ""))}}
@@ -1386,7 +1453,7 @@ with left:
         st.error("Mapa muito grande. Oculte camadas ou reduza os arquivos importados.")
         st.stop()
     try:
-        comp=st.components.v2.component("prisma_geo_editor_v2",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
+        comp=st.components.v2.component("prisma_geo_editor_v3",html=GEO_HTML,css=GEO_CSS,js=GEO_JS)
         response=comp(data={"project":features,"lookup":st.session_state.prisma_geo_consulta,
                              "network":dados_rede,"networkArea":p.get("network_area"),
                              "topography":dados_topografia,
@@ -1394,7 +1461,7 @@ with left:
                              "center":p["center"],"zoom":p["zoom"],
                              "canUndo":bool(st.session_state.pg_desfazer),
                              "canRedo":bool(st.session_state.pg_refazer)},
-                       key="prisma_geo_mapa_componente_v2",width="stretch",height=600,
+                       key="prisma_geo_mapa_componente_v3",width="stretch",height=600,
                        on_created_change=lambda:None,on_selected_change=lambda:None,
                        on_network_area_change=lambda:None,on_history_action_change=lambda:None)
         if response.network_area and pg_evento_novo("area", response.network_area):
