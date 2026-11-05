@@ -465,6 +465,7 @@ def carregar_cadastro_github(caminho, cabecalho):
 def invalidar_cache():
     carregar_aba.clear()
     criar_concentracoes.clear()
+    resumir_acionamentos_farol.clear()
     pontos_proximos_concentracoes.clear()
     eventos_georreferenciados.clear()
     filtrar_ativos_proximos.clear()
@@ -3910,6 +3911,198 @@ def modal_configurar_relatorio(concentracoes, pontos, pontos_cluster, proximidad
                 key="farol_download_os_relatorio_csv")
 
 # ============================================================
+# PAINEL LATERAL DIREITO — RESUMO CACHEADO E NAVEGAÇÃO ISOLADA
+# ============================================================
+
+@st.cache_data(ttl=180, show_spinner=False, max_entries=12)
+def resumir_acionamentos_farol(df_cidade_bairro):
+    """Agrupa O.S. uma só vez por base/data, incluindo as sem coordenadas.
+
+    Normaliza valores únicos (não cada linha em todo rerun), e calcula uma
+    única tabela de municípios e outra de bairros. A navegação no painel
+    usa somente estas duas tabelas pequenas.
+    """
+    cab_cidades = ["_cidade_chave", "_cidade_nome", "QTD_OS"]
+    cab_bairros = ["_cidade_chave", "_bairro_chave", "_bairro_nome", "QTD_OS"]
+    if df_cidade_bairro is None or df_cidade_bairro.empty:
+        return (pd.DataFrame(columns=cab_cidades),
+                pd.DataFrame(columns=cab_bairros), 0)
+
+    campos = df_cidade_bairro.reindex(columns=["Cidade", "Bairro"], fill_value="")
+    cidades = campos["Cidade"].fillna("").astype(str).str.strip()
+    bairros = campos["Bairro"].fillna("").astype(str).str.strip()
+
+    # Municípios e bairros repetem-se em milhares de O.S.; evite normalizações
+    # Unicode/regulares para cada linha de cada interação.
+    mapa_cidades = {}
+    for nome in cidades.unique():
+        limpo = limpar_valor(nome)
+        mapa_cidades[nome] = (
+            normalizar_municipio(limpo) or "__SEM_MUNICIPIO__",
+            normalizar_texto(limpo) or "NÃO INFORMADO",
+        )
+    mapa_bairros = {}
+    for nome in bairros.unique():
+        normalizado = limpar_nome_bairro(limpar_valor(nome))
+        mapa_bairros[nome] = (
+            normalizado or "__SEM_BAIRRO__",
+            normalizado or "NÃO INFORMADO",
+        )
+
+    base = pd.DataFrame({
+        "_cidade_chave": cidades.map(lambda nome: mapa_cidades[nome][0]),
+        "_cidade_nome": cidades.map(lambda nome: mapa_cidades[nome][1]),
+        "_bairro_chave": bairros.map(lambda nome: mapa_bairros[nome][0]),
+        "_bairro_nome": bairros.map(lambda nome: mapa_bairros[nome][1]),
+    })
+    # Um agrupamento único permite extrair ambos os rankings sem reler as O.S.
+    por_bairro = (base.groupby(["_cidade_chave", "_bairro_chave"], sort=False, as_index=False)
+                  .agg(_cidade_nome=("_cidade_nome", "first"),
+                       _bairro_nome=("_bairro_nome", "first"),
+                       QTD_OS=("_bairro_chave", "size")))
+    por_cidade = (por_bairro.groupby("_cidade_chave", as_index=False)
+                  .agg(_cidade_nome=("_cidade_nome", "first"),
+                       QTD_OS=("QTD_OS", "sum"))
+                  .sort_values(["QTD_OS", "_cidade_nome"], ascending=[False, True], kind="stable")
+                  .reset_index(drop=True))
+    por_bairro = (por_bairro[cab_bairros]
+                  .sort_values(["_cidade_chave", "QTD_OS", "_bairro_nome"],
+                               ascending=[True, False, True], kind="stable")
+                  .reset_index(drop=True))
+    return por_cidade, por_bairro, len(base)
+
+
+def _farol_painel_selecionar_municipio(chave):
+    st.session_state["farol_painel_cidade_ativa"] = chave
+
+
+def _farol_painel_voltar_municipios():
+    st.session_state.pop("farol_painel_cidade_ativa", None)
+
+
+@st.fragment
+def renderizar_painel_acionamentos_farol(municipios, bairros, total_os):
+    """Roda apenas este painel ao clicar: NÃO reconstrói Folium ou concentrações."""
+    cidade_ativa = st.session_state.get("farol_painel_cidade_ativa", "")
+    if cidade_ativa and cidade_ativa not in set(municipios["_cidade_chave"]):
+        cidade_ativa = ""
+        st.session_state.pop("farol_painel_cidade_ativa", None)
+
+    st.markdown("""
+        <style>
+        .st-key-farol_acionamentos_lateral .stButton > button {
+            text-align: left; justify-content: flex-start;
+            min-height: 1.85rem; padding: .16rem .27rem;
+            line-height: 1.12; font-size: .75rem;
+            font-weight: 600; border-radius: 4px;
+        }
+        .st-key-farol_acionamentos_lateral .stButton > button:hover {
+            color: #0A35B8; background: rgba(13, 67, 190, .07);
+        }
+        .st-key-farol_acionamentos_lateral [data-testid="stHorizontalBlock"] {gap: .28rem;}
+        </style>
+    """, unsafe_allow_html=True)
+
+    with st.container(height=650, border=True, key="farol_acionamentos_lateral"):
+        titulo = "Acionamentos por Bairro" if cidade_ativa else "Acionamentos por Cidade"
+        st.markdown(
+            '<div style="background:#0634BD;color:#FFF;text-align:center;'
+            'padding:8px 5px;border-radius:5px;font-size:15px;font-weight:700;'
+            'line-height:1.2;margin-bottom:6px;">'
+            + titulo + '</div>', unsafe_allow_html=True,
+        )
+        if not total_os:
+            st.caption("Nenhuma O.S. para a data consultada.")
+            return
+
+        if cidade_ativa:
+            cidade = municipios.loc[municipios["_cidade_chave"] == cidade_ativa]
+            nome_cidade = str(cidade["_cidade_nome"].iloc[0])
+            st.caption(f"Município: {nome_cidade}")
+            st.button("← Voltar aos municípios", type="tertiary", width="stretch",
+                      key="farol_painel_voltar_cidades",
+                      on_click=_farol_painel_voltar_municipios)
+            ranking = bairros.loc[bairros["_cidade_chave"] == cidade_ativa]
+            quantidade_cidade = int(cidade["QTD_OS"].iloc[0])
+            st.markdown(
+                f'<div style="font-size:12px;margin:2px 0 9px;">'
+                f'<b>{quantidade_cidade:,}</b> O.S. · <b>{len(ranking)}</b> bairro(s)</div>'
+                .replace(",", "."), unsafe_allow_html=True,
+            )
+        else:
+            ranking = municipios
+            st.markdown(
+                f'<div style="font-size:12px;margin:2px 0 4px;">'
+                f'<b>{total_os:,}</b> O.S. · <b>{len(municipios)}</b> município(s)</div>'
+                .replace(",", "."), unsafe_allow_html=True,
+            )
+            st.caption("Selecione um município para ver os bairros.")
+
+        st.markdown(
+            '<div style="font-size:10px;display:flex;align-items:center;'
+            'gap:5px;color:#596579;margin-bottom:7px;">'
+            '<span style="width:8px;height:8px;border-radius:50%;'
+            'background:#0634BD;display:inline-block;"></span>'
+            'O.S. do período · Todas as classificações</div>',
+            unsafe_allow_html=True,
+        )
+        maior = int(ranking["QTD_OS"].max()) if not ranking.empty else 1
+        if cidade_ativa:
+            # Bairros são somente leitura: um único HTML, sem dezenas de
+            # st.columns/st.markdown, é muito mais leve no navegador.
+            linhas = []
+            for _, item in ranking.iterrows():
+                nome = html_escape(str(item["_bairro_nome"]))
+                qtd = int(item["QTD_OS"])
+                proporcao = max(3.0, 100 * qtd / max(maior, 1))
+                linhas.append(
+                    '<div style="display:flex;align-items:center;gap:6px;'
+                    'min-height:26px;margin:1px 0;">'
+                    f'<div title="{nome}" style="width:48%;font-size:11px;font-weight:600;'
+                    f'line-height:1.16;overflow-wrap:anywhere;">{nome}</div>'
+                    '<div style="flex:1;display:flex;align-items:center;gap:5px;">'
+                    '<div style="flex:1;height:13px;background:#E9EDF7;overflow:hidden;">'
+                    f'<div style="height:100%;width:{proporcao:.1f}%;background:#0634BD;"></div>'
+                    '</div>'
+                    f'<b style="font-size:11px;min-width:20px;">{qtd}</b></div></div>'
+                )
+            st.markdown(''.join(linhas), unsafe_allow_html=True)
+            st.caption("Contagem por bairro informado na O.S.; registros sem bairro entram em ‘Não informado’.")
+        else:
+            # Há muitas cidades em algumas datas. Não criar centenas de widgets
+            # no primeiro carregamento. Todos continuam acessíveis no seletor.
+            limite_inicial = 25
+            if len(ranking) > limite_inicial:
+                mostrar_todos = st.toggle(
+                    f"Mostrar todos os {len(ranking)} municípios",
+                    value=False, key="farol_painel_exibir_todos_municipios",
+                )
+                if not mostrar_todos:
+                    ranking = ranking.head(limite_inicial)
+            for indice, item in ranking.iterrows():
+                nome = str(item["_cidade_nome"])
+                qtd = int(item["QTD_OS"])
+                proporcao = max(3.0, 100 * qtd / max(maior, 1))
+                col_nome, col_barra = st.columns([1.12, 1], gap="small", vertical_alignment="center")
+                with col_nome:
+                    st.button(nome, key=f"farol_painel_municipio_{indice}",
+                              help=f"Ver O.S. por bairro em {nome}",
+                              type="tertiary", width="stretch",
+                              on_click=_farol_painel_selecionar_municipio,
+                              args=(str(item["_cidade_chave"]),))
+                with col_barra:
+                    st.markdown(
+                        '<div style="display:flex;align-items:center;gap:5px;min-height:26px;">'
+                        '<div style="flex:1;height:13px;background:#E9EDF7;border-radius:1px;overflow:hidden;">'
+                        f'<div style="height:100%;width:{proporcao:.1f}%;background:#0634BD;"></div>'
+                        '</div>'
+                        f'<b style="font-size:11px;min-width:20px;color:inherit;">{qtd}</b>'
+                        '</div>', unsafe_allow_html=True,
+                    )
+            st.caption("A contagem inclui O.S. sem coordenadas. O painel não altera o mapa nem as concentrações.")
+
+
+# ============================================================
 # INTERFACE
 # ============================================================
 
@@ -4105,6 +4298,13 @@ ativos_loggers_cidade = df_loggers.iloc[0:0].copy()
 
 
 if st.session_state.get("farol_tela", "mapa") == "mapa":
+    # O resumo é preparado só no rerun completo e fica congelado para o
+    # fragmento de navegação. Clicar cidade/bairro não lê Sheets nem refaz mapa.
+    _inicio_resumo_acionamentos = tempo_execucao.perf_counter()
+    _resumo_cidades, _resumo_bairros, _total_acionamentos = resumir_acionamentos_farol(
+        df_pontos.reindex(columns=["Cidade", "Bairro"], fill_value="")
+    )
+    _tempo_resumo_acionamentos = tempo_execucao.perf_counter() - _inicio_resumo_acionamentos
     eventos_mapeados, eventos_sem_geometria = [], []  # V2: eventos geográficos somente no detalhe
     st.subheader("🗺️ Farol V2 — Panorama e concentrações")
 
@@ -4115,27 +4315,33 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         st.warning("A aba PONTOS ainda não possui dados.")
         ativos_pocos = ativos_pocos_cidade
         ativos_loggers = ativos_loggers_cidade
-        mapa = criar_mapa(
-            bairros, df_pontos, ativos_pocos, ativos_loggers,
-            pd.DataFrame(), pd.DataFrame(), mostrar_bairros=bool(bairros),
-            eventos_mapeados=eventos_mapeados,
-        )
-        if st.session_state.get("farol_foco_concentracao"):
-            lat_foco, lon_foco = st.session_state["farol_foco_concentracao"]
-            mapa.location = [lat_foco, lon_foco]
-            mapa.options["zoom"] = 15
-            mapa.fit_bounds([[lat_foco - .007, lon_foco - .007], [lat_foco + .007, lon_foco + .007]])
-        estado_mapa = st_folium(
-            mapa, width=None, height=650,
-            returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
-            key="farol_mapa_principal",
-        )
-        exibir_atualizacoes_abaixo_mapa()
-        if sincronizar_mapa_pdf and estado_mapa:
-            if estado_mapa.get("center") is not None:
-                st.session_state["farol_ultimo_centro_mapa"] = estado_mapa["center"]
-            if estado_mapa.get("zoom") is not None:
-                st.session_state["farol_ultimo_zoom_mapa"] = estado_mapa["zoom"]
+        col_mapa_vazio, col_acionamentos_vazio = st.columns([4.15, 1.65], gap="small")
+        with col_mapa_vazio:
+            mapa = criar_mapa(
+                bairros, df_pontos, ativos_pocos, ativos_loggers,
+                pd.DataFrame(), pd.DataFrame(), mostrar_bairros=bool(bairros),
+                eventos_mapeados=eventos_mapeados,
+            )
+            if st.session_state.get("farol_foco_concentracao"):
+                lat_foco, lon_foco = st.session_state["farol_foco_concentracao"]
+                mapa.location = [lat_foco, lon_foco]
+                mapa.options["zoom"] = 15
+                mapa.fit_bounds([[lat_foco - .007, lon_foco - .007], [lat_foco + .007, lon_foco + .007]])
+            estado_mapa = st_folium(
+                mapa, width=None, height=650,
+                returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
+                key="farol_mapa_principal",
+            )
+            exibir_atualizacoes_abaixo_mapa()
+            if sincronizar_mapa_pdf and estado_mapa:
+                if estado_mapa.get("center") is not None:
+                    st.session_state["farol_ultimo_centro_mapa"] = estado_mapa["center"]
+                if estado_mapa.get("zoom") is not None:
+                    st.session_state["farol_ultimo_zoom_mapa"] = estado_mapa["zoom"]
+        with col_acionamentos_vazio:
+            renderizar_painel_acionamentos_farol(
+                _resumo_cidades, _resumo_bairros, _total_acionamentos
+            )
     else:
         # Filtros manuais removidos: o panorama utiliza todas as O.S.
         # georreferenciadas do período selecionado no histórico.
@@ -4198,251 +4404,260 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             st.session_state.pop("farol_v2_os_raio_aberto", None)
             chave_os_aberta = ""
 
-        if os_aberta is not None:
-            lat_os = normalizar_coordenada(os_aberta.get("Latitude"), "lat")
-            lon_os = normalizar_coordenada(os_aberta.get("Longitude"), "lon")
-            numero_os = str(os_aberta.get("Nº da O.S", "") or "—")
-            st.markdown(f"### 📍 O.S. {numero_os} — Análise operacional individual")
-            if st.button("⬅️ Voltar ao panorama", key="farol_v2_voltar_os"):
-                st.session_state.pop("farol_v2_os_raio_aberto", None)
-                st.session_state.pop("farol_v2_os_selecionada", None)
-                # Nova instância: descarta último clique antigo no marcador.
-                st.session_state["farol_v2_panorama_versao"] = (
-                    st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                )
-                st.rerun()
+        col_mapa_farol, col_acionamentos_farol = st.columns([4.15, 1.65], gap="small")
+        with col_mapa_farol:
+            if os_aberta is not None:
+                lat_os = normalizar_coordenada(os_aberta.get("Latitude"), "lat")
+                lon_os = normalizar_coordenada(os_aberta.get("Longitude"), "lon")
+                numero_os = str(os_aberta.get("Nº da O.S", "") or "—")
+                st.markdown(f"### 📍 O.S. {numero_os} — Análise operacional individual")
+                if st.button("⬅️ Voltar ao panorama", key="farol_v2_voltar_os"):
+                    st.session_state.pop("farol_v2_os_raio_aberto", None)
+                    st.session_state.pop("farol_v2_os_selecionada", None)
+                    # Nova instância: descarta último clique antigo no marcador.
+                    st.session_state["farol_v2_panorama_versao"] = (
+                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                    )
+                    st.rerun()
 
-            raio_os = int(raio_operacional)
-            pocos_os = ativos_proximos_os(df_pocos, lat_os, lon_os, raio_os)
-            loggers_os = ativos_proximos_os(df_loggers, lat_os, lon_os, raio_os)
-            pontos_entorno = ordens_proximas_os(analise, lat_os, lon_os, raio_os)
-            cidade_os = normalizar_municipio(os_aberta.get("Cidade", ""))
-            bairros_os = bairros_dos_municipios(bairros, {cidade_os} if cidade_os else set())
-            eventos_os = [e for e in eventos_mapeados_todos
-                          if normalizar_municipio(e["bairro"].get("municipio", "")) == cidade_os]
-            mapa = criar_mapa(
-                bairros_os, pontos_entorno, pocos_os, loggers_os,
-                pd.DataFrame(columns=CABECALHO_CONCENTRACOES), pd.DataFrame(),
-                mostrar_bairros=True, eventos_mapeados=eventos_os,
-                rotulos_equipamentos=True,
-                ponto_foco_operacional=os_aberta, raio_foco_operacional=raio_os,
-            )
-            delta_lat = raio_os / 111320.0
-            delta_lon = raio_os / (111320.0 * max(.2, math.cos(math.radians(lat_os))))
-            mapa.fit_bounds([[lat_os - delta_lat, lon_os - delta_lon],
-                             [lat_os + delta_lat, lon_os + delta_lon]],
-                            padding=(35, 35))
-            estado_mapa = st_folium(
-                mapa, width=None, height=650,
-                returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
-                key="farol_v2_mapa_raio_os",
-            )
-            if sincronizar_mapa_pdf and estado_mapa:
+                raio_os = int(raio_operacional)
+                pocos_os = ativos_proximos_os(df_pocos, lat_os, lon_os, raio_os)
+                loggers_os = ativos_proximos_os(df_loggers, lat_os, lon_os, raio_os)
+                pontos_entorno = ordens_proximas_os(analise, lat_os, lon_os, raio_os)
+                cidade_os = normalizar_municipio(os_aberta.get("Cidade", ""))
+                bairros_os = bairros_dos_municipios(bairros, {cidade_os} if cidade_os else set())
+                eventos_os = [e for e in eventos_mapeados_todos
+                              if normalizar_municipio(e["bairro"].get("municipio", "")) == cidade_os]
+                mapa = criar_mapa(
+                    bairros_os, pontos_entorno, pocos_os, loggers_os,
+                    pd.DataFrame(columns=CABECALHO_CONCENTRACOES), pd.DataFrame(),
+                    mostrar_bairros=True, eventos_mapeados=eventos_os,
+                    rotulos_equipamentos=True,
+                    ponto_foco_operacional=os_aberta, raio_foco_operacional=raio_os,
+                )
+                delta_lat = raio_os / 111320.0
+                delta_lon = raio_os / (111320.0 * max(.2, math.cos(math.radians(lat_os))))
+                mapa.fit_bounds([[lat_os - delta_lat, lon_os - delta_lon],
+                                 [lat_os + delta_lat, lon_os + delta_lon]],
+                                padding=(35, 35))
+                estado_mapa = st_folium(
+                    mapa, width=None, height=650,
+                    returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
+                    key="farol_v2_mapa_raio_os",
+                )
+                if sincronizar_mapa_pdf and estado_mapa:
+                    if estado_mapa.get("center") is not None:
+                        st.session_state["farol_ultimo_centro_mapa"] = estado_mapa["center"]
+                    if estado_mapa.get("zoom") is not None:
+                        st.session_state["farol_ultimo_zoom_mapa"] = estado_mapa["zoom"]
+                st.caption(f"Raio operacional de {raio_os} m centrado na O.S. {numero_os}; "
+                           "as concentrações não são recalculadas nem alteradas.")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("O.S. no raio", len(pontos_entorno))
+                m2.metric("Poços / ativos no raio", len(pocos_os))
+                m3.metric("Loggers no raio", len(loggers_os))
+                with st.expander("📍 Equipamentos e ativos identificados no raio", expanded=True):
+                    if pocos_os.empty and loggers_os.empty:
+                        st.info(f"Nenhum poço, ativo ou logger cadastrado a até {raio_os} m da O.S.")
+                    if not pocos_os.empty:
+                        st.markdown("**Poços / Ativos**")
+                        tabela_pocos = pocos_os[["IDENTIFICACAO_ATIVO", "NOME_POCO", "MUNICIPIO", "_DISTANCIA_M"]].copy()
+                        tabela_pocos.columns = ["Identificação", "Nome", "Município", "Distância (m)"]
+                        st.dataframe(tabela_pocos, hide_index=True, width="stretch")
+                    if not loggers_os.empty:
+                        st.markdown("**Loggers**")
+                        tabela_loggers = loggers_os[["IDENTIFICACAO_ATIVO", "ENDERECO", "MUNICIPIO", "_DISTANCIA_M"]].copy()
+                        tabela_loggers.columns = ["Identificação", "Endereço", "Município", "Distância (m)"]
+                        st.dataframe(tabela_loggers, hide_index=True, width="stretch")
+            elif selecionada:
+                c_atual = concentracoes.loc[concentracoes["ID_CONCENTRACAO"].astype(str) == selecionada].iloc[0]
+                st.markdown(f"### 📍 {selecionada} — Detalhamento operacional")
+                if st.button("⬅️ Voltar ao panorama", key="farol_v2_voltar"):
+                    st.session_state["farol_v2_concentracao"] = ""
+                    st.session_state["farol_concentracao_expandida"] = ""
+                    st.session_state["farol_v2_panorama_versao"] = (
+                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                    )
+                    st.rerun()
+                grupo_atual = pontos_cluster.loc[pontos_cluster["_grupo"] == c_atual["GRUPO"]].copy()
+                lat_c, lon_c = float(c_atual["LATITUDE"]), float(c_atual["LONGITUDE"])
+
+                # Exibir as demais concentrações cujos círculos se tocam ou ficam
+                # muito próximos. A proximidade é VISUAL: não altera a formação,
+                # a numeração nem as contagens das concentrações originais.
+                raio_feicao = float(raio_concentracao)
+                tolerancia_vizinhanca_m = 75.0
+                cidades_atual = {
+                    normalizar_texto(x) for x in grupo_atual["Cidade"].dropna().astype(str)
+                    if str(x).strip()
+                } if "Cidade" in grupo_atual.columns else set()
+                concentracoes_visiveis = [c_atual]
+                for _, candidata in concentracoes.iterrows():
+                    if str(candidata["ID_CONCENTRACAO"]) == selecionada:
+                        continue
+                    # Não aproximar concentrações de municípios distintos.
+                    grupo_candidata = pontos_cluster.loc[
+                        pontos_cluster["_grupo"] == candidata["GRUPO"]
+                    ]
+                    cidades_candidata = {
+                        normalizar_texto(x) for x in grupo_candidata["Cidade"].dropna().astype(str)
+                        if str(x).strip()
+                    } if "Cidade" in grupo_candidata.columns else set()
+                    if cidades_atual and cidades_candidata and not (cidades_atual & cidades_candidata):
+                        continue
+                    distancia = distancia_metros(lat_c, lon_c, candidata["LATITUDE"], candidata["LONGITUDE"])
+                    if distancia is not None and distancia <= 2 * raio_feicao + tolerancia_vizinhanca_m:
+                        concentracoes_visiveis.append(candidata)
+
+                concentracoes_detalhe = pd.DataFrame(concentracoes_visiveis)
+                ids_detalhe = set(concentracoes_detalhe["ID_CONCENTRACAO"].astype(str))
+                vizinhas = [str(c["ID_CONCENTRACAO"]) for c in concentracoes_visiveis[1:]]
+
+                # Inclui os pontos das concentrações vizinhas e O.S. no entorno,
+                # sem carregar as O.S. do município inteiro.
+                raio_visual = max(raio_feicao * 1.5, 650.0)
+                lat_os = pd.to_numeric(analise["Latitude"], errors="coerce").to_numpy(dtype=float)
+                lon_os = pd.to_numeric(analise["Longitude"], errors="coerce").to_numpy(dtype=float)
+                mascara_os = np.zeros(len(analise), dtype=bool)
+                for c in concentracoes_visiveis:
+                    lat_ref = math.radians(float(c["LATITUDE"]))
+                    lon_ref = math.radians(float(c["LONGITUDE"]))
+                    dlat = np.radians(lat_os) - lat_ref
+                    dlon = np.radians(lon_os) - lon_ref
+                    h = (np.sin(dlat / 2) ** 2
+                         + np.cos(lat_ref) * np.cos(np.radians(lat_os)) * np.sin(dlon / 2) ** 2)
+                    distancias = 2 * 6371000.0 * np.arcsin(np.sqrt(np.clip(h, 0, 1)))
+                    mascara_os |= np.isfinite(distancias) & (distancias <= raio_visual)
+                pontos_mapa = analise.loc[mascara_os].copy()
+
+                # Equipamentos próximos de TODAS as feições visíveis, sem mudar
+                # os equipamentos vinculados ao painel da concentração principal.
+                proximidades_atuais = proximidades.loc[
+                    proximidades["Concentração"].astype(str).isin(ids_detalhe)
+                ].copy() if not proximidades.empty else proximidades.copy()
+                def _ativos_detalhe(base, tipo):
+                    if base.empty or proximidades_atuais.empty:
+                        return base.iloc[0:0].copy()
+                    ids = set(proximidades_atuais.loc[
+                        proximidades_atuais["Tipo"] == tipo, "Identificação"
+                    ].fillna("").astype(str).map(normalizar_texto))
+                    return base.loc[base["IDENTIFICACAO_ATIVO"].fillna("").astype(str).map(normalizar_texto).isin(ids)].copy()
+                ativos_pocos = _ativos_detalhe(df_pocos, "Poço / Ativo")
+                ativos_loggers = _ativos_detalhe(df_loggers, "Logger")
+                # O filtro opcional da cidade acrescenta equipamentos, sem duplicações.
+                if not ativos_pocos_cidade.empty:
+                    ativos_pocos = df_pocos.loc[df_pocos.index.isin(ativos_pocos.index.union(ativos_pocos_cidade.index))].copy()
+                if not ativos_loggers_cidade.empty:
+                    ativos_loggers = df_loggers.loc[df_loggers.index.isin(ativos_loggers.index.union(ativos_loggers_cidade.index))].copy()
+                # Todas as feições dos bairros do município, não apenas as
+                # próximas ao círculo ou com evento cadastrado.
+                cidades_detalhe = municipios_por_concentracao.get(selecionada, set())
+                bairros_detalhe = bairros_dos_municipios(bairros, cidades_detalhe)
+                eventos_mapeados = [e for e in eventos_mapeados_todos
+                                    if normalizar_municipio(e["bairro"].get("municipio", "")) in cidades_detalhe]
+                # As concentrações distantes permanecem identificadas com bandeira.
+                # As vizinhas, cujos círculos se tocam, já são desenhadas completas.
+                outras_concentracoes = concentracoes.loc[
+                    concentracoes["ID_CONCENTRACAO"].astype(str).map(
+                        lambda cod: cod not in ids_detalhe and bool(
+                            municipios_por_concentracao.get(cod, set()) & cidades_detalhe)
+                    )
+                ].copy()
+                mapa = criar_mapa(
+                    bairros_detalhe, pontos_mapa, ativos_pocos, ativos_loggers,
+                    concentracoes_detalhe,
+                    proximidades_atuais, mostrar_bairros=True,
+                    eventos_mapeados=eventos_mapeados,
+                    raio_circulo=raio_concentracao,
+                    outras_concentracoes=outras_concentracoes,
+                    rotulos_equipamentos=True,
+                )
+                # Ajusta o enquadramento para mostrar integralmente os círculos
+                # próximos, com margem para O.S. e equipamentos.
+                limites = []
+                for c in concentracoes_visiveis:
+                    lat_ref, lon_ref = float(c["LATITUDE"]), float(c["LONGITUDE"])
+                    delta_lat = raio_visual / 111320.0
+                    delta_lon = raio_visual / (111320.0 * max(.2, math.cos(math.radians(lat_ref))))
+                    limites.extend([[lat_ref - delta_lat, lon_ref - delta_lon],
+                                    [lat_ref + delta_lat, lon_ref + delta_lon]])
+                mapa.fit_bounds(limites, padding=(25, 25))
+                estado_mapa = st_folium(
+                    mapa, width=None, height=650,
+                    returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
+                    key="farol_v2_mapa_detalhe",
+                )
+                st.caption(f"Mapa detalhado: {len(pontos_mapa)} O.S. na área, "
+                           f"{len(ativos_pocos)} poço(s)/ativo(s) e {len(ativos_loggers)} logger(s).")
+                if vizinhas:
+                    st.info("Concentração(ões) próxima(s) também visível(is): "
+                            + ", ".join(vizinhas)
+                            + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
+            else:
+                mapa = criar_mapa_panorama_v2(
+                    concentracoes, raio_m=raio_concentracao,
+                    bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
+                    pontos_os=analise,
+                )
+                estado_mapa = st_folium(
+                    mapa, width=None, height=650,
+                    returned_objects=["last_object_clicked", "last_object_clicked_tooltip"],
+                    key=f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}",
+                )
+                clique = (estado_mapa or {}).get("last_object_clicked")
+                tooltip_clique = str((estado_mapa or {}).get("last_object_clicked_tooltip") or "")
+                if isinstance(clique, dict):
+                    lat_clique = parse_float(clique.get("lat"))
+                    lon_clique = parse_float(clique.get("lng"))
+                    melhor_concentracao, menor_centro = "", float("inf")
+                    if lat_clique is not None and lon_clique is not None and not concentracoes.empty:
+                        for _, centro in concentracoes.iterrows():
+                            d = distancia_metros(lat_clique, lon_clique,
+                                                 centro["LATITUDE"], centro["LONGITUDE"])
+                            if d is not None and d < menor_centro:
+                                menor_centro, melhor_concentracao = d, str(centro["ID_CONCENTRACAO"])
+                    # O tooltip diferencia o centro da concentração de uma O.S.
+                    # espacialmente coincidente, se a versão do componente informar.
+                    if melhor_concentracao and menor_centro <= 4 and not tooltip_clique.startswith("O.S. "):
+                        st.session_state["farol_v2_concentracao"] = melhor_concentracao
+                        st.session_state["farol_concentracao_expandida"] = melhor_concentracao
+                        st.session_state.pop("farol_v2_os_selecionada", None)
+                        st.rerun()
+                    os_clicada = localizar_os_clicada_panorama(estado_mapa, analise)
+                    if os_clicada is not None:
+                        st.session_state["farol_v2_os_selecionada"] = chave_ponto(os_clicada)
+
+                os_selecionada = localizar_os_por_chave(
+                    analise, st.session_state.get("farol_v2_os_selecionada", "")
+                )
+                if os_selecionada is not None:
+                    numero_selecionado = str(os_selecionada.get("Nº da O.S", "") or "—")
+                    cidade_selecionada = str(os_selecionada.get("Cidade", "") or "—")
+                    bairro_selecionado = str(os_selecionada.get("Bairro", "") or "—")
+                    st.info(f"**O.S. selecionada:** {numero_selecionado} · "
+                            f"{cidade_selecionada} · {bairro_selecionado}")
+                    if st.button(
+                        f"📍 Abrir raio operacional de {int(raio_operacional)} m desta O.S.",
+                        key="farol_v2_abrir_raio_os", type="primary",
+                    ):
+                        st.session_state["farol_v2_os_raio_aberto"] = chave_ponto(os_selecionada)
+                        st.session_state["farol_v2_concentracao"] = ""
+                        st.session_state["farol_concentracao_expandida"] = ""
+                        st.rerun()
+                # A lista tradicional de concentrações permanece abaixo do mapa.
+            exibir_atualizacoes_abaixo_mapa()
+            if sincronizar_mapa_pdf and estado_mapa and selecionada:
                 if estado_mapa.get("center") is not None:
                     st.session_state["farol_ultimo_centro_mapa"] = estado_mapa["center"]
                 if estado_mapa.get("zoom") is not None:
                     st.session_state["farol_ultimo_zoom_mapa"] = estado_mapa["zoom"]
-            st.caption(f"Raio operacional de {raio_os} m centrado na O.S. {numero_os}; "
-                       "as concentrações não são recalculadas nem alteradas.")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("O.S. no raio", len(pontos_entorno))
-            m2.metric("Poços / ativos no raio", len(pocos_os))
-            m3.metric("Loggers no raio", len(loggers_os))
-            with st.expander("📍 Equipamentos e ativos identificados no raio", expanded=True):
-                if pocos_os.empty and loggers_os.empty:
-                    st.info(f"Nenhum poço, ativo ou logger cadastrado a até {raio_os} m da O.S.")
-                if not pocos_os.empty:
-                    st.markdown("**Poços / Ativos**")
-                    tabela_pocos = pocos_os[["IDENTIFICACAO_ATIVO", "NOME_POCO", "MUNICIPIO", "_DISTANCIA_M"]].copy()
-                    tabela_pocos.columns = ["Identificação", "Nome", "Município", "Distância (m)"]
-                    st.dataframe(tabela_pocos, hide_index=True, width="stretch")
-                if not loggers_os.empty:
-                    st.markdown("**Loggers**")
-                    tabela_loggers = loggers_os[["IDENTIFICACAO_ATIVO", "ENDERECO", "MUNICIPIO", "_DISTANCIA_M"]].copy()
-                    tabela_loggers.columns = ["Identificação", "Endereço", "Município", "Distância (m)"]
-                    st.dataframe(tabela_loggers, hide_index=True, width="stretch")
-        elif selecionada:
-            c_atual = concentracoes.loc[concentracoes["ID_CONCENTRACAO"].astype(str) == selecionada].iloc[0]
-            st.markdown(f"### 📍 {selecionada} — Detalhamento operacional")
-            if st.button("⬅️ Voltar ao panorama", key="farol_v2_voltar"):
-                st.session_state["farol_v2_concentracao"] = ""
-                st.session_state["farol_concentracao_expandida"] = ""
-                st.session_state["farol_v2_panorama_versao"] = (
-                    st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                )
-                st.rerun()
-            grupo_atual = pontos_cluster.loc[pontos_cluster["_grupo"] == c_atual["GRUPO"]].copy()
-            lat_c, lon_c = float(c_atual["LATITUDE"]), float(c_atual["LONGITUDE"])
 
-            # Exibir as demais concentrações cujos círculos se tocam ou ficam
-            # muito próximos. A proximidade é VISUAL: não altera a formação,
-            # a numeração nem as contagens das concentrações originais.
-            raio_feicao = float(raio_concentracao)
-            tolerancia_vizinhanca_m = 75.0
-            cidades_atual = {
-                normalizar_texto(x) for x in grupo_atual["Cidade"].dropna().astype(str)
-                if str(x).strip()
-            } if "Cidade" in grupo_atual.columns else set()
-            concentracoes_visiveis = [c_atual]
-            for _, candidata in concentracoes.iterrows():
-                if str(candidata["ID_CONCENTRACAO"]) == selecionada:
-                    continue
-                # Não aproximar concentrações de municípios distintos.
-                grupo_candidata = pontos_cluster.loc[
-                    pontos_cluster["_grupo"] == candidata["GRUPO"]
-                ]
-                cidades_candidata = {
-                    normalizar_texto(x) for x in grupo_candidata["Cidade"].dropna().astype(str)
-                    if str(x).strip()
-                } if "Cidade" in grupo_candidata.columns else set()
-                if cidades_atual and cidades_candidata and not (cidades_atual & cidades_candidata):
-                    continue
-                distancia = distancia_metros(lat_c, lon_c, candidata["LATITUDE"], candidata["LONGITUDE"])
-                if distancia is not None and distancia <= 2 * raio_feicao + tolerancia_vizinhanca_m:
-                    concentracoes_visiveis.append(candidata)
-
-            concentracoes_detalhe = pd.DataFrame(concentracoes_visiveis)
-            ids_detalhe = set(concentracoes_detalhe["ID_CONCENTRACAO"].astype(str))
-            vizinhas = [str(c["ID_CONCENTRACAO"]) for c in concentracoes_visiveis[1:]]
-
-            # Inclui os pontos das concentrações vizinhas e O.S. no entorno,
-            # sem carregar as O.S. do município inteiro.
-            raio_visual = max(raio_feicao * 1.5, 650.0)
-            lat_os = pd.to_numeric(analise["Latitude"], errors="coerce").to_numpy(dtype=float)
-            lon_os = pd.to_numeric(analise["Longitude"], errors="coerce").to_numpy(dtype=float)
-            mascara_os = np.zeros(len(analise), dtype=bool)
-            for c in concentracoes_visiveis:
-                lat_ref = math.radians(float(c["LATITUDE"]))
-                lon_ref = math.radians(float(c["LONGITUDE"]))
-                dlat = np.radians(lat_os) - lat_ref
-                dlon = np.radians(lon_os) - lon_ref
-                h = (np.sin(dlat / 2) ** 2
-                     + np.cos(lat_ref) * np.cos(np.radians(lat_os)) * np.sin(dlon / 2) ** 2)
-                distancias = 2 * 6371000.0 * np.arcsin(np.sqrt(np.clip(h, 0, 1)))
-                mascara_os |= np.isfinite(distancias) & (distancias <= raio_visual)
-            pontos_mapa = analise.loc[mascara_os].copy()
-
-            # Equipamentos próximos de TODAS as feições visíveis, sem mudar
-            # os equipamentos vinculados ao painel da concentração principal.
-            proximidades_atuais = proximidades.loc[
-                proximidades["Concentração"].astype(str).isin(ids_detalhe)
-            ].copy() if not proximidades.empty else proximidades.copy()
-            def _ativos_detalhe(base, tipo):
-                if base.empty or proximidades_atuais.empty:
-                    return base.iloc[0:0].copy()
-                ids = set(proximidades_atuais.loc[
-                    proximidades_atuais["Tipo"] == tipo, "Identificação"
-                ].fillna("").astype(str).map(normalizar_texto))
-                return base.loc[base["IDENTIFICACAO_ATIVO"].fillna("").astype(str).map(normalizar_texto).isin(ids)].copy()
-            ativos_pocos = _ativos_detalhe(df_pocos, "Poço / Ativo")
-            ativos_loggers = _ativos_detalhe(df_loggers, "Logger")
-            # O filtro opcional da cidade acrescenta equipamentos, sem duplicações.
-            if not ativos_pocos_cidade.empty:
-                ativos_pocos = df_pocos.loc[df_pocos.index.isin(ativos_pocos.index.union(ativos_pocos_cidade.index))].copy()
-            if not ativos_loggers_cidade.empty:
-                ativos_loggers = df_loggers.loc[df_loggers.index.isin(ativos_loggers.index.union(ativos_loggers_cidade.index))].copy()
-            # Todas as feições dos bairros do município, não apenas as
-            # próximas ao círculo ou com evento cadastrado.
-            cidades_detalhe = municipios_por_concentracao.get(selecionada, set())
-            bairros_detalhe = bairros_dos_municipios(bairros, cidades_detalhe)
-            eventos_mapeados = [e for e in eventos_mapeados_todos
-                                if normalizar_municipio(e["bairro"].get("municipio", "")) in cidades_detalhe]
-            # As concentrações distantes permanecem identificadas com bandeira.
-            # As vizinhas, cujos círculos se tocam, já são desenhadas completas.
-            outras_concentracoes = concentracoes.loc[
-                concentracoes["ID_CONCENTRACAO"].astype(str).map(
-                    lambda cod: cod not in ids_detalhe and bool(
-                        municipios_por_concentracao.get(cod, set()) & cidades_detalhe)
-                )
-            ].copy()
-            mapa = criar_mapa(
-                bairros_detalhe, pontos_mapa, ativos_pocos, ativos_loggers,
-                concentracoes_detalhe,
-                proximidades_atuais, mostrar_bairros=True,
-                eventos_mapeados=eventos_mapeados,
-                raio_circulo=raio_concentracao,
-                outras_concentracoes=outras_concentracoes,
-                rotulos_equipamentos=True,
+        _inicio_painel_acionamentos = tempo_execucao.perf_counter()
+        with col_acionamentos_farol:
+            renderizar_painel_acionamentos_farol(
+                _resumo_cidades, _resumo_bairros, _total_acionamentos
             )
-            # Ajusta o enquadramento para mostrar integralmente os círculos
-            # próximos, com margem para O.S. e equipamentos.
-            limites = []
-            for c in concentracoes_visiveis:
-                lat_ref, lon_ref = float(c["LATITUDE"]), float(c["LONGITUDE"])
-                delta_lat = raio_visual / 111320.0
-                delta_lon = raio_visual / (111320.0 * max(.2, math.cos(math.radians(lat_ref))))
-                limites.extend([[lat_ref - delta_lat, lon_ref - delta_lon],
-                                [lat_ref + delta_lat, lon_ref + delta_lon]])
-            mapa.fit_bounds(limites, padding=(25, 25))
-            estado_mapa = st_folium(
-                mapa, width=None, height=650,
-                returned_objects=["center", "zoom"] if sincronizar_mapa_pdf else [],
-                key="farol_v2_mapa_detalhe",
-            )
-            st.caption(f"Mapa detalhado: {len(pontos_mapa)} O.S. na área, "
-                       f"{len(ativos_pocos)} poço(s)/ativo(s) e {len(ativos_loggers)} logger(s).")
-            if vizinhas:
-                st.info("Concentração(ões) próxima(s) também visível(is): "
-                        + ", ".join(vizinhas)
-                        + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
-        else:
-            mapa = criar_mapa_panorama_v2(
-                concentracoes, raio_m=raio_concentracao,
-                bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
-                pontos_os=analise,
-            )
-            estado_mapa = st_folium(
-                mapa, width=None, height=650,
-                returned_objects=["last_object_clicked", "last_object_clicked_tooltip"],
-                key=f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}",
-            )
-            clique = (estado_mapa or {}).get("last_object_clicked")
-            tooltip_clique = str((estado_mapa or {}).get("last_object_clicked_tooltip") or "")
-            if isinstance(clique, dict):
-                lat_clique = parse_float(clique.get("lat"))
-                lon_clique = parse_float(clique.get("lng"))
-                melhor_concentracao, menor_centro = "", float("inf")
-                if lat_clique is not None and lon_clique is not None and not concentracoes.empty:
-                    for _, centro in concentracoes.iterrows():
-                        d = distancia_metros(lat_clique, lon_clique,
-                                             centro["LATITUDE"], centro["LONGITUDE"])
-                        if d is not None and d < menor_centro:
-                            menor_centro, melhor_concentracao = d, str(centro["ID_CONCENTRACAO"])
-                # O tooltip diferencia o centro da concentração de uma O.S.
-                # espacialmente coincidente, se a versão do componente informar.
-                if melhor_concentracao and menor_centro <= 4 and not tooltip_clique.startswith("O.S. "):
-                    st.session_state["farol_v2_concentracao"] = melhor_concentracao
-                    st.session_state["farol_concentracao_expandida"] = melhor_concentracao
-                    st.session_state.pop("farol_v2_os_selecionada", None)
-                    st.rerun()
-                os_clicada = localizar_os_clicada_panorama(estado_mapa, analise)
-                if os_clicada is not None:
-                    st.session_state["farol_v2_os_selecionada"] = chave_ponto(os_clicada)
-
-            os_selecionada = localizar_os_por_chave(
-                analise, st.session_state.get("farol_v2_os_selecionada", "")
-            )
-            if os_selecionada is not None:
-                numero_selecionado = str(os_selecionada.get("Nº da O.S", "") or "—")
-                cidade_selecionada = str(os_selecionada.get("Cidade", "") or "—")
-                bairro_selecionado = str(os_selecionada.get("Bairro", "") or "—")
-                st.info(f"**O.S. selecionada:** {numero_selecionado} · "
-                        f"{cidade_selecionada} · {bairro_selecionado}")
-                if st.button(
-                    f"📍 Abrir raio operacional de {int(raio_operacional)} m desta O.S.",
-                    key="farol_v2_abrir_raio_os", type="primary",
-                ):
-                    st.session_state["farol_v2_os_raio_aberto"] = chave_ponto(os_selecionada)
-                    st.session_state["farol_v2_concentracao"] = ""
-                    st.session_state["farol_concentracao_expandida"] = ""
-                    st.rerun()
-            # A lista tradicional de concentrações permanece abaixo do mapa.
-        exibir_atualizacoes_abaixo_mapa()
-        if sincronizar_mapa_pdf and estado_mapa and selecionada:
-            if estado_mapa.get("center") is not None:
-                st.session_state["farol_ultimo_centro_mapa"] = estado_mapa["center"]
-            if estado_mapa.get("zoom") is not None:
-                st.session_state["farol_ultimo_zoom_mapa"] = estado_mapa["zoom"]
+        _tempo_painel_acionamentos = tempo_execucao.perf_counter() - _inicio_painel_acionamentos
 
         _tempo_mapa = tempo_execucao.perf_counter() - _inicio_renderizacao
         if PERFIL_FAROL == "admin":
@@ -4452,7 +4667,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     st.write(f"Geometrias: {_tempo_geometria:.2f} s")
                     st.write(f"Google Sheets: {_tempo_planilhas:.2f} s")
                     st.write(f"Análise espacial: {_tempo_analise:.2f} s")
-                    st.write(f"Montagem e exibição do mapa: {_tempo_mapa:.2f} s")
+                    st.write(f"Resumo de acionamentos (cache): {_tempo_resumo_acionamentos:.2f} s")
+                    st.write(f"Renderização do painel: {_tempo_painel_acionamentos:.2f} s")
+                    st.write(f"Mapa e painel: {_tempo_mapa:.2f} s")
         if concentracoes.empty:
             if analise.empty:
                 st.warning(
