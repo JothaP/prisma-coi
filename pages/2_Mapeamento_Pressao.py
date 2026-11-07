@@ -11,6 +11,7 @@ import simplekml
 from datetime import datetime, date, timedelta
 from streamlit_autorefresh import st_autorefresh
 import io
+import hashlib
 import uuid
 from typing import Optional
 import time
@@ -74,6 +75,14 @@ MP_RAIZ = Path(__file__).resolve().parent
 if MP_RAIZ.name.lower() == "pages":
     MP_RAIZ = MP_RAIZ.parent
 MP_DEM_CAMINHO = MP_RAIZ / "dados" / "topografia" / "teresina_dem.tif"
+
+# Reutiliza o conversor inteligente do Módulo 1. É o mesmo arquivo auxiliar
+# utilizado pela importação automatizada, e não uma segunda implementação.
+import sys
+if str(MP_RAIZ) not in sys.path:
+    sys.path.insert(0, str(MP_RAIZ))
+from sai_pressao_importacao import converter_bruta, ler_arquivo
+
 
 # Mesma classificação e mesmas cores dos marcadores do Módulo 1.
 COR_SEM_PRESSAO = "#FF5C60"
@@ -507,6 +516,122 @@ def limpar_cache():
     st.cache_data.clear()
 
 
+# ============================================================
+# IMPORTAÇÃO INTELIGENTE — MESMO CONVERSOR DO MÓDULO 1
+# ============================================================
+MP_MARCADOR_ATIVIDADE = re.compile(
+    r"\bSAI_ATIVIDADE\s*=\s*[A-Z0-9_-]+", flags=re.IGNORECASE
+)
+
+
+def mp_observacao_visivel(valor) -> str:
+    """Não apresenta o ID técnico nos pop-ups, na tabela ou na prévia."""
+    texto = str(valor or "").strip()
+    if texto.lower() in {"nan", "none", "nat"}:
+        return ""
+    texto = MP_MARCADOR_ATIVIDADE.sub("", texto)
+    texto = re.sub(r"(?:\s*[|;]\s*){2,}", " | ", texto)
+    return texto.strip(" \t\r\n|;,/-")
+
+
+def mp_observacao_preservando_id(nova, anterior) -> str:
+    """Permite editar a observação sem perder a chave original da atividade."""
+    visivel = mp_observacao_visivel(nova)
+    marcadores = list(dict.fromkeys(MP_MARCADOR_ATIVIDADE.findall(str(anterior or ""))))
+    return " | ".join([parte for parte in (visivel, *marcadores) if parte])
+
+
+def mp_chave_medicao(data, municipio, ponto, lat, lon, mca, observacao):
+    """Conserva deduplicação antiga; distingue atividades da base bruta.
+
+    Na base nativa, a chave continua sendo data+município+ponto+posição.
+    Na base bruta, SAI_ATIVIDADE identifica registros diferentes no mesmo
+    local/data; sem marcador, MCA evita descartar medições distintas.
+    """
+    base = (str(data).strip(), str(municipio).strip().casefold(),
+            str(ponto).strip().casefold(), f"{float(lat):.6f}", f"{float(lon):.6f}")
+    achado = MP_MARCADOR_ATIVIDADE.search(str(observacao or ""))
+    if achado:
+        return ("atividade", base[0], base[1], achado.group().upper().replace(" ", ""))
+    if " | MAT. " in str(ponto).upper():
+        return ("medicao-bruta", *base, f"{float(mca):.4f}")
+    return ("ponto-manual", *base)
+
+
+def mp_linhas_brutas_para_modulo2(linhas) -> list[list]:
+    """Mapeia as nove colunas do M1 para as sete do M2, sem perder a aferição.
+
+    Origem M1: ID, Data, Municipio, Bairro, Latitude, Longitude,
+    Pressao_MCA, Observacao, Matricula.
+    Destino M2: Data, Município, Pontos, Latitude, Longitude, MCA, Observacao.
+    """
+    saida = []
+    for indice, linha in enumerate(linhas, start=1):
+        if len(linha) < 9:
+            raise ValueError(f"Linha convertida {indice}: estrutura do Módulo 1 incompleta.")
+        _id, data, municipio, bairro, lat, lon, pressao, observacao, matricula = linha[:9]
+        data_n = _data_valida_planilha(data)
+        lat_n = normalizar_coordenada(lat, "lat")
+        lon_n = normalizar_coordenada(lon, "lon")
+        mca_n = _numero_valido_planilha(pressao, 0, float("inf"))
+        municipio_n = str(municipio or "").strip()
+        bairro_n = str(bairro or "").strip()
+        matricula_n = str(matricula or "").strip()
+        if not data_n or not municipio_n or not bairro_n or lat_n is None or lon_n is None or mca_n is None:
+            raise ValueError(f"Medição convertida {indice} não passou na validação de data, bairro, coordenadas ou MCA.")
+        # Como a planilha do M2 não possui Bairro e Matrícula como colunas,
+        # ambos aparecem juntos no nome do ponto, legível nos filtros e mapa.
+        ponto = f"{bairro_n} | MAT. {matricula_n}" if matricula_n else bairro_n
+        saida.append([data_n, municipio_n, ponto, lat_n, lon_n,
+                      float(mca_n), str(observacao or "")])
+    return saida
+
+
+def mp_converter_planilha_modulo2(df: pd.DataFrame, data_padrao: date | None = None) -> list[list]:
+    """Preserva a importação do modelo próprio do M2 para arquivos padronizados."""
+    campos = {_chave_cabecalho(col): col for col in df.columns}
+    obrigatorios = ("Data", "Município", "Pontos", "Latitude", "Longitude", "MCA")
+    faltantes = [c for c in obrigatorios if _chave_cabecalho(c) not in campos]
+    if faltantes:
+        raise ValueError("Colunas do modelo Módulo 2 ausentes: " + ", ".join(faltantes))
+    def valor(linha, campo, padrao=""):
+        chave = campos.get(_chave_cabecalho(campo))
+        v = linha.get(chave, padrao) if chave else padrao
+        return "" if pd.isna(v) else v
+    saida = []
+    for numero, (_, linha) in enumerate(df.iterrows(), start=2):
+        if not any(str(v).strip() for v in linha.values if not pd.isna(v)):
+            continue
+        data = _data_valida_planilha(valor(linha, "Data"))
+        # Compatibilidade restrita com o modelo antigo: data vazia pode usar
+        # a data do filtro; data preenchida mas inválida é sempre rejeitada.
+        if not data and not str(valor(linha, "Data")).strip() and data_padrao is not None:
+            data = data_padrao.strftime("%d/%m/%Y")
+        municipio = str(valor(linha, "Município")).strip()
+        ponto = str(valor(linha, "Pontos")).strip()
+        lat = normalizar_coordenada(valor(linha, "Latitude"), "lat")
+        lon = normalizar_coordenada(valor(linha, "Longitude"), "lon")
+        mca = _numero_valido_planilha(valor(linha, "MCA"), 0, float("inf"))
+        obs = valor(linha, "Observacao")
+        if not data or not municipio or not ponto or lat is None or lon is None or mca is None:
+            raise ValueError(f"Linha {numero} do modelo Módulo 2 contém data, município, ponto, coordenadas ou MCA inválidos.")
+        saida.append([data, municipio, ponto, lat, lon, float(mca), str(obs)])
+    return saida
+
+
+def mp_processar_importacao(nome_arquivo: str, conteudo: bytes, data_padrao=None):
+    """Retorna (linhas M2, resumo M1 opcional, tipo de arquivo)."""
+    df = ler_arquivo(nome_arquivo, conteudo)
+    cabecalhos = {_chave_cabecalho(col) for col in df.columns}
+    modelo_modulo2 = { _chave_cabecalho(c) for c in
+        ("Data", "Município", "Pontos", "Latitude", "Longitude", "MCA") }
+    if modelo_modulo2.issubset(cabecalhos):
+        return mp_converter_planilha_modulo2(df, data_padrao), None, "Modelo do Módulo 2"
+    # Igual ao M1: mesmo parser, validações, extração do parecer e resultado.
+    resultado = converter_bruta(df, nome_arquivo)
+    return mp_linhas_brutas_para_modulo2(resultado.linhas), resultado, "Base bruta / Modelo do Módulo 1"
+
+
 def adicionar_ponto(
     data_str: str,
     municipio: str,
@@ -537,11 +662,11 @@ def adicionar_lote_seguro(linhas_dados: list):
     chaves_existentes = set()
     if not df_atual.empty:
         for _, r in df_atual.iterrows():
-            chave = (
-                str(r["Data"]).strip(), str(r["Município"]).strip().casefold(),
-                str(r["Pontos"]).strip().casefold(),
-                f"{float(r['Latitude']):.6f}" if pd.notnull(r["Latitude"]) else "",
-                f"{float(r['Longitude']):.6f}" if pd.notnull(r["Longitude"]) else "",
+            if pd.isna(r["Latitude"]) or pd.isna(r["Longitude"]):
+                continue
+            chave = mp_chave_medicao(
+                r["Data"], r["Município"], r["Pontos"],
+                r["Latitude"], r["Longitude"], r["MCA"], r["Observacao"]
             )
             chaves_existentes.add(chave)
 
@@ -554,8 +679,9 @@ def adicionar_lote_seguro(linhas_dados: list):
         data_n = _data_valida_planilha(d_val)
         if not data_n or not str(mun_val).strip() or not str(p_val).strip() or lat_n is None or lon_n is None or mca_n is None:
             raise ValueError("Lote contém data, ponto, coordenada ou MCA inválido; nenhum registro foi gravado.")
-        chave_nova = (data_n, str(mun_val).strip().casefold(), str(p_val).strip().casefold(),
-                      f"{lat_n:.6f}", f"{lon_n:.6f}")
+        chave_nova = mp_chave_medicao(
+            data_n, mun_val, p_val, lat_n, lon_n, mca_n, obs_val
+        )
         if chave_nova not in chaves_existentes:
             linhas_novas.append([data_n, str(mun_val).strip(), str(p_val).strip(),
                                  f"{lat_n:.6f}", f"{lon_n:.6f}", str(mca_n), str(obs_val or "")])
@@ -663,7 +789,7 @@ def gerar_kml(df):
                         f"Município: {row.get('Município', '')}\n"
                         f"Ponto: {row.get('Pontos', '')}\n"
                         f"MCA: {row.get('MCA', '')}\n"
-                        f"Observação: {row.get('Observacao', '')}"
+                        f"Observação: {mp_observacao_visivel(row.get('Observacao', ''))}"
                     ),
                     coords=[(float(lon), float(lat))]
                 )
@@ -678,6 +804,19 @@ def gerar_kml(df):
 # SESSION STATE
 # ============================================================
 hoje = date.today()
+
+# Depois de uma importação, ajusta o período ANTES de criar date_inputs.
+# Evita conflito de estado de widget dentro do mesmo ciclo do Streamlit.
+mp_periodo_importado = st.session_state.pop("mp_periodo_importado", None)
+if mp_periodo_importado:
+    mp_inicio, mp_fim = mp_periodo_importado
+    st.session_state["calendario_data_inicial"] = mp_inicio
+    st.session_state["calendario_data_final"] = mp_fim
+    st.session_state.data_inicial_selecionada = mp_inicio
+    st.session_state.data_final_selecionada = mp_fim
+    st.session_state["filtro_municipio"] = "Todos"
+    st.session_state["filtro_ponto"] = "Todos"
+    st.session_state["filtro_mca"] = "Todas"
 
 if "data_inicial_selecionada" not in st.session_state:
     st.session_state.data_inicial_selecionada = hoje
@@ -696,6 +835,12 @@ if "modo_adicionar_mapa" not in st.session_state:
 
 if "dados_upload_pendentes" not in st.session_state:
     st.session_state.dados_upload_pendentes = None
+if "mp_resumo_conversao" not in st.session_state:
+    st.session_state.mp_resumo_conversao = None
+if "mp_tipo_upload" not in st.session_state:
+    st.session_state.mp_tipo_upload = ""
+if "mp_assinatura_upload" not in st.session_state:
+    st.session_state.mp_assinatura_upload = None
 
 if "nome_arquivo_pendente" not in st.session_state:
     st.session_state.nome_arquivo_pendente = None
@@ -873,7 +1018,7 @@ def modal_editar_ponto(linha_real: int):
 
             obs_e = st.text_input(
                 "Observação",
-                value=str(reg_edit["Observacao"])
+                value=mp_observacao_visivel(reg_edit["Observacao"])
             )
 
             col_salvar, col_canc = st.columns(2)
@@ -912,7 +1057,7 @@ def modal_editar_ponto(linha_real: int):
                         lat_n,
                         lon_n,
                         mca_e,
-                        obs_e
+                        mp_observacao_preservando_id(obs_e, reg_edit["Observacao"])
                     ):
                         st.success("Atualizado com sucesso!")
                         st.rerun()
@@ -944,14 +1089,26 @@ def modal_previa_upload():
         ]
     )
 
-    st.dataframe(
-        df_preview,
-        use_container_width=True
-    )
+    df_preview_visivel = df_preview.copy()
+    df_preview_visivel["Observacao"] = df_preview_visivel["Observacao"].map(mp_observacao_visivel)
+    st.caption(f"Formato reconhecido: {st.session_state.get('mp_tipo_upload', 'Planilha')}")
+    st.dataframe(df_preview_visivel.head(300), use_container_width=True, hide_index=True)
+    if len(df_preview_visivel) > 300:
+        st.caption("Prévia limitada a 300 linhas para preservar o desempenho; todas serão consideradas no envio.")
 
     st.info(
         f"Total de registros válidos prontos para envio: **{len(df_preview)}**"
     )
+    resumo = st.session_state.get("mp_resumo_conversao")
+    if resumo is not None:
+        st.caption(
+            f"Atividades recebidas: {resumo.origem} | "
+            f"Com medição numérica: {len(resumo.linhas)} | "
+            f"Sem medição: {resumo.sem_pressao_numerica} | "
+            f"Sem coordenadas: {resumo.sem_coordenadas} | "
+            f"Sem data: {resumo.sem_data} | "
+            f"Sem bairro: {resumo.excluidas_ou_fora_da_faixa}"
+        )
 
     col_btn1, col_btn2 = st.columns(2)
 
@@ -963,15 +1120,23 @@ def modal_previa_upload():
             use_container_width=True
         ):
 
+            lote_confirmado = st.session_state.dados_upload_pendentes
             with st.spinner(
                 "Enviando registros com segurança para o Google Sheets..."
             ):
-                qtd_inserida = adicionar_lote_seguro(
-                    st.session_state.dados_upload_pendentes
-                )
+                qtd_inserida = adicionar_lote_seguro(lote_confirmado)
+
+            if qtd_inserida > 0:
+                datas_lote = [datetime.strptime(linha[0], "%d/%m/%Y").date()
+                              for linha in lote_confirmado]
+                if datas_lote:
+                    st.session_state["mp_periodo_importado"] = (min(datas_lote), max(datas_lote))
 
             st.session_state.dados_upload_pendentes = None
             st.session_state.nome_arquivo_pendente = None
+            st.session_state.mp_resumo_conversao = None
+            st.session_state.mp_tipo_upload = ""
+            st.session_state.mp_assinatura_upload = None
             st.session_state.file_uploader_key += 1
 
             if qtd_inserida > 0:
@@ -995,6 +1160,9 @@ def modal_previa_upload():
         ):
             st.session_state.dados_upload_pendentes = None
             st.session_state.nome_arquivo_pendente = None
+            st.session_state.mp_resumo_conversao = None
+            st.session_state.mp_tipo_upload = ""
+            st.session_state.mp_assinatura_upload = None
             st.session_state.file_uploader_key += 1
             st.rerun()
 
@@ -1141,7 +1309,7 @@ with st.sidebar:
         modal_novo_ponto()
 
     arquivo_upload = st.file_uploader(
-        "📂 Enviar Planilha (XLSX/CSV)",
+        "📂 Enviar base bruta ou planilha modelo (XLSX/CSV)",
         type=["xlsx", "csv"],
         key=f"upload_mapeamento_{st.session_state.file_uploader_key}"
     )
@@ -1180,125 +1348,34 @@ with st.sidebar:
         use_container_width=True
     )
 
+    # Conversão inteligente: mesmo motor do Módulo 1, com prévia obrigatória.
+    # O processamento ocorre apenas quando o conteúdo muda (SHA-256), não a
+    # cada rerun/autorefresh; não confunde arquivos diferentes com mesmo nome.
     if arquivo_upload is not None:
-
-        if (
-            st.session_state.nome_arquivo_pendente
-            != arquivo_upload.name
-        ):
-
+        conteudo = arquivo_upload.getvalue()
+        assinatura = hashlib.sha256(conteudo).hexdigest()
+        if st.session_state.mp_assinatura_upload != assinatura:
+            st.session_state.dados_upload_pendentes = None
+            st.session_state.nome_arquivo_pendente = None
+            st.session_state.mp_resumo_conversao = None
+            st.session_state.mp_tipo_upload = ""
+            st.session_state.mp_assinatura_upload = assinatura
             try:
-
-                if arquivo_upload.name.endswith(".csv"):
-
-                    df_up = pd.read_csv(arquivo_upload)
-
-                else:
-
-                    df_up = pd.read_excel(
-                        arquivo_upload,
-                        engine="openpyxl"
-                    )
-
-                lote_para_enviar = []
-
-                for _, row in df_up.iterrows():
-
-                    raw_data = row.get(
-                        "Data",
-                        row.get("date", "")
-                    )
-
-                    data_val = normalizar_data(raw_data)
-
-                    if not data_val:
-                        data_val = data_para_str(data_final)
-
-                    municipio_val = str(
-                        row.get(
-                            "Município",
-                            row.get(
-                                "Municipio",
-                                row.get("cidade", "")
-                            )
-                        )
-                    )
-
-                    ponto_val = str(
-                        row.get(
-                            "Pontos",
-                            row.get("Ponto", "")
-                        )
-                    )
-
-                    lat_val = normalizar_coordenada(
-                        row.get(
-                            "Latitude",
-                            row.get("Lat")
-                        ),
-                        "lat"
-                    )
-
-                    lon_val = normalizar_coordenada(
-                        row.get(
-                            "Longitude",
-                            row.get("Lon")
-                        ),
-                        "lon"
-                    )
-
-                    mca_val = parse_float(
-                        row.get(
-                            "MCA",
-                            row.get("Pressao", 0.0)
-                        ),
-                        0.0
-                    )
-
-                    obs_bruta = row.get("Observação", row.get("Observacao", ""))
-                    obs_val = "" if pd.isna(obs_bruta) else str(obs_bruta).strip()
-
-                    if (
-                        municipio_val.strip()
-                        and ponto_val.strip()
-                        and lat_val is not None
-                        and lon_val is not None
-                    ):
-
-                        lote_para_enviar.append([
-                            data_val,
-                            municipio_val.strip(),
-                            ponto_val.strip(),
-                            float(lat_val),
-                            float(lon_val),
-                            float(mca_val),
-                            obs_val
-                        ])
-
-                if lote_para_enviar:
-
-                    st.session_state.dados_upload_pendentes = (
-                        lote_para_enviar
-                    )
-
-                    st.session_state.nome_arquivo_pendente = (
-                        arquivo_upload.name
-                    )
-
-                else:
-
-                    st.warning(
-                        "⚠️ Nenhum registro válido encontrado. "
-                        "Verifique se os nomes das colunas são: "
-                        "Data, Município, Pontos, Latitude, Longitude, "
-                        "MCA, Observação."
-                    )
-
-            except Exception as e:
-
-                st.error(
-                    f"❌ Erro ao processar arquivo: {e}"
+                lote, resumo, tipo = mp_processar_importacao(
+                    arquivo_upload.name, conteudo, data_final
                 )
+                st.session_state.mp_resumo_conversao = resumo
+                st.session_state.mp_tipo_upload = tipo
+                if lote:
+                    st.session_state.dados_upload_pendentes = lote
+                    st.session_state.nome_arquivo_pendente = arquivo_upload.name
+                else:
+                    st.warning(
+                        "Nenhuma medição numérica válida para importar. "
+                        "Parecer sem pressão medida não é incluído no mapa."
+                    )
+            except Exception as erro:
+                st.error(f"❌ Erro ao processar a planilha: {erro}")
 
     if st.session_state.dados_upload_pendentes is not None:
         modal_previa_upload()
@@ -1908,7 +1985,7 @@ if not df_filtrado.empty:
         ponto = escape(str(row.get("Pontos", "")))
         municipio = escape(str(row.get("Município", "")))
         data_medicao = escape(str(row.get("Data", "")))
-        observacao = escape(str(row.get("Observacao", "") or ""))
+        observacao = escape(mp_observacao_visivel(row.get("Observacao", "")))
         cota_disponivel = cota is not None and math.isfinite(float(cota))
         cota_fmt = mp_formatar_numero(cota, 1) if cota_disponivel else None
         texto_cota = f"{cota_fmt} m" if cota_fmt else "Não disponível"
@@ -2485,6 +2562,7 @@ if not df_filtrado.empty:
         COLUNAS_PADRAO + ["_linha_real"]
     ].copy()
 
+    df_show["Observacao"] = df_show["Observacao"].map(mp_observacao_visivel)
     df_show.insert(
         0,
         "Selecionar",
