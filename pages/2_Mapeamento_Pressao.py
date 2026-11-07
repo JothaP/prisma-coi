@@ -531,7 +531,18 @@ def carregar_dados() -> pd.DataFrame:
         registro["Data"] = _data_valida_planilha(registro["Data"])
         registro["_linha_real"] = idx_linha  # Linha física do Sheets: +2.
         registro["_layout_linha"] = formato
+        registro["_historico_id"] = str(linha[0]).strip() if formato == "com_id" else ""
+        registro["_arquivo_historico"] = False
         registros.append(registro)
+
+    # A consulta ao Storage é opcional e exclusivamente de leitura. Linhas
+    # arquivadas recebem _linha_real=-1 e nunca podem ser editadas no Sheets.
+    from historico_pressao_supabase import adicionar_modulo2, ErroHistorico
+    try:
+        registros = adicionar_modulo2(registros)
+    except ErroHistorico as exc:
+        st.error(f"Histórico indisponível: {exc}")
+        st.stop()
 
     if linhas_nao_interpretadas:
         amostra = ", ".join(map(str, linhas_nao_interpretadas[:12]))
@@ -555,7 +566,7 @@ def carregar_dados() -> pd.DataFrame:
     df["Observacao"] = df["Observacao"].map(
         lambda v: "" if str(v).strip().lower() in {"nan", "none", "nat"} else str(v).strip()
     )
-    return df[COLUNAS_PADRAO + ["_linha_real"]].reset_index(drop=True)
+    return df[COLUNAS_PADRAO + ["_linha_real", "_arquivo_historico"]].reset_index(drop=True)
 
 
 def limpar_cache():
@@ -793,6 +804,9 @@ def atualizar_ponto(
 
 
 def excluir_pontos_lote(linhas_reais: list) -> bool:
+    if any(int(numero) < 0 for numero in linhas_reais):
+        st.error("Registros arquivados não podem ser excluídos pelo Google Sheets.")
+        return False
     if not pode_executar_acao("2", "excluir"):
         st.error("Sem permissão para esta operação.")
         return False
@@ -1004,6 +1018,10 @@ def modal_novo_ponto():
 
 @st.dialog("✏️ Editar Ponto de Pressão")
 def modal_editar_ponto(linha_real: int):
+
+    if int(linha_real) < 0:
+        st.warning("Registros arquivados são somente leitura.")
+        return
 
     df_all = carregar_dados()
 
@@ -2592,9 +2610,22 @@ st.subheader("📋 Registro de Pontos Mapeados")
 
 if not df_filtrado.empty:
 
-    # Prepara o dataframe mantendo a coluna oculta
-    # _linha_real para rastreamento exato
-    df_show = df_filtrado[
+    # Histórico visível e pesquisável, mas separado das operações de edição.
+    arquivados_filtrados = df_filtrado[
+        df_filtrado["_arquivo_historico"] == True
+    ].copy()
+    if not arquivados_filtrados.empty:
+        st.caption("Histórico do Supabase — registros somente leitura")
+        st.dataframe(
+            arquivados_filtrados[COLUNAS_PADRAO],
+            use_container_width=True, hide_index=True, height=230
+        )
+    editaveis_filtrados = df_filtrado[
+        df_filtrado["_arquivo_historico"] == False
+    ].copy()
+
+    # A tabela interativa contém somente linhas físicas do Google Sheets.
+    df_show = editaveis_filtrados[
         COLUNAS_PADRAO + ["_linha_real"]
     ].copy()
 
@@ -2630,7 +2661,7 @@ if not df_filtrado.empty:
             "-- Selecione o Ponto --"
         ]
 
-        for _, row in df_filtrado.iterrows():
+        for _, row in editaveis_filtrados.iterrows():
 
             label = (
                 f"{row['Pontos']}  |  "
