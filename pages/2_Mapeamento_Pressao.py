@@ -5,6 +5,7 @@ from google.oauth2.service_account import Credentials
 import json
 import pandas as pd
 import folium
+from folium.plugins import Fullscreen
 from streamlit_folium import st_folium
 import os
 import simplekml
@@ -1838,6 +1839,19 @@ m = folium.Map(
     tiles=None
 )
 
+# ============================================================
+# TELA CHEIA — MAPA PRINCIPAL DO MÓDULO 2
+# ============================================================
+# Usa o mesmo controle do Módulo 1. A expansão é feita dentro do
+# mapa Leaflet, preservando filtros, medições, rótulos, pop-ups e
+# a seleção de coordenadas para cadastro de pontos.
+Fullscreen(
+    position="topright",
+    title="Expandir mapa para tela cheia",
+    title_cancel="Sair da tela cheia",
+    force_separate_button=True,
+).add_to(m)
+
 
 if "Satélite" in tipo_mapa:
 
@@ -2506,7 +2520,7 @@ class ReorganizarRotulosIndividuais(MacroElement):
 
     mapa.whenReady(function() {
         agendar();
-        mapa.on("zoomend moveend resize viewreset",agendar);
+        mapa.on("zoomend moveend resize viewreset enterFullscreen exitFullscreen",agendar);
         window.addEventListener("resize",agendar);
     });
 })();
