@@ -1,6 +1,6 @@
 """Módulo 8 — Consulta Operacional (Teresina).
 
-Versão V3 homologada, migrada do Ambiente de Teste para pages/8_Consulta_Operacional.py.
+Consulta de matrículas e seleção territorial com rede de água sob demanda.
 - Acesso aos perfis autenticados admin, usuario e operador.
 - Base de matrículas XLS/XLSX ou SQLite indexado, somente leitura.
 - Índice SQLite local criado SOMENTE na primeira pesquisa caso necessário.
@@ -23,10 +23,11 @@ import threading
 import unicodedata
 import uuid
 import zipfile
+import json
 import xml.etree.ElementTree as ET
 
 import folium
-from folium.plugins import MarkerCluster
+from folium.plugins import MarkerCluster, Draw
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -60,6 +61,11 @@ ARQUIVO_POCOS = PASTA_DADOS / "pocos.csv"
 ARQUIVO_LOGGERS = PASTA_DADOS / "loggers.csv"
 PASTA_BAIRROS = RAIZ / "geodados" / "municipios"
 PASTA_INFLUENCIAS = RAIZ / "geodados" / "areas_influencia"
+ARQUIVO_REDE_AGUA = PASTA_DADOS / "Rede_Agua_THE.kmz"
+# Não envia rede de toda a cidade ao navegador. Limites protetivos por consulta.
+LIMITE_REDE_TRECHOS = 4000
+LIMITE_REDE_VERTICES = 90000
+LIMITE_MARCADORES_OS = 800
 
 COLUNAS_MATRICULAS = (
     "CATEGORIA", "NUM_LIGACAO", "BAIRRO",
@@ -740,6 +746,430 @@ def _mapa_consulta(clientes: pd.DataFrame, ativos: list[dict], raio: int,
     return mapa
 
 
+
+# ============================================================
+# SELEÇÃO DE ÁREA — REDE DE ÁGUA E ORDENS DE SERVIÇO
+# ============================================================
+
+def _geometria_area_bairro(bairros: list[dict], nome: str):
+    """Une feições do mesmo bairro sem substituir seus contornos originais."""
+    from shapely.ops import unary_union
+
+    chave = _normalizar_texto(nome)
+    geometrias = [b["geometria"] for b in bairros if _normalizar_texto(b["nome"]) == chave]
+    return unary_union(geometrias) if geometrias else None
+
+
+def _validar_area_selecionada(geometria):
+    """Aceita apenas polígonos pequenos e válidos (coordenadas WGS84)."""
+    if geometria is None or geometria.is_empty:
+        return None, "Selecione ou desenhe um polígono válido."
+    if not geometria.is_valid:
+        geometria = geometria.buffer(0)
+    if geometria.is_empty or geometria.geom_type not in {"Polygon", "MultiPolygon"}:
+        return None, "A área selecionada precisa ser um polígono."
+    xmin, ymin, xmax, ymax = geometria.bounds
+    if not (-180 <= xmin <= xmax <= 180 and -90 <= ymin <= ymax <= 90):
+        return None, "O polígono possui coordenadas geográficas inválidas."
+    # Evita que um desenho acidental cubra toda a cidade e congestione o mapa.
+    if xmax - xmin > 0.28 or ymax - ymin > 0.28:
+        return None, "Área muito extensa. Selecione um bairro ou desenhe um polígono menor."
+    if geometria.area < 1e-11:
+        return None, "Polígono muito pequeno ou degenerado."
+    return geometria, None
+
+
+def _mapa_selecao_area(geometria=None, permitir_desenho=False) -> folium.Map:
+    """Mapa leve: não contém a camada de rede nem os registros do Farol."""
+    mapa = folium.Map(location=[-5.0892, -42.8019], zoom_start=12,
+                      control_scale=True, tiles="OpenStreetMap")
+    if geometria is not None:
+        from shapely.geometry import mapping
+        folium.GeoJson(mapping(geometria), name="Área selecionada",
+                       style_function=lambda _: {"color": "#007d8c", "weight": 3,
+                                                  "fillColor": "#24b7b5", "fillOpacity": .14}).add_to(mapa)
+        xmin, ymin, xmax, ymax = geometria.bounds
+        mapa.fit_bounds([[ymin, xmin], [ymax, xmax]], padding=(22, 22))
+    if permitir_desenho:
+        Draw(export=False, position="topleft",
+             draw_options={"polygon": True, "rectangle": True, "polyline": False,
+                           "circle": False, "marker": False, "circlemarker": False},
+             edit_options={"edit": False}).add_to(mapa)
+    return mapa
+
+
+def _local_tag(tag) -> str:
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _pontos_linha_kml(texto: str | None) -> list[tuple[float, float]]:
+    """KML sempre fornece longitude, latitude[,altitude] com ponto decimal."""
+    pontos = []
+    for item in (texto or "").split():
+        partes = item.split(",")
+        if len(partes) < 2:
+            continue
+        try:
+            lon, lat = float(partes[0]), float(partes[1])
+        except (ValueError, OverflowError):
+            continue
+        if math.isfinite(lon) and math.isfinite(lat) and -180 <= lon <= 180 and -90 <= lat <= 90:
+            pontos.append((lon, lat))
+    return pontos
+
+
+def _linhas_de_geometria(geom):
+    """Ignora pontos isolados resultantes do recorte; a rede é linear."""
+    if geom.is_empty:
+        return
+    if geom.geom_type == "LineString":
+        if len(geom.coords) >= 2 and geom.length > 0:
+            yield geom
+    elif geom.geom_type in {"MultiLineString", "GeometryCollection"}:
+        for parte in geom.geoms:
+            yield from _linhas_de_geometria(parte)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _rede_recortada_kmz(assinatura: tuple[str, int, int], area_wkb: bytes,
+                         limite_trechos: int = LIMITE_REDE_TRECHOS,
+                         limite_vertices: int = LIMITE_REDE_VERTICES) -> dict:
+    """Leitura incremental do KMZ no servidor, somente após pedido explícito.
+
+    Não descompacta o arquivo inteiro no disco nem carrega a rede da cidade no
+    navegador. Cada trecho é intersectado com o polígono real; só o recorte
+    simplificado chega ao Folium. Resultados são cacheados por arquivo + área.
+    """
+    from shapely import wkb
+    from shapely.geometry import LineString, box, mapping
+    from shapely.prepared import prep
+
+    area = wkb.loads(area_wkb)
+    area_box = box(*area.bounds)
+    selecionada = prep(area)
+    feicoes = []
+    vertices = 0
+    total_trechos = 0
+    atingiu_limite = False
+    quantidade_kml = 0
+
+    with zipfile.ZipFile(assinatura[0], "r") as pacote:
+        fontes = [nome for nome in pacote.namelist() if nome.lower().endswith(".kml")]
+        if not fontes:
+            raise ValueError("O arquivo de rede não contém um KML interno.")
+        for nome_kml in fontes:
+            quantidade_kml += 1
+            with pacote.open(nome_kml) as arquivo:
+                # stack permite remover Placemarks processados de seus respectivos
+                # pais; dessa forma, a RAM não cresce com o número de feições.
+                pilha = []
+                for evento, elemento in ET.iterparse(arquivo, events=("start", "end")):
+                    if evento == "start":
+                        pilha.append(elemento)
+                        continue
+                    if _local_tag(elemento.tag) == "Placemark":
+                        titulo = ""
+                        for filho in elemento:
+                            if _local_tag(filho.tag) == "name" and filho.text:
+                                titulo = filho.text.strip()[:110]
+                                break
+                        for linha_xml in elemento.iter():
+                            if _local_tag(linha_xml.tag) != "LineString":
+                                continue
+                            coordenadas = next((e.text for e in linha_xml.iter()
+                                                if _local_tag(e.tag) == "coordinates"), None)
+                            pontos = _pontos_linha_kml(coordenadas)
+                            if len(pontos) < 2:
+                                continue
+                            x0 = min(p[0] for p in pontos)
+                            x1 = max(p[0] for p in pontos)
+                            y0 = min(p[1] for p in pontos)
+                            y1 = max(p[1] for p in pontos)
+                            if x1 < area.bounds[0] or x0 > area.bounds[2] or y1 < area.bounds[1] or y0 > area.bounds[3]:
+                                continue
+                            linha = LineString(pontos)
+                            if not selecionada.intersects(linha):
+                                continue
+                            recorte = linha.intersection(area)
+                            for segmento in _linhas_de_geometria(recorte):
+                                # ~1 metro, apenas para renderização no navegador.
+                                simples = segmento.simplify(0.000009, preserve_topology=False)
+                                if simples.geom_type != "LineString" or len(simples.coords) < 2:
+                                    simples = segmento
+                                n = len(simples.coords)
+                                if len(feicoes) >= limite_trechos or vertices + n > limite_vertices:
+                                    atingiu_limite = True
+                                    break
+                                feicoes.append({"type": "Feature", "properties": {"nome": titulo},
+                                                "geometry": mapping(simples)})
+                                vertices += n
+                                total_trechos += 1
+                            if atingiu_limite:
+                                break
+                        # Libera a memória de Placemarks já tratados, inclusive
+                        # quando todos estão aninhados em um único Folder.
+                        if len(pilha) >= 2:
+                            try:
+                                pilha[-2].remove(elemento)
+                            except ValueError:
+                                pass
+                        elemento.clear()
+                    elif _local_tag(elemento.tag) in {"Folder", "Document"}:
+                        elemento.clear()
+                    pilha.pop()
+                    if atingiu_limite:
+                        break
+            if atingiu_limite:
+                break
+
+    return {"geojson": {"type": "FeatureCollection", "features": feicoes},
+            "trechos": total_trechos, "vertices": vertices,
+            "limitado": atingiu_limite, "arquivos_kml": quantidade_kml}
+
+
+@st.cache_data(ttl=120, max_entries=2, show_spinner=False)
+def _ler_os_farol_para_area(id_planilha: str) -> pd.DataFrame:
+    """Lê somente a aba PONTOS do Farol, sem gravar ou modificar registros."""
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    conf = st.secrets["gcp_json"]
+    if isinstance(conf, str):
+        conf = json.loads(conf)
+    else:
+        conf = dict(conf)
+    creds = Credentials.from_service_account_info(
+        conf, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+    registros = (gspread.authorize(creds).open_by_key(id_planilha)
+                 .worksheet("PONTOS").get_all_values())
+    if not registros:
+        return pd.DataFrame()
+    cabecalho = [str(c).strip() for c in registros[0]]
+    dados = [linha[:len(cabecalho)] + [""] * max(0, len(cabecalho) - len(linha))
+             for linha in registros[1:] if any(str(c).strip() for c in linha)]
+    return pd.DataFrame(dados, columns=cabecalho)
+
+
+def _filtrar_os_no_poligono(base: pd.DataFrame, area):
+    """Usa coordenadas reais; inclui pontos na borda e todas as situações de O.S."""
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+
+    if base is None or base.empty:
+        return pd.DataFrame(), 0
+    essenciais = {"Latitude", "Longitude", "Nº da O.S"}
+    ausentes = essenciais - set(base.columns)
+    if ausentes:
+        raise ValueError("Aba PONTOS sem coluna(s): " + ", ".join(sorted(ausentes)))
+    lat = base["Latitude"].map(lambda v: _coordenada(v, "lat"))
+    lon = base["Longitude"].map(lambda v: _coordenada(v, "lon"))
+    validas = lat.notna() & lon.notna()
+    ignoradas = int((~validas).sum())
+    xmin, ymin, xmax, ymax = area.bounds
+    candidatas = base.loc[validas & lat.between(ymin, ymax) & lon.between(xmin, xmax)].copy()
+    if candidatas.empty:
+        return candidatas, ignoradas
+    preparado = prep(area)
+    dentro = [preparado.covers(Point(float(lon.at[i]), float(lat.at[i])))
+              for i in candidatas.index]
+    return candidatas.loc[dentro].copy().reset_index(drop=True), ignoradas
+
+
+def _mapa_rede_e_os(area, rede: dict | None, os_area: pd.DataFrame) -> folium.Map:
+    """Apresenta apenas feições já recortadas e amostra limitada de marcadores."""
+    from shapely.geometry import mapping
+
+    xmin, ymin, xmax, ymax = area.bounds
+    mapa = folium.Map(location=[(ymin + ymax) / 2, (xmin + xmax) / 2],
+                      zoom_start=15, tiles="OpenStreetMap", control_scale=True)
+    folium.GeoJson(mapping(area), name="Área selecionada",
+                   style_function=lambda _: {"color": "#087c8f", "weight": 2.6,
+                                              "fillColor": "#32bec3", "fillOpacity": 0.07}).add_to(mapa)
+    if rede is not None and rede.get("trechos", 0):
+        folium.GeoJson(rede["geojson"], name="Rede de água (recorte)", show=True,
+                       style_function=lambda _: {"color": "#0868b3", "weight": 2.5,
+                                                  "opacity": .85}).add_to(mapa)
+    grupo = folium.FeatureGroup(name="O.S. dentro do polígono", show=True)
+    for _, linha in os_area.head(LIMITE_MARCADORES_OS).iterrows():
+        lat, lon = _coordenada(linha.get("Latitude"), "lat"), _coordenada(linha.get("Longitude"), "lon")
+        if lat is None or lon is None:
+            continue
+        numero = html_escape(str(linha.get("Nº da O.S", "")))
+        status = html_escape(str(linha.get("Status OS", "")))
+        matricula = html_escape(str(linha.get("Matrícula", "")))
+        folium.CircleMarker([lat, lon], radius=4.5, weight=1,
+                            color="#ffffff", fill=True, fill_color="#f18b22",
+                            fill_opacity=.95, tooltip=f"O.S.: {numero}",
+                            popup=folium.Popup(f"<b>O.S.:</b> {numero}<br>"
+                                               f"<b>Matrícula:</b> {matricula}<br>"
+                                               f"<b>Status:</b> {status}", max_width=320)).add_to(grupo)
+    grupo.add_to(mapa)
+    mapa.fit_bounds([[ymin, xmin], [ymax, xmax]], padding=(20, 20))
+    folium.LayerControl(collapsed=True).add_to(mapa)
+    return mapa
+
+
+def exibir_selecao_area_rede_os() -> None:
+    """Área selecionada, O.S. no polígono e rede sob demanda, sem depender de matrícula."""
+    st.subheader("🗺️ Seleção de área — Rede de água e O.S.")
+    st.caption("Selecione um bairro de Teresina ou desenhe um polígono. "
+               "As O.S. são filtradas pelas coordenadas, incluindo pontos na borda. "
+               "A rede só será lida quando você solicitar sua exibição.")
+
+    modo = st.radio("Como deseja selecionar a área?",
+                    ("Selecionar bairro", "Desenhar polígono"), horizontal=True,
+                    key="m8_modo_area")
+    bairro_area = None
+    area = None
+    if modo == "Selecionar bairro":
+        caminho = _caminho_bairros_teresina()
+        if caminho is None:
+            st.warning("Arquivo de bairros de Teresina não encontrado. Use a opção Desenhar polígono.")
+        else:
+            try:
+                bairros = _bairros_geograficos(_assinatura(caminho))
+                opcoes = sorted({str(b["nome"]).strip() for b in bairros if str(b["nome"]).strip()},
+                                key=_normalizar_texto)
+                bairro_area = st.selectbox("Bairro", options=opcoes, index=None,
+                                           placeholder="Escolha o bairro para consultar",
+                                           key="m8_bairro_selecionado")
+                if bairro_area:
+                    area = _geometria_area_bairro(bairros, bairro_area)
+            except Exception as erro:
+                st.warning(f"Não foi possível carregar os bairros: {erro}")
+    else:
+        st.info("Use a ferramenta de polígono ou retângulo no canto superior esquerdo "
+                "do mapa. Ao finalizar o desenho, clique em Consultar O.S. da área.")
+        wkb_desenho = st.session_state.get("m8_poligono_desenhado")
+        if wkb_desenho:
+            from shapely import wkb
+            area = wkb.loads(wkb_desenho)
+        if st.button("Limpar desenho", key="m8_limpar_desenho"):
+            st.session_state.pop("m8_poligono_desenhado", None)
+            # Novo identificador reinicia também o estado da ferramenta Draw.
+            st.session_state["m8_versao_mapa_desenho"] = (
+                st.session_state.get("m8_versao_mapa_desenho", 0) + 1
+            )
+            st.rerun()
+
+    # Não depende das matrículas e não lê o KMZ de rede nesta etapa.
+    vista = _mapa_selecao_area(area, permitir_desenho=(modo == "Desenhar polígono"))
+    retorno = st_folium(vista, width=None, height=490,
+                        returned_objects=["all_drawings"] if modo == "Desenhar polígono" else [],
+                        key=(f"m8_mapa_escolha_area_{'desenho' if modo == 'Desenhar polígono' else 'bairro'}_"
+                             f"{st.session_state.get('m8_versao_mapa_desenho', 0)}"))
+    if modo == "Desenhar polígono" and isinstance(retorno, dict):
+        desenhos = retorno.get("all_drawings") or []
+        for item in reversed(desenhos):
+            try:
+                from shapely.geometry import shape
+                candidato = shape(item.get("geometry", item))
+                candidato, erro = _validar_area_selecionada(candidato)
+                if erro is None:
+                    if candidato.wkb != st.session_state.get("m8_poligono_desenhado"):
+                        st.session_state["m8_poligono_desenhado"] = candidato.wkb
+                    area = candidato
+                    break
+            except (ValueError, TypeError, KeyError):
+                continue
+
+    if area is None:
+        st.caption("Selecione a área antes de consultar as O.S. ou a rede.")
+        return
+    area, erro_area = _validar_area_selecionada(area)
+    if erro_area:
+        st.warning(erro_area)
+        return
+
+    nome = bairro_area or "Área desenhada"
+    area_id = hashlib.sha256(area.wkb).hexdigest()
+    st.caption(f"Área selecionada: **{nome}**")
+    if st.button("🔎 Consultar O.S. dentro da área", key="m8_consultar_os_area", type="primary"):
+        st.session_state["m8_area_consultada"] = {"nome": nome, "wkb": area.wkb, "id": area_id}
+        st.session_state.pop("m8_rede_carregada_id", None)
+
+    consulta = st.session_state.get("m8_area_consultada")
+    if not consulta or consulta["id"] != area_id:
+        st.info("Clique em Consultar O.S. dentro da área para obter a listagem correspondente.")
+        return
+
+    id_farol = str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip()
+    os_area = pd.DataFrame()
+    if not id_farol:
+        st.warning("Configure 'farol_producao_spreadsheet_id' nos Secrets do PRISMA "
+                   "para consultar a aba PONTOS do Farol.")
+    else:
+        try:
+            with st.spinner("Localizando as O.S. do Farol dentro do polígono..."):
+                base_os = _ler_os_farol_para_area(id_farol)
+                os_area, sem_coords = _filtrar_os_no_poligono(base_os, area)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("O.S. dentro da área", len(os_area))
+            c2.metric("Matrículas distintas", os_area["Matrícula"].astype(str).loc[
+                lambda x: x.str.strip().ne("")].nunique() if "Matrícula" in os_area else 0)
+            c3.metric("O.S. sem coordenadas na base", sem_coords)
+            st.caption("Fonte: aba PONTOS do Módulo Farol. A listagem compreende "
+                       "os registros atualmente mantidos nessa aba (janela operacional de até 8 dias, "
+                       "quando a retenção automática estiver ativa), não todo o histórico do BI. "
+                       "Registros sem coordenadas não podem ser classificados espacialmente.")
+        except Exception as erro:
+            st.error(f"Não foi possível consultar O.S. do Farol: {erro}")
+
+    if os_area.empty:
+        st.info("Nenhuma O.S. com coordenadas dentro do polígono na base disponível.")
+    else:
+        st.markdown("#### O.S. encontradas no polígono")
+        preferidas = ("Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS",
+                      "Dt. Emissão", "Serviço Executado", "Latitude", "Longitude")
+        exibidas = [col for col in preferidas if col in os_area.columns]
+        st.dataframe(os_area.loc[:, exibidas], hide_index=True, use_container_width=True)
+        csv = os_area.loc[:, exibidas].to_csv(index=False, sep=";").encode("utf-8-sig")
+        st.download_button("⬇️ Exportar O.S. da área (CSV)", data=csv,
+                           file_name="os_area_selecionada.csv", mime="text/csv",
+                           key="m8_baixar_os_area")
+
+    st.markdown("#### Rede de água da área selecionada")
+    rede = None
+    if not ARQUIVO_REDE_AGUA.is_file():
+        st.warning("Arquivo não encontrado: dados/Rede_Agua_THE.kmz. "
+                   "A listagem de O.S. continua disponível sem a rede.")
+    else:
+        ativo = st.session_state.get("m8_rede_carregada_id") == area_id
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            if st.button("🧭 Carregar rede apenas desta área", key="m8_carregar_rede",
+                         disabled=ativo, use_container_width=True):
+                st.session_state["m8_rede_carregada_id"] = area_id
+                ativo = True
+        with col2:
+            if st.button("Ocultar rede", key="m8_ocultar_rede", disabled=not ativo,
+                         use_container_width=True):
+                st.session_state.pop("m8_rede_carregada_id", None)
+                ativo = False
+        if ativo:
+            try:
+                with st.spinner("Lendo a rede KMZ e recortando ao perímetro selecionado..."):
+                    rede = _rede_recortada_kmz(_assinatura(ARQUIVO_REDE_AGUA), area.wkb)
+                st.caption(f"Trechos de rede exibidos: {rede['trechos']:,} · "
+                           f"Vértices enviados ao navegador: {rede['vertices']:,}".replace(",", "."))
+                if rede["limitado"]:
+                    st.warning("A rede foi limitada para preservar o desempenho. "
+                               "Selecione um polígono menor para visualizar todos os trechos da área.")
+                elif not rede["trechos"]:
+                    st.info("O KMZ foi lido, mas nenhuma linha de rede intersecta a área escolhida. "
+                            "Verifique se o arquivo contém geometrias do tipo LineString.")
+            except Exception as erro:
+                st.error(f"Não foi possível ler o KMZ da rede: {erro}")
+
+    st_folium(_mapa_rede_e_os(area, rede, os_area), width=None, height=610,
+              returned_objects=[], key="m8_mapa_resultado_area")
+    if len(os_area) > LIMITE_MARCADORES_OS:
+        st.caption(f"Para manter o mapa responsivo, foram desenhadas somente as primeiras "
+                   f"{LIMITE_MARCADORES_OS} O.S. A tabela e o CSV contêm todas as O.S. localizadas.")
+    st.caption("Rede recortada por interseção geográfica, sem editar o KMZ original. "
+               "A presença de uma tubulação no polígono não comprova que ela abasteça cada matrícula.")
+
+
 def exibir_consulta_operacional() -> None:
     """Pesquisa e mapa são gerados só depois de o usuário clicar em Pesquisar."""
     if (not verificar_autenticacao()
@@ -752,8 +1182,18 @@ def exibir_consulta_operacional() -> None:
         st.switch_page("app.py")
 
     st.title("🔍 Consulta Operacional")
-    st.caption("Teresina • Consultas somente leitura • Sem histórico")
+    st.caption("Teresina • Consultas somente leitura • Sem histórico de consultas")
+    ferramenta = st.radio("Ferramenta de consulta",
+                          ("Pesquisa de matrículas", "Seleção de área — Rede e O.S."),
+                          horizontal=True, key="m8_ferramenta")
+    if ferramenta == "Seleção de área — Rede e O.S.":
+        exibir_selecao_area_rede_os()
+    else:
+        exibir_consulta_por_matricula()
 
+
+def exibir_consulta_por_matricula() -> None:
+    """Consulta V3 existente, mantida sem alterações na lógica de busca."""
     fonte = _arquivo_matriculas()
     indice = _arquivo_sqlite_publicado()
     if fonte is None and indice is None:
@@ -912,7 +1352,7 @@ def exibir_consulta_operacional() -> None:
                    "Quando há sobreposições, todas as áreas correspondentes são apresentadas.")
     else:
         st.info("A base de áreas de influência ainda não está disponível para cruzamento geográfico.")
-    st.caption("Cadastro de rede: funcionalidade futura, fora do escopo desta versão.")
+    st.caption("Para visualizar a rede de água e O.S. por perímetro, use Seleção de área — Rede e O.S.")
 
 
 exibir_consulta_operacional()
