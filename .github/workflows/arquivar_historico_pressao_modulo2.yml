@@ -1,0 +1,53 @@
+name: PRISMA - Arquivamento de Pressões - Módulo 2 (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      competencia:
+        description: 'Competência AAAA-MM (vazio = mês anterior)'
+        required: false
+        type: string
+      modo:
+        description: 'Simular ou enviar ao Supabase'
+        required: true
+        default: simular
+        type: choice
+        options:
+          - simular
+          - arquivar
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prisma-arquivamento-pressao-mensal
+  cancel-in-progress: false
+
+jobs:
+  historico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-sync-pressao.txt
+      - name: Instalar dependências existentes
+        run: python -m pip install -r requirements-sync-pressao.txt
+      - name: Testar formatos antigos e atuais (sem credenciais)
+        run: python -m unittest discover -s tests -p 'test_arquivar_modulo2.py' -v
+      - name: Simular ou arquivar competência
+        env:
+          COMPETENCIA: ${{ inputs.competencia }}
+          MODO: ${{ inputs.modo }}
+          SAI_GCP_JSON: ${{ secrets.SAI_GCP_JSON }}
+          PRISMA_HISTORICO_M2_SHEET_ID: ${{ vars.PRISMA_HISTORICO_M2_SHEET_ID }}
+          PRISMA_HISTORICO_SUPABASE_SECRET_KEY: ${{ secrets.PRISMA_HISTORICO_SUPABASE_SECRET_KEY }}
+          PRISMA_HISTORICO_SUPABASE_URL: ${{ vars.PRISMA_HISTORICO_SUPABASE_URL }}
+          PRISMA_HISTORICO_BUCKET: ${{ vars.PRISMA_HISTORICO_BUCKET }}
+        run: |
+          python scripts/arquivar_historico_pressao_modulo2.py --competencia "$COMPETENCIA" --modo "$MODO"
