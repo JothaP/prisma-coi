@@ -828,11 +828,28 @@ def ri_bp_carregar_poligonos_sanear(caminho: str, versao: int):
 
 
 def ri_bp_mapa(base):
-    """Mapa de pontos, incluindo também as medições entre 10 e 15 MCA."""
-    validos=base.dropna(subset=["Latitude","Longitude","_pressao"]).copy()
-    if validos.empty:return None
-    mapa=folium.Map(location=[float(validos["Latitude"].mean()),float(validos["Longitude"].mean())],
-        zoom_start=12,tiles="OpenStreetMap",control_scale=True,zoom_control=False)
+    """Mapa de aferições com coordenadas numéricas (Sheets aceita vírgula decimal).
+
+    Nunca calcula a média das colunas brutas Latitude/Longitude: quando são
+    strings, pandas pode concatená-las e falhar ao converter o resultado.
+    Utiliza as coordenadas já normalizadas de preparar_pressao quando existem;
+    a conversão local também protege chamadas de outras rotinas do PDF.
+    """
+    if base is None or base.empty:
+        return None
+    validos = base.copy()
+    coluna_lat = "_lat" if "_lat" in validos.columns else "Latitude"
+    coluna_lon = "_lon" if "_lon" in validos.columns else "Longitude"
+    if coluna_lat not in validos.columns or coluna_lon not in validos.columns:
+        return None
+    validos["Latitude"] = validos[coluna_lat].map(lambda valor: coordenada(valor, "lat"))
+    validos["Longitude"] = validos[coluna_lon].map(lambda valor: coordenada(valor, "lon"))
+    validos = validos.dropna(subset=["Latitude", "Longitude", "_pressao"])
+    if validos.empty:
+        return None
+    mapa = folium.Map(
+        location=[float(validos["Latitude"].mean()), float(validos["Longitude"].mean())],
+        zoom_start=12, tiles="OpenStreetMap", control_scale=True, zoom_control=False)
     posicoes=[]
     for _,r in validos.iterrows():
         lat=float(r["Latitude"]);lon=float(r["Longitude"])
@@ -1968,209 +1985,814 @@ def kpis_panorama_farol(n_os, n_concentracoes, n_medicoes, n_com_medicao, raio, 
     return painel
 
 
+# ============================================================
+# RELATORIO INTEGRADO — NOVO PADRAO VISUAL INSTITUCIONAL
+# Mantem os calculos, as fontes e as permissoes existentes do modulo 7.
+# O PDF utiliza desenho por pagina para evitar cortes e LayoutError de tabelas.
+# ============================================================
+from reportlab.pdfgen import canvas as _ri7_canvas
+from reportlab.lib.utils import ImageReader as _ri7_ImageReader
+from reportlab.graphics import renderPDF as _ri7_renderPDF
+from reportlab.lib.colors import HexColor as _ri7_HexColor
+from PIL import Image as _ri7_PILImage, ImageDraw as _ri7_ImageDraw
+
+RI7_AZUL = _ri7_HexColor('#063E92')
+RI7_AZUL_ESCURO = _ri7_HexColor('#002B70')
+RI7_AZUL_MEDIO = _ri7_HexColor('#0073BE')
+RI7_TURQUESA = _ri7_HexColor('#00C7D8')
+RI7_CINZA = _ri7_HexColor('#E9F3FD')
+RI7_TEXTO = _ri7_HexColor('#0C2148')
+RI7_A4_LARGURA, RI7_A4_ALTURA = landscape(A4)
+
+# Marca recortada exclusivamente do modelo visual enviado pelo usuario.
+# Embutida no codigo para nao criar dependencias de imagens externas no GitHub.
+RI7_LOGO_AEGEA = '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'
+
+
+def ri7_registrar_fontes():
+    raiz = '/usr/share/fonts/truetype/dejavu/'
+    regular, negrito = raiz + 'DejaVuSans.ttf', raiz + 'DejaVuSans-Bold.ttf'
+    if os.path.isfile(regular) and 'RI7Regular' not in pdfmetrics.getRegisteredFontNames():
+        pdfmetrics.registerFont(TTFont('RI7Regular', regular))
+        pdfmetrics.registerFont(TTFont('RI7Bold', negrito))
+    if 'RI7Regular' in pdfmetrics.getRegisteredFontNames():
+        return 'RI7Regular', 'RI7Bold'
+    return 'Helvetica', 'Helvetica-Bold'
+
+
+def ri7_retangulo(pdf, x, y, largura, altura, fundo='#FFFFFF', borda=None, raio=7, espessura=.6):
+    pdf.saveState()
+    pdf.setFillColor(_ri7_HexColor(fundo) if isinstance(fundo, str) else fundo)
+    if borda:
+        pdf.setStrokeColor(_ri7_HexColor(borda) if isinstance(borda, str) else borda)
+        pdf.setLineWidth(espessura)
+    pdf.roundRect(x, y, largura, altura, raio, stroke=int(bool(borda)), fill=1)
+    pdf.restoreState()
+
+
+def ri7_gradiente(pdf, x, y, largura, altura, cor_inicio='#034A9B', cor_fim='#00C7D8', raio=7):
+    pdf.saveState()
+    caminho = pdf.beginPath()
+    caminho.roundRect(x, y, largura, altura, raio)
+    pdf.clipPath(caminho, stroke=0, fill=0)
+    pdf.linearGradient(x, y, x + largura, y, [_ri7_HexColor(cor_inicio), _ri7_HexColor(cor_fim)])
+    pdf.restoreState()
+
+
+def ri7_escrever(pdf, texto, x, y, tamanho=10, cor=RI7_TEXTO,
+                  negrito=False, largura=None, alinhar='left'):
+    fonte = pdf._ri7_bold if negrito else pdf._ri7_regular
+    txt = str(texto if texto is not None else '')
+    pdf.saveState()
+    pdf.setFont(fonte, tamanho)
+    pdf.setFillColor(_ri7_HexColor(cor) if isinstance(cor, str) else cor)
+    if largura is not None:
+        limite = max(1, largura)
+        if pdfmetrics.stringWidth(txt, fonte, tamanho) > limite:
+            while txt and pdfmetrics.stringWidth(txt + '…', fonte, tamanho) > limite:
+                txt = txt[:-1]
+            txt = txt.rstrip() + '…'
+    if alinhar == 'right':
+        pdf.drawRightString(x, y, txt)
+    elif alinhar == 'center':
+        pdf.drawCentredString(x, y, txt)
+    else:
+        pdf.drawString(x, y, txt)
+    pdf.restoreState()
+
+
+def ri7_quebrar_texto(texto, largura, fonte, tamanho):
+    palavras = str(texto if texto is not None else '').replace('\r', '').split()
+    if not palavras:
+        return []
+    linhas, atual = [], ''
+    for palavra in palavras:
+        candidato = (atual + ' ' + palavra).strip()
+        if atual and pdfmetrics.stringWidth(candidato, fonte, tamanho) > largura:
+            linhas.append(atual)
+            atual = palavra
+        else:
+            atual = candidato
+    if atual:
+        linhas.append(atual)
+    return linhas
+
+
+def ri7_paragrafo(pdf, texto, x, y, largura, tamanho=9, entrelinha=12,
+                  cor=RI7_TEXTO, negrito=False, max_linhas=None, bullet=False):
+    fonte = pdf._ri7_bold if negrito else pdf._ri7_regular
+    linhas = ri7_quebrar_texto(texto, largura - (9 if bullet else 0), fonte, tamanho)
+    if max_linhas is not None and len(linhas) > max_linhas:
+        linhas = linhas[:max_linhas]
+        if linhas:
+            linhas[-1] = linhas[-1].rstrip(' .') + '…'
+    for indice, linha in enumerate(linhas):
+        ri7_escrever(pdf, ('• ' if bullet and indice == 0 else '  ' if bullet else '') + linha,
+                     x, y - indice * entrelinha, tamanho, cor, negrito, largura)
+    return y - entrelinha * len(linhas)
+
+
+def ri7_descricao_quebrar_linhas(texto, largura, fonte, tamanho):
+    """Respeita as quebras manuais do acompanhamento, sem unir registros distintos.
+
+    Cada linha original não vazia inicia um item. Linhas automáticas de
+    continuação permanecem alinhadas ao texto, e linhas em branco são mantidas.
+    Retorna (texto_da_linha, inicia_item), com None para espaçamentos manuais.
+    """
+    texto = str(texto if texto is not None else '').replace('\r\n', '\n').replace('\r', '\n').strip()
+    if not texto:
+        return []
+    saida = []
+    for trecho in texto.split('\n'):
+        trecho = re.sub(r'^\s*(?:[•*]\s*|[-–]\s+)', '', trecho).strip()
+        if not trecho:
+            if saida and saida[-1] is not None:
+                saida.append(None)
+            continue
+        linhas = ri7_quebrar_texto(trecho, max(30, largura - 12), fonte, tamanho)
+        for indice, linha in enumerate(linhas):
+            saida.append((linha, indice == 0))
+    while saida and saida[-1] is None:
+        saida.pop()
+    return saida
+
+
+def ri7_ajustar_descricao(texto, largura, fonte, altura_util=62):
+    """Procura a maior fonte que mantenha a descrição inteira no cartão.
+
+    Quando o conteúdo excede até mesmo a fonte mínima, sinaliza a necessidade
+    de página complementar; nunca descarta definitivamente as linhas originais.
+    """
+    for tamanho in (7.5, 7.25, 7.0, 6.75, 6.5, 6.25, 6.0):
+        linhas = ri7_descricao_quebrar_linhas(texto, largura, fonte, tamanho)
+        entrelinha = max(8.0, tamanho * 1.38)
+        if not linhas or (len(linhas) - 1) * entrelinha <= altura_util:
+            return tamanho, entrelinha, linhas, False
+    tamanho = 6.0
+    linhas = ri7_descricao_quebrar_linhas(texto, largura, fonte, tamanho)
+    return tamanho, max(8.0, tamanho * 1.38), linhas, True
+
+
+def ri7_desenhar_descricao(pdf, texto, x=568, topo=139, largura=237, base=76):
+    """Desenha linhas independentes e reduz a fonte, sem ultrapassar o quadro."""
+    tamanho, entrelinha, linhas, excedeu = ri7_ajustar_descricao(
+        texto, largura, pdf._ri7_regular, altura_util=topo - base)
+    limite = int((topo - base) / entrelinha) + 1
+    # Reserva a última linha para indicar a continuação, quando necessária.
+    visiveis = linhas[:max(1, limite - 1)] if excedeu else linhas
+    for indice, entrada in enumerate(visiveis):
+        if entrada is None:
+            continue
+        linha, inicio = entrada
+        y = topo - indice * entrelinha
+        if inicio:
+            ri7_escrever(pdf, '•', x, y, tamanho, largura=10)
+        ri7_escrever(pdf, linha, x + 11, y, tamanho, largura=largura-12)
+    if excedeu:
+        ri7_escrever(pdf, 'Texto completo na página seguinte',
+                     x, topo - (limite - 1) * entrelinha,
+                     6.1, RI7_AZUL, negrito=True, largura=largura)
+    return excedeu
+
+
+def ri7_tarja(pdf, titulo, x, y, largura, altura=27, tamanho=12, icone=''):
+    ri7_gradiente(pdf, x, y, largura, altura)
+    ri7_escrever(pdf, (icone + '   ' if icone else '') + titulo, x+13, y+8,
+                 tamanho=tamanho, cor='#FFFFFF', negrito=True, largura=largura-21)
+
+
+class RI7CanvasNumerado(_ri7_canvas.Canvas):
+    """Numera paginas ao final; nao altera a contagem nem repete o conteudo."""
+    def __init__(self, *args, **kwargs):
+        _ri7_canvas.Canvas.__init__(self, *args, **kwargs)
+        self._ri7_paginas = []
+        self._ri7_regular, self._ri7_bold = ri7_registrar_fontes()
+
+    def showPage(self):
+        self._ri7_paginas.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self):
+        total = len(self._ri7_paginas)
+        for estado in self._ri7_paginas:
+            self.__dict__.update(estado)
+            ri7_retangulo(self, RI7_A4_LARGURA-98, RI7_A4_ALTURA-30, 79, 18,
+                           '#D9EAFB', None, raio=9)
+            ri7_escrever(self, f'Página {self._pageNumber} de {total}',
+                         RI7_A4_LARGURA-58.5, RI7_A4_ALTURA-24.1,
+                         7.3, RI7_AZUL_ESCURO, negrito=True, alinhar='center')
+            _ri7_canvas.Canvas.showPage(self)
+        _ri7_canvas.Canvas.save(self)
+
+
+def ri7_cabecalho(pdf, titulo, inicio, fim, unidade, rodape, tipo_campo='Unidade'):
+    largura, altura = RI7_A4_LARGURA, RI7_A4_ALTURA
+    pdf.setFillColor(colors.white)
+    pdf.rect(0, 0, largura, altura, stroke=0, fill=1)
+    # Ondas institucionais: duas faixas vetoriais independentes e suaves.
+    pdf.saveState()
+    onda = pdf.beginPath()
+    onda.moveTo(largura-225, altura)
+    onda.curveTo(largura-120, altura-5, largura-125, altura-59, largura, altura-60)
+    onda.lineTo(largura, altura)
+    onda.close()
+    pdf.setFillColor(_ri7_HexColor('#00DDE4'))
+    pdf.drawPath(onda, fill=1, stroke=0)
+    onda2 = pdf.beginPath()
+    onda2.moveTo(largura-97, altura)
+    onda2.curveTo(largura-52, altura-8, largura-39, altura-44, largura, altura-46)
+    onda2.lineTo(largura, altura)
+    onda2.close()
+    pdf.setFillColor(_ri7_HexColor('#0068C6'))
+    pdf.drawPath(onda2, fill=1, stroke=0)
+    pdf.restoreState()
+    # Identidade visual — logotipo sem arquivo auxiliar.
+    try:
+        logo = _ri7_ImageReader(io.BytesIO(base64.b64decode(RI7_LOGO_AEGEA)))
+        pdf.drawImage(logo, 26, altura-61, width=105, height=37, mask='auto')
+    except Exception:
+        ri7_escrever(pdf, 'aegea', 26, altura-51, 24, RI7_AZUL, negrito=True)
+    pdf.setStrokeColor(RI7_AZUL)
+    pdf.setLineWidth(1)
+    pdf.line(150, altura-61, 150, altura-12)
+    # Nunca imprime sobre a aba de numero de pagina.
+    ri7_escrever(pdf, titulo, 164, altura-34, tamanho=16.3, cor=RI7_AZUL,
+                 negrito=True, largura=545)
+    ri7_escrever(pdf, f'Período: {inicio:%d/%m/%Y} a {fim:%d/%m/%Y}   |   {tipo_campo}: {unidade}',
+                 165, altura-55, tamanho=9.5, cor=RI7_AZUL_ESCURO,
+                 negrito=True, largura=565)
+    # Duas curvas de rodape, semelhantes ao modelo enviado.
+    pdf.saveState()
+    c1 = pdf.beginPath()
+    c1.moveTo(largura*.43, 0)
+    c1.curveTo(largura*.66, 42, largura*.78, 38, largura, 12)
+    c1.lineTo(largura, 0)
+    c1.close()
+    pdf.setFillColor(_ri7_HexColor('#86F4F2'))
+    pdf.drawPath(c1, fill=1, stroke=0)
+    c2 = pdf.beginPath()
+    c2.moveTo(largura*.68, 0)
+    c2.curveTo(largura*.84, 25, largura*.96, 27, largura, 37)
+    c2.lineTo(largura, 0)
+    c2.close()
+    pdf.setFillColor(_ri7_HexColor('#00C6D7'))
+    pdf.drawPath(c2, fill=1, stroke=0)
+    pdf.restoreState()
+    ri7_escrever(pdf, rodape, 26, 26, tamanho=9.4, cor=RI7_AZUL, negrito=True)
+
+
+def ri7_painel_kpi(pdf, x, y, w, h, rotulo, numero, subtitulo='', tamanho=23):
+    ri7_retangulo(pdf, x, y, w, h, '#EAF3FD', '#CBDFF2', raio=9)
+    ri7_escrever(pdf, numero, x+w/2, y+(7 if h<65 else 15 if h<90 else h*.34), tamanho, RI7_AZUL,
+                 negrito=True, largura=w-16, alinhar='center')
+    texto = str(rotulo)
+    linhas = ri7_quebrar_texto(texto, w-18, pdf._ri7_bold, 10)
+    for k, linha in enumerate(linhas[:3]):
+        ri7_escrever(pdf, linha, x+w/2, y+h-22-k*12, 10,
+                     RI7_TEXTO, negrito=True, alinhar='center')
+    if subtitulo:
+        ri7_escrever(pdf, subtitulo, x+w/2, y+7, 6.7,
+                     RI7_AZUL_ESCURO, alinhar='center', largura=w-15)
+
+
+def ri7_quadro_imagem(pdf, imagem, x, y, w, h):
+    ri7_retangulo(pdf, x-1, y-1, w+2, h+2, '#FFFFFF', '#BBD0E4', raio=7)
+    if imagem:
+        try:
+            pdf.drawImage(_ri7_ImageReader(io.BytesIO(imagem)), x, y,
+                          width=w, height=h, preserveAspectRatio=False, mask='auto')
+            return
+        except Exception:
+            pass
+    ri7_escrever(pdf, 'Mapa indisponível para esta seleção', x+w/2, y+h/2,
+                 10, RI7_AZUL_ESCURO, alinhar='center')
+
+
+def ri7_imagem_cartografica(mapa, largura, altura, registros=None):
+    """Mapa real por Playwright. Em falha, desenho esquematico e identificado."""
+    try:
+        if mapa is not None:
+            return imagem_folium(mapa, largura, altura)
+    except Exception:
+        pass
+    imagem = _ri7_PILImage.new('RGB', (largura, altura), '#F2F6FA')
+    desenho = _ri7_ImageDraw.Draw(imagem)
+    desenho.rectangle((8, 8, largura-8, altura-8), outline='#B9CAD9', width=2)
+    desenho.text((15, 17), 'MAPA-BASE INDISPONIVEL - COORDENADAS REAIS', fill='#174E88')
+    coordenadas = []
+    if isinstance(registros, pd.DataFrame) and not registros.empty:
+        for _, linha in registros.iterrows():
+            lat = flutuante(linha.get('_lat', linha.get('Latitude', None)))
+            lon = flutuante(linha.get('_lon', linha.get('Longitude', None)))
+            if lat is not None and lon is not None and -90<=lat<=90 and -180<=lon<=180:
+                coordenadas.append((lat,lon))
+    if coordenadas:
+        lats = [p[0] for p in coordenadas]
+        lons = [p[1] for p in coordenadas]
+        lat0, lat1 = min(lats)-.006, max(lats)+.006
+        lon0, lon1 = min(lons)-.006, max(lons)+.006
+        for lat,lon in coordenadas:
+            xx = 26+(largura-52)*(lon-lon0)/max(1e-8,lon1-lon0)
+            yy = altura-24-(altura-64)*(lat-lat0)/max(1e-8,lat1-lat0)
+            desenho.ellipse((xx-6,yy-6,xx+6,yy+6), fill='#1A77C7', outline='white',width=2)
+    buff=io.BytesIO()
+    imagem.save(buff,format='PNG')
+    return buff.getvalue()
+
+
+def ri7_contar_os_com_medicao_proxima(pontos, pressao, raio=750):
+    """Contagem por O.S. unica, nao por concentracao; mesmo municipio e ate raio m."""
+    if (pontos is None or pontos.empty or pressao is None or pressao.empty):
+        return 0
+    bp = pressao.dropna(subset=['_lat','_lon']).copy()
+    if '_pressao' in bp.columns:
+        bp = bp[bp['_pressao'].notna()]
+    if bp.empty:
+        return 0
+    gps={}
+    for municipio, sub in bp.groupby('_municipio',dropna=False):
+        gps[municipio] = list(zip(sub['_lat'].astype(float),sub['_lon'].astype(float)))
+    encontrados=set()
+    for indice, (_, os_) in enumerate(pontos.iterrows()):
+        lat,lon=os_.get('_lat'),os_.get('_lon')
+        if pd.isna(lat) or pd.isna(lon):
+            continue
+        cidade=os_.get('_municipio','')
+        if not any(haversine(float(lat),float(lon),lt,ln)<=raio for lt,ln in gps.get(cidade, [])):
+            continue
+        identificador=str(os_.get('Nº da O.S','') or '').strip() or f'SEM_NUMERO_{indice}'
+        encontrados.add(identificador)
+    return len(encontrados)
+
+
+def ri7_descrever_unidade(concentracoes):
+    if concentracoes is None or concentracoes.empty:
+        return 'Operação integrada'
+    nomes = set(concentracoes['_unidade'].astype(str)) if '_unidade' in concentracoes else set()
+    mapa={'THE':'Águas de Teresina','API':'Águas do Piauí','TIM':'Timon'}
+    return ', '.join(mapa.get(v,v) for v in sorted(nomes)) or 'Operação integrada'
+
+
+def ri7_pagina_panorama(pdf, concentracoes, grupos, pressao, pontos_todos,
+                        inicio, fim, contexto, raio_cluster, raio_proximidade):
+    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
+                  inicio,fim,ri7_descrever_unidade(concentracoes),'Visão Geral')
+    ri7_tarja(pdf, 'Panorama Territorial das Concentrações', 25, 459, 370, 30)
+    ri7_tarja(pdf, 'Panorama do Período', 410, 459, 407, 30)
+    mapa = None
+    if concentracoes is not None and not concentracoes.empty:
+        mapa = mapa_integrado_farol(concentracoes,grupos,pressao.iloc[:0],contexto,
+                                    raio_cluster,pontos_todos=pontos_todos)
+    imagem = ri7_imagem_cartografica(mapa, 960, 920, pontos_todos)
+    ri7_quadro_imagem(pdf, imagem, 26, 99, 368, 353)
+    # Quantidades sao derivadas das bases reais, sem vinculo presumido por bairro.
+    qtd_os = len(pontos_todos) if pontos_todos is not None else 0
+    qtd_conc = len(concentracoes) if concentracoes is not None else 0
+    qtd_bp = int(pressao['_pressao'].notna().sum()) if not pressao.empty else 0
+    qtd_bairros = int(pressao[['_municipio','_bairro']].drop_duplicates().shape[0]) if not pressao.empty else 0
+    media = float(pressao['_pressao'].dropna().mean()) if qtd_bp else None
+    qtd_prox = ri7_contar_os_com_medicao_proxima(pontos_todos, pressao, raio_proximidade)
+    ri7_painel_kpi(pdf, 410, 365, 199, 83, 'Reclamações do período', str(qtd_os), tamanho=25)
+    ri7_painel_kpi(pdf, 618, 365, 199, 83, 'Concentrações', str(qtd_conc), tamanho=25)
+    ri7_painel_kpi(pdf, 410, 272, 199, 83, 'Aferições de pressão do período', str(qtd_bp), tamanho=25)
+    ri7_painel_kpi(pdf, 618, 272, 199, 83,
+                    f'Reclamações com aferição próxima (≤ {raio_proximidade} m)',
+                    str(qtd_prox), tamanho=25)
+    ri7_tarja(pdf, 'Monitoramento de Pressão', 410, 228, 407, 30)
+    ri7_painel_kpi(pdf, 410, 99, 129, 118, 'Aferições do período', str(qtd_bp), tamanho=25)
+    ri7_painel_kpi(pdf, 548, 99, 129, 118, 'Bairros distintos', str(qtd_bairros), tamanho=25)
+    ri7_painel_kpi(pdf, 686, 99, 131, 118, 'Média de pressão do período',
+                    f'{media:.2f} mca'.replace('.',',') if media is not None else '—', tamanho=18)
+
+
+def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculadas,
+                            acompanhamento, contexto, pressao, inicio, fim,
+                            raio_cluster, imagem_mapa=None):
+    unidade = ri7_descrever_unidade(pd.DataFrame([conc]))
+    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
+                  inicio,fim,unidade,'Análise da Concentração')
+    codigo = str(conc.get('Concentração',''))
+    cabecalho = f"{codigo} — {conc.get('Município','')} — {conc.get('Bairros','')}"
+    ri7_tarja(pdf, cabecalho, 25, 459, 792, 31, tamanho=12)
+    ri7_quadro_imagem(pdf, imagem_mapa, 26, 197, 317, 252)
+    ri7_painel_kpi(pdf, 357, 396, 130, 53, 'Reclamações', str(len(grupo)),tamanho=18)
+    ri7_painel_kpi(pdf, 494, 396, 130, 53, 'Matrículas distintas',
+                   str(int(conc.get('Matrículas',0))),tamanho=18)
+    ri7_retangulo(pdf, 631, 396, 186, 53, '#EAF3FD', '#CBDFF2')
+    ri7_escrever(pdf, 'Eventos relacionados:', 640, 428, 9.2, RI7_AZUL,negrito=True)
+    nome_evento = 'Nenhum evento relacionado'
+    if eventos:
+        ativos = [str(e.get('Serviço','') or e.get('Protocolo','') or '') for e in eventos]
+        nome_evento = f'{len(eventos)} — ' + '; '.join(ativos)
+    ri7_paragrafo(pdf, nome_evento, 640, 415, 166, tamanho=7.2,
+                  entrelinha=9, max_linhas=2)
+    ri7_tarja(pdf,'Ordens de Serviço vinculadas à concentração',357,356,460,30,tamanho=10.8)
+    ri7_retangulo(pdf, 357, 196, 460, 151, '#FFFFFF', '#C8DBEB')
+    colunas=[(366, 'O.S. / Ano'),(540,'Matrícula'),(674,'Status')]
+    pdf.setFillColor(_ri7_HexColor('#D9EAFB'))
+    pdf.roundRect(363,325,448,19,5,stroke=0,fill=1)
+    for xx, txt in colunas:
+        ri7_escrever(pdf,txt,xx,331,8.5,RI7_AZUL,negrito=True)
+    registros = [(r, 'Evento') for r in vinculadas] + [(r, 'Demais') for r in nao_vinculadas]
+    max_registros = 9
+    for i, (r, tipo) in enumerate(registros[:max_registros]):
+        yy=314-i*12.3
+        if i%2:
+            pdf.setFillColor(_ri7_HexColor('#EDF5FC'))
+            pdf.rect(364, yy-3, 446, 13, stroke=0, fill=1)
+        ri7_escrever(pdf, protocolo_os_relatorio(r), 367, yy, 7.6, largura=161)
+        ri7_escrever(pdf, str(r.get('Matrícula','')), 541, yy,7.6,largura=124)
+        ri7_escrever(pdf, str(r.get('Status OS','')), 675, yy,7.6,largura=130)
+    if len(registros)>max_registros:
+        ri7_escrever(pdf, f'+ {len(registros)-max_registros} O.S. na página de continuação',
+                     368,201,7.3,RI7_AZUL,negrito=True)
+    # Quadros inferiores, ancorados — nao se deslocam conforme o numero de O.S.
+    ri7_retangulo(pdf, 25, 65, 251, 118, '#FFFFFF', '#BDD4E9')
+    ri7_tarja(pdf,'Acompanhamento Operacional',25,154,251,29,tamanho=9.5)
+    if acompanhamento:
+        ri7_escrever(pdf,'Status:',34,134,8,RI7_AZUL,negrito=True)
+        ri7_escrever(pdf,str(acompanhamento.get('status','') or 'Não informado'),100,134,7.7,largura=164)
+        ri7_escrever(pdf,'Finalizado:',34,116,8,RI7_AZUL,negrito=True)
+        ri7_escrever(pdf,str(acompanhamento.get('finalizado','') or 'Não informado'),100,116,7.7,largura=164)
+        ri7_escrever(pdf,'Município:',34,98,8,RI7_AZUL,negrito=True)
+        ri7_escrever(pdf,str(acompanhamento.get('municipio','') or conc.get('Município','')),100,98,7.7,largura=164)
+        ri7_escrever(pdf,'Regional:',34,80,8,RI7_AZUL,negrito=True)
+        ri7_escrever(pdf,str(acompanhamento.get('regional','') or 'Não informado'),100,80,7.7,largura=164)
+    else:
+        ri7_paragrafo(pdf,'Sem informações de acompanhamento registradas.',34,133,232,tamanho=8)
+    ri7_retangulo(pdf, 286, 65, 259, 118, '#FFFFFF', '#BDD4E9')
+    ri7_tarja(pdf,'Validações Operacionais',286,154,259,29,tamanho=10)
+    verificacoes=[('ArcGIS','arcgis'),('SIA','sia'),('Loggers','loggers'),('Retorno','retorno_operacao')]
+    for i,(nome,chave) in enumerate(verificacoes):
+        xx=294+i*61
+        ri7_retangulo(pdf,xx,105,58,41,'#EAF3FD',None,raio=4)
+        ri7_escrever(pdf,nome,xx+29,130,7.1,RI7_AZUL,negrito=True,alinhar='center',largura=54)
+        valor=str((acompanhamento or {}).get(chave,'') or '').strip()
+        chave_ok=normalizar(valor) in ('SIM','TRUE','1','OK','VALIDADO')
+        ri7_escrever(pdf,('✓ ' if chave_ok else '✗ ' if valor else '– ') + (valor or 'N/A'),
+                     xx+29,111,7.0,'#167A46' if chave_ok else '#B92A41',
+                     negrito=True,alinhar='center',largura=54)
+    ri7_retangulo(pdf, 555, 65, 262, 118, '#FFFFFF', '#BDD4E9')
+    ri7_tarja(pdf,'Descrição da Ocorrência',555,154,262,29,tamanho=10)
+    descricao = str((acompanhamento or {}).get('descricao','') or '').strip()
+    if not descricao:
+        descricao = 'Nenhum direcionamento registrado para esta concentração.'
+    descricao_continua = ri7_desenhar_descricao(pdf, descricao)
+    return registros, descricao_continua
+
+
+def ri7_pagina_os_continuacao(pdf, conc, registros, inicio, fim, n_pagina):
+    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',inicio,fim,
+                  ri7_descrever_unidade(pd.DataFrame([conc])),
+                  'O.S. vinculadas — continuação')
+    ri7_tarja(pdf,f"{conc.get('Concentração','')} — O.S. vinculadas (continuação {n_pagina})",
+              25,460,792,30,tamanho=11)
+    pdf.setFillColor(_ri7_HexColor('#DCEBFA'))
+    pdf.roundRect(26,429,790,23,5,fill=1,stroke=0)
+    for x,t in [(40,'O.S. / Ano'),(285,'Matrícula'),(465,'Status'),(685,'Classificação')]:
+        ri7_escrever(pdf,t,x,436,9.5,RI7_AZUL,negrito=True)
+    for i,(r,grupo) in enumerate(registros):
+        yy=410-i*16.1
+        if i%2:
+            pdf.setFillColor(_ri7_HexColor('#F0F6FC'))
+            pdf.rect(27,yy-4,788,16.1,stroke=0,fill=1)
+        ri7_escrever(pdf,protocolo_os_relatorio(r),40,yy,9,largura=226)
+        ri7_escrever(pdf,str(r.get('Matrícula','')),285,yy,9,largura=167)
+        ri7_escrever(pdf,str(r.get('Status OS','')),465,yy,9,largura=200)
+        ri7_escrever(pdf,grupo,685,yy,8,RI7_AZUL,largura=128)
+
+
+def ri7_pagina_evidencia(pdf, conc, graficos, inicio, fim):
+    for numero,(logger, imagem) in enumerate(graficos, 1):
+        ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
+                      inicio,fim,ri7_descrever_unidade(pd.DataFrame([conc])),
+                      'Evidências de loggers')
+        ri7_tarja(pdf,f"Evidência de Logger — {conc.get('Concentração','')}",25,458,792,30)
+        texto = f"Logger {numero}: {rotulo_logger(logger)}  |  Distância: {logger.get('Distância','')}"
+        ri7_escrever(pdf,texto,36,428,10.5,RI7_AZUL,negrito=True,largura=762)
+        try:
+            with _ri7_PILImage.open(io.BytesIO(imagem)) as im:
+                iw,ih=im.size
+            fator=min(763/iw,350/ih)
+            ww,hh=iw*fator,ih*fator
+            ri7_quadro_imagem(pdf,imagem, (RI7_A4_LARGURA-ww)/2, 87+(350-hh)/2, ww, hh)
+        except Exception:
+            ri7_escrever(pdf,'Imagem de logger inválida; não exibida.',40,399,9)
+        yield
+
+
+def ri7_imagens_loggers(c, contexto, indice_graficos, raio_operacional):
+    imagens=[]
+    loggers=loggers_proximos_da_concentracao(c, contexto, raio_operacional)
+    for logger in filtrar_loggers(loggers):
+        registro=(indice_graficos or {}).get(chave_logger(logger))
+        if not registro or not registro.get('imagem'):
+            continue
+        arquivo=registro['imagem']
+        try:
+            with _ri7_PILImage.open(io.BytesIO(arquivo)) as im:
+                im.verify()
+            imagens.append((logger,arquivo))
+        except Exception:
+            continue
+    return imagens
+
+
+def ri7_pagina_bp_mapa(pdf, pressao, inicio, fim):
+    municipios=sorted(set(pressao['_municipio'].astype(str)) - {''})
+    nome_mun=', '.join(municipios) or 'Não informados'
+    ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,nome_mun,
+                  'Monitoramento de Pressão',tipo_campo='Município(s)')
+    dados=pressao[pressao['_pressao'].notna()].copy()
+    bairros=resumo_pressao_por_bairro(dados)
+    n=len(dados)
+    valores=dados['_pressao']
+    críticos=int(valores.le(5).sum())
+    lista_kpi=[('Medições',str(n)),('Bairros',str(len(bairros))),
+               ('Média',f"{valores.mean():.2f} mca".replace('.',',')),
+               ('Até 5 mca',f'{críticos} ({críticos/n:.0%})')]
+    w=(792-3*7)/4
+    for i,(nome,numero) in enumerate(lista_kpi):
+        ri7_painel_kpi(pdf,25+i*(w+7),408,w,83,nome,numero,
+                       tamanho=20 if 'mca' in numero else 24)
+    ri7_tarja(pdf,'Mapa das aferições',25,374,494,28)
+    ri7_tarja(pdf,'Pontos de atenção',532,374,285,28)
+    mapa=ri_bp_mapa(dados)
+    foto=ri7_imagem_cartografica(mapa,1280,682,dados)
+    ri7_quadro_imagem(pdf,foto,26,106,492,262)
+    ri7_retangulo(pdf,532,106,285,262,'#FFFFFF','#BFD8EC')
+    if bairros.empty or not int(bairros['Até 5 mca'].sum()):
+        ri7_paragrafo(pdf,'Não foram registradas medições até 5 mca no período.',
+                      544,347,261,9,13)
+    else:
+        lideres=bairros[bairros['Até 5 mca']>0].sort_values(
+            ['Até 5 mca','Medições'],ascending=False).head(5)
+        yy=347
+        for _,r in lideres.iterrows():
+            texto=(f"{r['Bairro']} / {r['Município']}: "
+                   f"{int(r['Até 5 mca'])} de {int(r['Medições'])} medições "
+                   f"até 5 mca ({r['% até 5 mca']:g}%).")
+            yy=ri7_paragrafo(pdf,texto,544,yy,260,8.8,13,
+                              max_linhas=3,bullet=True)-7
+            if yy<130: break
+    ri7_escrever(pdf,'As médias e incidências referem-se aos pontos aferidos.',
+                 534,89,7.3,RI7_AZUL)
+    return bairros
+
+
+def ri7_pagina_bp_dashboard(pdf, pressao, bairros, inicio, fim):
+    municipios=sorted(set(pressao['_municipio'].astype(str)) - {''})
+    ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,
+                  ', '.join(municipios) or 'Não informados','Dashboard de Pressão', tipo_campo='Município(s)')
+    ri7_tarja(pdf,'Dashboard de Pressão',25,451,792,34,tamanho=14)
+    ri7_retangulo(pdf,25,88,385,350,'#0E1117',None,raio=10)
+    ri7_retangulo(pdf,422,88,395,350,'#0E1117',None,raio=10)
+    # Reutiliza os mesmos graficos vetoriais e dados que alimentam a tela.
+    grafico_faixas=_chart_faixas_vetorial(pressao,pdf._ri7_regular)
+    grafico_bairros=_chart_bairros_vetorial(bairros,pdf._ri7_regular)
+    for x,desenho in ((33,grafico_faixas),(431,grafico_bairros)):
+        pdf.saveState()
+        fator=min(375/desenho.width,331/desenho.height)
+        pdf.translate(x,104)
+        pdf.scale(fator,fator)
+        _ri7_renderPDF.draw(desenho,pdf,0,0)
+        pdf.restoreState()
+
+
+def ri7_pagina_bp_tabela(pdf, bairros, inicio, fim, municipio, pagina=1, total=1,
+                         linhas_por_pagina=22):
+    ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,municipio,
+                  'Diagnóstico por Bairro', tipo_campo='Município(s)')
+    ri7_tarja(pdf,'Diagnóstico por Bairro' + (f' — continuação {pagina}' if pagina>1 else ''),
+              25,455,792,34,tamanho=13)
+    cabecalhos=[('Bairro / Município',35,240),('n',276,36),('Matrículas',314,85),
+                ('Mín.',407,58),('Média',471,65),('Máx.',543,57),('≤5 mca',605,88),('% ≤5',702,93)]
+    ri7_retangulo(pdf,25,420,792,27,'#D3E7F8',None,raio=3)
+    for txt,x,w in cabecalhos:
+        ri7_escrever(pdf,txt,x,429,8.8,RI7_AZUL_ESCURO,negrito=True,largura=w-5)
+    linhas=bairros.iloc[(pagina-1)*linhas_por_pagina:pagina*linhas_por_pagina]
+    for idx,(_,r) in enumerate(linhas.iterrows()):
+        yy=406-idx*14.6
+        if idx%2:
+            pdf.setFillColor(_ri7_HexColor('#EFF5FB'))
+            pdf.rect(26,yy-4,790,14.6,stroke=0,fill=1)
+        valores=[f"{r['Bairro']} / {r['Município']}",str(int(r['Medições'])),
+                 str(int(r['Matrículas'])),f"{r['Mín. (mca)']:g}",
+                 f"{r['Média (mca)']:.2f}",f"{r['Máx. (mca)']:g}",
+                 f"{int(r['Até 5 mca'])}/{int(r['Medições'])}",
+                 f"{r['% até 5 mca']:g}%"]
+        for (txt,x,w),valor in zip(cabecalhos,valores):
+            ri7_escrever(pdf,valor,x,yy,8.3,RI7_TEXTO,largura=w-5,
+                         negrito=(x==35 and r['Até 5 mca']>0))
+    ri7_escrever(pdf,'Tabela de aferições registradas; não representa a pressão de toda a rede.',
+                 26,67,7.3,RI7_AZUL_ESCURO)
+
+
+def ri7_pagina_sanear(pdf, base, geojson, indices, dentro, inicio, fim, municipio):
+    ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,municipio,
+                  'Anexo — Áreas Sanear', tipo_campo='Município(s)')
+    ri7_tarja(pdf,'Medições em Áreas de Intervenção Sanear',25,460,792,30,tamanho=12)
+    ri7_escrever(pdf,f'{len(dentro)} medições no interior ou limite das áreas; '
+                 f'{len(indices)} áreas intersectadas.',30,442,9,RI7_AZUL_ESCURO)
+    if dentro.empty:
+        ri7_paragrafo(pdf,'Nenhuma medição do período está dentro dos polígonos Sanear.',
+                      33,408,700,10)
+        return
+    mapa=ri_bp_mapa_sanear(dentro,geojson,indices)
+    foto=ri7_imagem_cartografica(mapa,1500,397,dentro)
+    ri7_quadro_imagem(pdf,foto,26,211,790,209)
+    ri7_tarja(pdf,'Relação de medições nas áreas Sanear',25,175,792,28,tamanho=10)
+    ri7_retangulo(pdf,25,150,792,22,'#D9EAFB',None,raio=3)
+    for x,t in [(35,'Matrícula'),(220,'Cód. Protocolo'),(440,'Bairro'),(685,'Medição')]:
+        ri7_escrever(pdf,t,x,156,8.7,RI7_AZUL_ESCURO,negrito=True)
+    for i,(_,r) in enumerate(dentro.head(4).iterrows()):
+        yy=137-i*15.5
+        if i%2:
+            pdf.setFillColor(_ri7_HexColor('#EFF6FC'))
+            pdf.rect(26,yy-3,789,15,stroke=0,fill=1)
+        protocolo=str(r.get(RI_BP_COLUNA_PROTOCOLO,'') or '').strip() or 'Não informado'
+        for x,t,w in ((35,r.get('Matricula',''),165),(220,protocolo,203),
+                       (440,r.get('Bairro',''),223),(685,f"{float(r['_pressao']):g} mca",117)):
+            ri7_escrever(pdf,str(t),x,yy,8.5,RI7_TEXTO,largura=w)
+    return dentro.iloc[4:]
+
+
+def ri7_pagina_sanear_continuacao(pdf, restante, inicio, fim, municipio, num):
+    ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,municipio,
+                  'Anexo — Sanear (continuação)', tipo_campo='Município(s)')
+    ri7_tarja(pdf,f'Medições nas Áreas Sanear — continuação {num}',25,458,792,30)
+    ri7_retangulo(pdf,25,425,792,25,'#D9EAFB',None,raio=3)
+    for x,t in [(35,'Matrícula'),(220,'Cód. Protocolo'),(440,'Bairro'),(685,'Medição')]:
+        ri7_escrever(pdf,t,x,432,9.2,RI7_AZUL_ESCURO,negrito=True)
+    for i,(_,r) in enumerate(restante.iterrows()):
+        yy=411-i*16.3
+        if i%2:
+            pdf.setFillColor(_ri7_HexColor('#EFF6FC'))
+            pdf.rect(26,yy-4,789,16,stroke=0,fill=1)
+        protocolo=str(r.get(RI_BP_COLUNA_PROTOCOLO,'') or '').strip() or 'Não informado'
+        for x,t,w in ((35,r.get('Matricula',''),165),(220,protocolo,202),
+                       (440,r.get('Bairro',''),223),(685,f"{float(r['_pressao']):g} mca",119)):
+            ri7_escrever(pdf,str(t),x,yy,8.5,RI7_TEXTO,largura=w)
+
+
+
+def ri7_pagina_eventos_continuacao(pdf, conc, eventos, inicio, fim, pagina):
+    """Todos os detalhes operacionais dos eventos, sem truncar o registro-fonte."""
+    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
+                  inicio,fim,ri7_descrever_unidade(pd.DataFrame([conc])),
+                  'Eventos relacionados')
+    ri7_tarja(pdf,f"{conc.get('Concentração','')} — Eventos relacionados "
+                  f"({pagina})",25,458,792,31,tamanho=12)
+    for k,evento in enumerate(eventos):
+        # Um bloco por evento com 90 pt de altura. Cinco blocos cabem na pagina.
+        topo = 441-k*75
+        ri7_retangulo(pdf,26,topo-70,790,68,'#F4F8FC','#BFD4EA',raio=5)
+        ri7_escrever(pdf,f"Evento {k+1+5*(pagina-1)} · "
+                         f"{evento.get('Protocolo','') or 'Protocolo não informado'}",
+                     37,topo-16,9.2,RI7_AZUL,negrito=True,largura=750)
+        servico=str(evento.get('Serviço','') or '')
+        ativo=str(evento.get('Código do Ativo','') or '')
+        ri7_escrever(pdf,f"Serviço: {servico}  |  Ativo: {ativo or 'Não informado'}",
+                     37,topo-32,8.4,largura=754)
+        ri7_escrever(pdf,f"Status: {evento.get('Status','')}  |  "
+                         f"Início: {evento.get('Início','')}  |  "
+                         f"Término: {evento.get('Término Real','') or 'Em andamento'}",
+                     37,topo-47,8.1,largura=754)
+        ri7_escrever(pdf,f"Áreas: {evento.get('Bairros coincidentes','') or 'Não informado'}",
+                     37,topo-61,8.1,largura=754)
+
+
+def ri7_pagina_descricao_continuacao(pdf, conc, linhas, inicio, fim, numero):
+    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
+                  inicio,fim,ri7_descrever_unidade(pd.DataFrame([conc])),
+                  'Descrição da ocorrência — continuação')
+    ri7_tarja(pdf,f"{conc.get('Concentração','')} — Descrição da ocorrência "
+                  f"({numero})",25,458,792,31,tamanho=12)
+    for indice, entrada in enumerate(linhas):
+        if entrada is None:
+            continue
+        linha, inicio_item = entrada
+        y = 428 - indice * 16
+        if inicio_item:
+            ri7_escrever(pdf, '•', 36, y, 10, largura=12)
+        ri7_escrever(pdf, linha, 50, y, 10, largura=744)
+
+
 def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, n_os, n_bp,
                   concentracoes=None, grupos=None, raio_cluster=RAIO_CONCENTRACOES_M, contexto=None, pressao=None,
-                  pontos_todos=None, indice_graficos=None, raio_operacional_loggers=RAIO_OPERACIONAL_EVIDENCIAS):
-    """Relatório do Farol: panorama + fichas com mapa e O.S. ao lado.
+                  pontos_todos=None, indice_graficos=None, raio_operacional_loggers=RAIO_OPERACIONAL_EVIDENCIAS,
+                  incluir_sanear=True):
+    """Novo relatorio institucional, com paginas dinamicas e sem celulas nao quebraveis.
 
-    Mantém ativos, eventos, classificação temporal de O.S. e acompanhamento.
-    Apresenta panorama de aferições e indicadores agregados por bairro no anexo M1.
-    Não modifica nem importa a página do Módulo 3.
+    Secoes: panorama; ficha por concentracao + excedentes; imagens reais de loggers;
+    baixa pressao (mapa, graficos, tabela); anexo Sanear opcional.
+    O numero de O.S. proximas de medicao e contado por O.S., nao por concentracao.
     """
     contexto = contexto or {}
     pressao = pressao if pressao is not None else pd.DataFrame()
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4),
-            leftMargin=1.2*cm, rightMargin=1.2*cm,
-            topMargin=1.2*cm, bottomMargin=1.2*cm)
-    regular = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-    if os.path.isfile(regular) and "FIntReg" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("FIntReg", regular))
-        pdfmetrics.registerFont(TTFont("FIntBold", bold))
-        pdfmetrics.registerFontFamily("FIntReg", normal="FIntReg", bold="FIntBold")
-    fonte = "FIntReg" if "FIntReg" in pdfmetrics.getRegisteredFontNames() else "Helvetica"
-    azul = colors.HexColor("#193c65")
-    normal = ParagraphStyle("farol_integra_normal",fontName=fonte,fontSize=8.4,leading=11.5)
-    pequeno = ParagraphStyle("farol_integra_pequeno",parent=normal,fontSize=7.1,leading=9.3)
-    titulo = ParagraphStyle("farol_integra_titulo",parent=normal,fontSize=12.5,leading=16,spaceAfter=8,textColor=azul)
-    secao = ParagraphStyle("farol_integra_secao",parent=normal,fontSize=9.7,leading=12,
-                           spaceBefore=8,spaceAfter=5,textColor=azul)
-    def P(v,sty=pequeno):
-        return Paragraph(xml_escape(str(v if v is not None else "")).replace("\n","<br/>"),sty)
-    def tabela(cab,linhas,larguras):
-        dados=[[P(x) for x in cab]]+[[P(v) for v in linha] for linha in linhas]
-        t=Table(dados,colWidths=larguras,repeatRows=1,hAlign="LEFT")
-        t.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#dee8f2")),
-            ("ROWBACKGROUNDS",(0,1),(-1,-1),[colors.white,colors.HexColor("#f4f7fb")]),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("LEFTPADDING",(0,0),(-1,-1),3),
-            ("RIGHTPADDING",(0,0),(-1,-1),3),
-            ("TOPPADDING",(0,0),(-1,-1),3),
-            ("BOTTOMPADDING",(0,0),(-1,-1),3)
-        ]))
-        return t
-    def tabela_os(linhas,largura=11.85*cm):
-        return tabela(["O.S. / Ano","Matrícula","Status"],linhas,
-                      [largura*.37,largura*.27,largura*.36])
-
-    historia=[P("Farol Operacional — Relatório de concentrações",titulo),
-             P(f"Período: {inicio:%d/%m/%Y} a {fim:%d/%m/%Y}"
-               + (" | Unidade: " + str(concentracoes.iloc[0]["_unidade"]) if concentracoes is not None and not concentracoes.empty else ""),normal),
-             Spacer(1,9)]
-    # Primeira parte: Farol na estrutura original, SEM pontos de pressão.
-    # Segunda parte: relatório M1 independente, com mapa e dashboards.
-    pressao=associar_pressao_as_os(pressao,pontos_todos)
-
-    def adicionar_secao_modulo1():
-        montar_secao_baixa_pressao(
-            historia,pressao,inicio,fim,normal,pequeno,titulo,secao,
-            fonte,P,tabela,os_base=pontos_todos)
-
-
-    if concentracoes is None or concentracoes.empty:
-        historia.append(P("Nenhuma concentração identificada para a seleção.", normal))
-        if not pressao.empty:
-            historia.append(PageBreak())
-            adicionar_secao_modulo1()
-        doc.build(historia)
-        return buffer.getvalue()
-
-    # PANORAMA do Farol + todos os pontos cartográficos válidos de pressão.
-    mapa=mapa_integrado_farol(concentracoes,grupos,pressao.iloc[:0],contexto,raio_cluster,
-                             pontos_todos=pontos_todos)
-    # Enquadramento panorâmico mais horizontal: preserva a proporção da captura
-    # sem distorcer o mapa, deixando espaço para os 4 indicadores na mesma página.
-    imagem=imagem_folium(mapa,1280,585)
-    medicao_proxima=(int((resumo["Medições próximas"] > 0).sum())
-                     if resumo is not None and not resumo.empty else 0)
-    historia.append(KeepTogether([
-        P("Panorama territorial das concentrações",titulo),
-        Image(io.BytesIO(imagem),width=26*cm,height=(26*585/1280)*cm),
-        Spacer(1,6),
-        kpis_panorama_farol(n_os, len(concentracoes), n_bp,
-                           medicao_proxima, raio, normal, pequeno),
-    ]))
-    historia.append(PageBreak())
-
-    for indice,(_,c) in enumerate(resumo.iterrows()):
-        codigo=str(c["Concentração"])
-        grupo=grupos[grupos["_grupo"]==c["_grupo"]].copy()
-        proximas=associados[associados["Concentração"]==codigo] if not associados.empty else pd.DataFrame()
-        territoriais_c=territoriais[territoriais["Concentração"]==codigo] if not territoriais.empty else pd.DataFrame()
-        historia.append(P(f"{codigo} — {c['Município']} — {c['Bairros']}",titulo))
-        figura=imagem_folium(mapa_ficha_farol(c,grupo,pressao.iloc[:0],contexto,raio_cluster),760,515)
-        img=Image(io.BytesIO(figura),width=13.4*cm,height=9.08*cm)
-        eventos=eventos_da_concentracao(c,contexto,inicio,fim)
-        vinculadas,nao_vinculadas=classificar_os_eventos(grupo,eventos)
-        ev_descr="; ".join((f"{e.get('Protocolo','')} — {e.get('Serviço','')} / "
-                           f"{e.get('Código do Ativo','')} [{e.get('Status','')}] "
-                           f"{e.get('Início','')} até {e.get('Término Real','') or 'em andamento'}")
-                          for e in eventos)
-        base_info=[P(f"{len(grupo)} O.S. · {int(c['Matrículas'])} matrículas distintas",normal),
-                   Spacer(1,5),Paragraph("<b>Eventos relacionados:</b> " +
-                          xml_escape(ev_descr or "Nenhum evento relacionado"),pequeno),
-                   Spacer(1,3)]
-        def linhas_os(registros):
-            return [[protocolo_os_relatorio(r),str(r.get("Matrícula","")),
-                     str(r.get("Status OS",""))] for r in registros]
-        categorias=[("Ordens vinculadas aos eventos",linhas_os(vinculadas)),
-                    ("Ordens não vinculadas",linhas_os(nao_vinculadas))]
-        def conteudo_painel(qt):
-            blocos=list(base_info)
-            for (nome,linhas),qtd in zip(categorias,qt):
-                blocos.extend([Spacer(1,4),Paragraph("<b>" +
-                    xml_escape(f"{nome} ({len(linhas)})") + "</b>",pequeno)])
-                if linhas and qtd:
-                    blocos.append(tabela_os(linhas[:qtd]))
-            return blocos
-        # Reserva exatamente o espaço do painel lateral usado pelo Farol.
-        limite_h=9.08*cm-12
-        largura_painel=12.8*cm-16
-        def altura_bloco(elements):
-            altura=0
-            for element in elements:
-                _,h=element.wrap(largura_painel,limite_h)
-                altura+=h+element.getSpaceBefore()+element.getSpaceAfter()
-            return altura
-        contagens=[0,0]
-        for k,(_,linhas) in enumerate(categorias):
-            for _ in linhas:
-                candidato=contagens.copy(); candidato[k]+=1
-                if altura_bloco(conteudo_painel(candidato))<=limite_h:
-                    contagens=candidato
-                else:break
-        ficha=Table([[img,conteudo_painel(contagens)]],
-                    colWidths=[13.8*cm,12.8*cm],hAlign="LEFT")
-        ficha.setStyle(TableStyle([
-            ("VALIGN",(0,0),(-1,-1),"TOP"),
-            ("BACKGROUND",(1,0),(1,0),colors.HexColor("#f4f7fb")),
-            ("LEFTPADDING",(0,0),(0,0),0),
-            ("LEFTPADDING",(1,0),(1,0),10),
-            ("RIGHTPADDING",(1,0),(1,0),6),
-            ("TOPPADDING",(0,0),(-1,-1),6),
-            ("BOTTOMPADDING",(0,0),(-1,-1),6),
-        ]))
-        historia.extend([ficha,Spacer(1,7)])
-        for (nome,linhas),ja_exibidas in zip(categorias,contagens):
-            restantes=linhas[ja_exibidas:]
-            if restantes:
-                # IMPORTANTE: não envolver todas as O.S. restantes em uma
-                # Table de célula única. Uma célula com outra tabela dentro
-                # não pode ser quebrada pelo ReportLab entre duas páginas;
-                # listas longas geravam LayoutError (célula maior que a página).
-                # A tabela de O.S. fica diretamente na história do PDF, para
-                # permitir quebra por linha e repetição automática do cabeçalho.
-                cabecalho_continuacao = Paragraph(
-                    "<b>" + xml_escape(f"{nome} — continuação") + "</b>",
-                    ParagraphStyle(
-                        "farol_integra_continuacao_os",
-                        parent=pequeno,
-                        spaceBefore=9,
-                        spaceAfter=5,
-                        keepWithNext=1,
-                    ),
-                )
-                historia.extend([
-                    cabecalho_continuacao,
-                    tabela_os(restantes, 25.6*cm),
-                ])
-        # Padrão do Farol: equipamentos são exibidos no mapa e os eventos no
-        # painel de O.S. Não criar quadros extras que alterem o layout original.
-        # Somente os dados da ficha são usados no PDF. Não consultar o histórico.
-        acompanhamento, _, _ = ficha_acompanhamento(c, grupo, contexto, incluir_movimentacoes=False)
-        if acompanhamento:
-            historia.append(P("ACOMPANHAMENTO OPERACIONAL",secao))
-            historia.append(tabela(["Status / Finalizado","Município / Regional","Reclamações / Unidade"],[[
-                f"{acompanhamento.get('status','')} · {acompanhamento.get('finalizado','')}",
-                f"{acompanhamento.get('municipio','')} · {acompanhamento.get('regional','')}",
-                f"{acompanhamento.get('qtd_reclamacoes','')} · {acompanhamento.get('unidade','')}"
-            ]],[8.8*cm,8.8*cm,8.4*cm]))
-            historia.extend([P("Validações operacionais",secao),
-                tabela(["ArcGIS","SIA","Loggers","Retorno Operação/Controle"],[[
-                acompanhamento.get("arcgis",""),acompanhamento.get("sia",""),
-                acompanhamento.get("loggers",""),acompanhamento.get("retorno_operacao","")]],
-                [6.0*cm,6.0*cm,6.0*cm,8.0*cm]),
-            ])
-            if str(acompanhamento.get("descricao", "") or "").strip():
-                historia.extend([P("Descrição da ocorrência", secao),
-                                 P(acompanhamento["descricao"], normal)])
-        # Evidências do dia atual, idênticas às usadas pelo Módulo 3: não
-        # criar título, espaço reservado ou página para logger sem imagem.
-        loggers_da_ficha = loggers_proximos_da_concentracao(
-            c, contexto, raio_operacional_loggers
-        )
-        historia.extend(evidencias_loggers_relatorio_integrado(
-            loggers_da_ficha, indice_graficos, fonte
-        ))
-        if indice<len(resumo)-1:
-            historia.append(PageBreak())
+    pontos_todos = pontos_todos if pontos_todos is not None else pd.DataFrame()
+    concentracoes = concentracoes if concentracoes is not None else pd.DataFrame()
+    grupos = grupos if grupos is not None else pd.DataFrame()
+    # Filtros de data/unidade ja sao aplicados pela interface do modulo.
     if not pressao.empty:
-        historia.append(PageBreak())
-        adicionar_secao_modulo1()
-    doc.build(historia)
+        pressao = associar_pressao_as_os(pressao, pontos_todos)
+        pressao = pressao[pressao['_pressao'].notna() & (pressao['_pressao'] >= 0)].copy()
+    buffer = io.BytesIO()
+    pdf = RI7CanvasNumerado(buffer, pagesize=landscape(A4), pageCompression=1)
+    pdf.setTitle('PRISMA COI — Relatório Integrado: Farol e Baixa Pressão')
+    pdf.setAuthor('COI — Centro de Operações Integradas')
+    numero_de_paginas = 0
+
+    def terminar_pagina():
+        nonlocal numero_de_paginas
+        pdf.showPage()
+        numero_de_paginas += 1
+
+    ri7_pagina_panorama(pdf,concentracoes,grupos,pressao,pontos_todos,
+                        inicio,fim,contexto,raio_cluster,raio)
+    terminar_pagina()
+
+    if not concentracoes.empty and resumo is not None and not resumo.empty:
+        for _, conc in resumo.iterrows():
+            codigo = str(conc['Concentração'])
+            grupo = grupos[grupos['_grupo']==conc['_grupo']].copy()
+            eventos = eventos_da_concentracao(conc,contexto,inicio,fim)
+            vinculadas,nao = classificar_os_eventos(grupo,eventos)
+            acompanhamento,_,_ = ficha_acompanhamento(
+                conc,grupo,contexto,incluir_movimentacoes=False)
+            mapa = mapa_ficha_farol(conc,grupo,pressao.iloc[:0],contexto,raio_cluster)
+            imagem = ri7_imagem_cartografica(mapa,850,675,grupo)
+            registros, descricao_continua = ri7_pagina_concentracao(
+                pdf,conc,grupo,eventos,vinculadas,nao,acompanhamento,
+                contexto,pressao,inicio,fim,raio_cluster,imagem)
+            terminar_pagina()
+            restantes = registros[9:]
+            for i in range(0,len(restantes),19):
+                ri7_pagina_os_continuacao(pdf,conc,restantes[i:i+19],
+                                         inicio,fim,i//19+1)
+                terminar_pagina()
+            # Os detalhes dos eventos nao cabem no card executivo. Preservar
+            # protocolo, ativo, servico, status, janela e bairros em paginas proprias.
+            for i in range(0,len(eventos),5):
+                ri7_pagina_eventos_continuacao(pdf,conc,eventos[i:i+5],inicio,fim,i//5+1)
+                terminar_pagina()
+            if descricao_continua:
+                # O cartão usa a menor fonte permitida e sinaliza a continuação.
+                # A página seguinte contém a descrição INTEGRAL, preservando
+                # quebras de linha e itens, sem qualquer truncamento de conteúdo.
+                descricao = str((acompanhamento or {}).get('descricao','') or '').strip()
+                linhas_descricao = ri7_descricao_quebrar_linhas(
+                    descricao, 758, pdf._ri7_regular, 10)
+                for i in range(0, len(linhas_descricao), 20):
+                    ri7_pagina_descricao_continuacao(pdf, conc,
+                        linhas_descricao[i:i+20], inicio, fim, i//20+1)
+                    terminar_pagina()
+            for _ in ri7_pagina_evidencia(
+                pdf,conc,ri7_imagens_loggers(conc,contexto,indice_graficos,
+                                              raio_operacional_loggers),inicio,fim):
+                terminar_pagina()
+
+    if not pressao.empty:
+        bairros=ri7_pagina_bp_mapa(pdf,pressao,inicio,fim)
+        terminar_pagina()
+        ri7_pagina_bp_dashboard(pdf,pressao,bairros,inicio,fim)
+        terminar_pagina()
+        municipios=', '.join(sorted(set(pressao['_municipio'].astype(str)) - {''})) or 'Não informados'
+        total_tabelas=max(1,math.ceil(len(bairros)/22))
+        for pagina in range(1,total_tabelas+1):
+            ri7_pagina_bp_tabela(pdf,bairros,inicio,fim,municipios,pagina,total_tabelas)
+            terminar_pagina()
+        if incluir_sanear:
+            base=pressao.copy()
+            base['Latitude']=pd.to_numeric(base['_lat'], errors='coerce')
+            base['Longitude']=pd.to_numeric(base['_lon'], errors='coerce')
+            try:
+                arquivo=ri_bp_encontrar_kml_sanear()
+                if arquivo.is_file():
+                    geojson=ri_bp_carregar_poligonos_sanear(str(arquivo),arquivo.stat().st_mtime_ns)
+                    if geojson.get('features'):
+                        dentro,indices=ri_bp_selecionar_sanear(base,geojson)
+                        # Sem medições intersectando Sanear: não cria página nem
+                        # qualquer menção à seção no relatório institucional.
+                        if not dentro.empty:
+                            resto = ri7_pagina_sanear(pdf,base,geojson,indices,dentro,inicio,fim,municipios)
+                            terminar_pagina()
+                            if resto is not None and not resto.empty:
+                                for i in range(0,len(resto),19):
+                                    ri7_pagina_sanear_continuacao(pdf,resto.iloc[i:i+19],
+                                                                   inicio,fim,municipios,i//19+1)
+                                    terminar_pagina()
+            except (ET.ParseError,OSError,ValueError,TypeError,KeyError,IndexError) as erro:
+                # Mantem PDF valido mesmo se a camada de terceiro for invalida.
+                ri7_cabecalho(pdf,'Monitoramento de Baixa Pressão — COI',inicio,fim,
+                              municipios,'Anexo Sanear', tipo_campo='Município(s)')
+                ri7_tarja(pdf,'Anexo Sanear — indisponível',25,458,792,31)
+                ri7_paragrafo(pdf,'Não foi possível processar a camada Sanear: ' + str(erro),
+                              36,405,760,9)
+                terminar_pagina()
+    pdf.save()
     return buffer.getvalue()
+
 
 
 st.title("📊 Relatórios Integrados — Farol + Baixa Pressão")
@@ -2291,7 +2913,12 @@ if r:
             st.session_state.get("pdf_relatorio_integrado_dia") != _dia_evidencias().isoformat()):
             st.session_state.pop("pdf_relatorio_integrado_farol", None)
             st.session_state.pop("pdf_relatorio_integrado_dia", None)
-        if st.button("📄 Preparar relatório cartográfico (PDF)", type="primary", key="gerar_pdf_ri_farol"):
+        incluir_sanear_pdf = st.checkbox(
+            "Incluir anexo de medições nas áreas Sanear",
+            value=True, key="ri_pdf_incluir_sanear",
+            help="Mantém o cruzamento cartográfico e a relação de medições Sanear do relatório anterior."
+        )
+        if st.button("📄 Gerar relatório institucional (PDF)", type="primary", key="gerar_pdf_ri_farol"):
             st.session_state.pop("pdf_relatorio_integrado_farol", None)
             st.session_state.pop("pdf_relatorio_integrado_dia", None)
             try:
@@ -2308,13 +2935,14 @@ if r:
                         r["raio"],r["n_os"],r["n_bp"],r["concentracoes"],r["grupos"],r["raio_cluster"],
                         r["contexto"],r["pressao_mapa"],r["os_base"],
                         indice_graficos=indice_graficos,
-                        raio_operacional_loggers=RAIO_OPERACIONAL_EVIDENCIAS)
+                        raio_operacional_loggers=RAIO_OPERACIONAL_EVIDENCIAS,
+                        incluir_sanear=incluir_sanear_pdf)
                     st.session_state["pdf_relatorio_integrado_farol"] = pdf
                     st.session_state["pdf_relatorio_integrado_dia"] = dia_graficos.isoformat()
             except Exception as erro_pdf:
                 st.error(f"Não foi possível preparar o PDF integrado: {erro_pdf}")
         if st.session_state.get("pdf_relatorio_integrado_farol"):
-            st.download_button("⬇️ Baixar relatório no padrão Farol (PDF)",
+            st.download_button("⬇️ Baixar relatório institucional integrado (PDF)",
                 data=st.session_state["pdf_relatorio_integrado_farol"],
                 file_name="relatorio_operacional_integrado_coi.pdf",mime="application/pdf")
         if not resumo.empty:
