@@ -243,11 +243,16 @@ def adicionar_modulo2(registros_sheet: list[dict]) -> list[dict]:
     conteudos_atuais = Counter()
     conteudos_legados = Counter()
     for r in registros_sheet:
+        # Os dicionários do Módulo 2 têm colunas com acentos e maiúsculas;
+        # normalizar chaves é necessário para comparar com os XLSX arquivados.
+        normalizado = {_normalizar(campo): str(valor or "")
+                       for campo, valor in r.items()}
+        conteudo = _assinatura_conteudo(normalizado, tuple(campos))
         if r.get("_historico_id"):
             ids_atuais.add(str(r["_historico_id"]).strip())
         else:
-            conteudos_legados[_assinatura_conteudo(r, tuple(campos))] += 1
-        conteudos_atuais[_assinatura_conteudo(r, tuple(campos))] += 1
+            conteudos_legados[conteudo] += 1
+        conteudos_atuais[conteudo] += 1
     ids_arquivo = set()
     vistos_sem_id = Counter()
     vistos_com_id = Counter()
