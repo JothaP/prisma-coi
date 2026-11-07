@@ -2017,16 +2017,15 @@ if not df_filtrado.empty:
             <b>Cota da superfície (DSM):</b> {texto_cota}
           </div>{observacao_html}{info_coincidentes}
         </div>"""
+        # Rótulo do mapa: mostrar EXCLUSIVAMENTE a medição em mca.
+        # Município, ponto/matrícula, data, classificação, cota e observação
+        # permanecem disponíveis somente no popup ao clicar no marcador.
         rotulo = ""
         if mostrar_rotulos:
-            cota_html = (
-                f'<span class="bp-label-elevation" title="Cota da superfície no DSM (não é cota da tubulação)">'
-                f'{texto_cota}</span>' if cota_disponivel else ""
-            )
             rotulo = f"""
             <div class="bp-label-card bp-label-card-individual" data-bp-default="top">
                 <div class="bp-label-data">
-                    <span class="bp-label-pressure">{mca_fmt} MCA</span>{cota_html}
+                    <span class="bp-label-pressure">{mca_fmt} mca</span>
                 </div>
             </div>"""
         prioridade = 4 if mca == 0 else 3 if mca <= 5 else 2 if mca <= 15 else 1
@@ -2046,7 +2045,7 @@ if not df_filtrado.empty:
                 class_name="pressao-individual-marker",
             ),
             popup=folium.Popup(popup, max_width=310),
-            tooltip=f"{ponto} | {mca_fmt} MCA | {classificacao}",
+            tooltip=f"{mca_fmt} mca",
         ).add_to(m)
 
 
@@ -2210,10 +2209,10 @@ map_style_html = """
 
     .bp-label-card-individual {
 
-        /* Mesmo cartão de pressão, agora com cota opcional à direita. */
+        /* Rótulo compacto: somente o valor de pressão, sem outros campos. */
         width: max-content;
-        min-width: 66px;
-        max-width: 165px;
+        min-width: 64px;
+        max-width: 120px;
 
         padding: 4px 6px 4px 8px;
         border-radius: 999px;
@@ -2236,20 +2235,6 @@ map_style_html = """
 
         justify-content: center;
     }
-
-    .bp-label-elevation {
-        display: inline-block;
-        flex: 0 0 auto;
-        padding: 2px 5px;
-        border: 1px solid #dbe3ee;
-        border-radius: 999px;
-        background: #f1f5f9;
-        font-size: 9px;
-        font-weight: 700;
-        color: #475569;
-        white-space: nowrap;
-    }
-
 
     .bp-label-card-bairro {
 
