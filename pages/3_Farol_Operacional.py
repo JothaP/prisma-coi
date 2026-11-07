@@ -323,10 +323,12 @@ def evento_abrange_municipio(valor):
 
 
 def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
-    """Lê bairros em listas, linhas e rótulos; separa 'e' só se ambos existirem no GPKG.
+    """Lê bairros informados em Áreas Impactadas e valida contra a base local.
 
-    Nunca usa fuzzy matching nem divide nomes compostos sem confirmação.
-    Retorna chaves normalizadas para mapa, cruzamento de O.S. e relatórios.
+    Reconhece também o rótulo 'Áreas Afetadas' e listas abreviadas como
+    'Itararé 1 e 2', mas só desdobra nomes quando AMBOS existem nos polígonos
+    do mesmo município. Nomes sem correspondência são mantidos no resultado,
+    permitindo diagnosticá-los sem inventar uma localização.
     """
     if valor is None or str(valor).strip().lower() in ("", "nan", "none"):
         return []
@@ -336,7 +338,7 @@ def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
                 for nome in sorted(nomes)]
     texto = str(valor).replace("\r", "\n")
     texto = re.sub(r"(?i)\bBAIRROS?\s*(?:IMPACTADOS?|AFETADOS?)?\s*:", "\n", texto)
-    texto = re.sub(r"(?i)\bAREAS?\s+IMPACTADAS?\s*:", "\n", texto)
+    texto = re.sub(r"(?i)\b(?:ÁREAS?|AREAS?)\s+(?:IMPACTADAS?|AFETADAS?)\s*:", "\n", texto)
     partes = re.split(r"[,;\n]+", texto)
     saida = []
     vistos = set()
@@ -344,18 +346,26 @@ def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
         original = parte.strip(" \t-*•.,;:!?")
         if not original:
             continue
-        # Desconsidera linha isolada com o nome da cidade, quando a descrição o inclui.
+        # Cidade isolada não é automaticamente interpretada como todos os bairros.
         if municipio and normalizar_municipio(original) == normalizar_municipio(municipio):
             continue
         parcial = bool(re.search(r"\(\s*PARCIAL\s*\)", original, flags=re.I))
         chave = resolver_nome_bairro(original, nomes)
         candidatos = [(chave, original)]
         if nomes and chave not in nomes:
-            # Só divide a conjunção quando TODOS os nomes resultantes existem
-            # no catálogo geográfico do município. Preserva nomes compostos.
-            pedacos = [resolver_nome_bairro(p, nomes) for p in re.split(r"\s+E\s+", chave)]
-            if len(pedacos) >= 2 and all(p in nomes for p in pedacos):
-                candidatos = [(p, p) for p in pedacos]
+            # Abreviação verificável: 'ITARARÉ 1 E 2' -> ITARARÉ 1, ITARARÉ 2.
+            abreviado = re.fullmatch(r"(.+?)\s+(\d+)\s+E\s+(\d+)", chave)
+            if abreviado:
+                radical, numero_1, numero_2 = abreviado.groups()
+                dois_bairros = [f"{radical} {numero_1}", f"{radical} {numero_2}"]
+                if all(p in nomes for p in dois_bairros):
+                    candidatos = [(p, p) for p in dois_bairros]
+            if candidatos == [(chave, original)]:
+                # Ex.: 'BAIRRO SÃO DOMINGOS E GUABIRABA'. Não separa o 'E'
+                # de um nome composto se as duas partes não forem reconhecidas.
+                pedacos = [resolver_nome_bairro(p, nomes) for p in re.split(r"\s+E\s+", chave)]
+                if len(pedacos) >= 2 and all(p in nomes for p in pedacos):
+                    candidatos = [(p, p) for p in pedacos]
         for bairro, origem in candidatos:
             if bairro and bairro not in vistos:
                 vistos.add(bairro)
@@ -3419,6 +3429,68 @@ def modal_eventos():
                     st.error(f"Não foi possível salvar o evento: {erro}")
     else:
         st.dataframe(tabela, width="stretch", hide_index=True, height=330)
+
+    # Diagnóstico espacial dos nomes deste evento — usa SOMENTE as feições
+    # já carregadas. Não adiciona leituras ao Google Sheets nem recria o mapa.
+    with st.expander("🔎 Diagnóstico dos bairros não reconhecidos", expanded=False):
+        if eventos_visiveis.empty:
+            st.info("Nenhum evento disponível neste município.")
+        else:
+            opcoes_diag = list(eventos_visiveis.index)
+            selecao_diag = st.selectbox(
+                "Evento para conferir a abrangência geográfica",
+                opcoes_diag,
+                format_func=lambda idx: (
+                    f"{str(eventos_base.iloc[idx].get('Protocolo', '') or 'Sem protocolo')} — "
+                    f"{str(eventos_base.iloc[idx].get('Serviço', '') or 'Sem serviço')} "
+                    f"({str(eventos_base.iloc[idx].get('Data', '') or 'Sem data')})"
+                ),
+                key=f"farol_diag_bairros_{cidade_chave or 'SEM_CIDADE'}",
+            )
+            evento_diag = eventos_base.iloc[selecao_diag]
+            cidade_diag = evento_diag.get("Cidade", "")
+            valor_areas = str(evento_diag.get("Áreas Impactadas", "") or "")
+            st.caption("Texto efetivamente gravado em EVENTOS → Áreas Impactadas:")
+            st.code(valor_areas if valor_areas.strip() else "(campo vazio)", language=None)
+            municipal_diag = evento_abrange_municipio(valor_areas)
+            areas_diag = extrair_bairros_evento(valor_areas, cidade_diag, bairros)
+            catalogo_diag = indice_nomes_bairros(bairros, cidade_diag)
+            if municipal_diag:
+                st.info("Evento declarado para todo o município. Os polígonos existentes são usados como referência.")
+            if not areas_diag:
+                st.warning(
+                    "Nenhum bairro foi extraído do campo Áreas Impactadas. "
+                    "Se os bairros estiverem apenas na mensagem do WhatsApp ou na "
+                    "Descrição do Serviço, informe a lista em Áreas Impactadas na edição do evento."
+                )
+            else:
+                diagnostico = pd.DataFrame([
+                    {
+                        "Bairro interpretado": a["bairro"],
+                        "Polígono no município": (
+                            "Encontrado" if a["bairro"] in catalogo_diag else "Não encontrado"
+                        ),
+                    }
+                    for a in areas_diag
+                ])
+                st.dataframe(diagnostico, hide_index=True, width="stretch")
+                ausentes = diagnostico.loc[
+                    diagnostico["Polígono no município"] == "Não encontrado",
+                    "Bairro interpretado",
+                ].tolist()
+                if ausentes:
+                    st.warning(
+                        "Sem correspondência exata na base geográfica de "
+                        f"{cidade_diag}: {', '.join(ausentes)}. "
+                        "Confirme a nomenclatura no arquivo GPKG/KMZ/KML do município. "
+                        "O Farol não marca bairros por aproximação de nomes."
+                    )
+                else:
+                    st.success("Todos os bairros interpretados têm polígonos carregados no município.")
+            st.caption(
+                f"Cobertura cartográfica carregada: {len(catalogo_diag)} "
+                "nome(s) distinto(s) de bairro neste município."
+            )
 
     # O gráfico utiliza APENAS a cidade selecionada, nunca mistura municípios.
     st.markdown("### Distribuição das O.S. nos bairros impactados")
