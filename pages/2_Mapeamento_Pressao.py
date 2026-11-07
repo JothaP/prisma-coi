@@ -69,12 +69,13 @@ if not verificar_autenticacao():
 LAT_BASE = -5.0892
 LON_BASE = -42.8019
 
-# Base topográfica Copernicus Global DSM 30 utilizada no Módulo 1.
-# O GeoTIFF é apenas lido: nenhuma medição do Sheets é modificada.
+# A cota do terreno é amostrada nos GeoTIFFs de dados/topografia,
+# com o mesmo mecanismo do Módulo 1. Não sobrepõe camada de relevo.
+# Fonte apenas de leitura: não modifica medições do Google Sheets.
 MP_RAIZ = Path(__file__).resolve().parent
 if MP_RAIZ.name.lower() == "pages":
     MP_RAIZ = MP_RAIZ.parent
-MP_DEM_CAMINHO = MP_RAIZ / "dados" / "topografia" / "teresina_dem.tif"
+MP_DEM_DIRETORIO = MP_RAIZ / "dados" / "topografia"
 
 # Reutiliza o conversor inteligente do Módulo 1. É o mesmo arquivo auxiliar
 # utilizado pela importação automatizada, e não uma segunda implementação.
@@ -106,106 +107,150 @@ def mp_formatar_numero(numero, casas=2):
     return f"{float(numero):.{casas}f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
-@st.cache_data(show_spinner=False, max_entries=12)
-def mp_consultar_cotas(caminho: str, versao: int, coordenadas: tuple) -> tuple:
-    """Amostra a cota do terreno em cada ponto WGS84 a partir do GeoTIFF.
+@st.cache_data(show_spinner=False, max_entries=128)
+def mp_dem_limites_geograficos(caminho: str, versao: int, tamanho: int) -> tuple:
+    """Obtém limites WGS84 uma vez por versão de um GeoTIFF georreferenciado.
 
-    Fora da cobertura, ou com valores inválidos, retorna None. O DSM representa
-    a superfície do terreno e objetos sobre ela, NÃO a cota da tubulação.
+    Alterações no arquivo invalidam o cache por mtime_ns e tamanho.
+    """
+    _ = (versao, tamanho)
+    import rasterio
+    from rasterio.warp import transform_bounds
+
+    with rasterio.open(caminho) as origem:
+        if origem.crs is None or origem.count < 1:
+            raise ValueError("GeoTIFF sem sistema de coordenadas ou banda válida")
+        limites = transform_bounds(
+            origem.crs, "EPSG:4326", *origem.bounds, densify_pts=21
+        )
+        if (not all(math.isfinite(float(v)) for v in limites)
+                or limites[0] >= limites[2] or limites[1] >= limites[3]):
+            raise ValueError("Limites geográficos inválidos no GeoTIFF")
+        return tuple(float(v) for v in limites)  # oeste, sul, leste, norte
+
+
+def mp_catalogo_topografia() -> tuple:
+    """Descobre GeoTIFFs a cada execução; metadados válidos ficam em cache.
+
+    Arquivos de menor cobertura são consultados primeiro em sobreposições;
+    um raster maior pode complementar pixels sem dados (NoData).
+    Retorna (catálogo, alertas) sem impedir que o mapa seja exibido.
+    """
+    if not MP_DEM_DIRETORIO.is_dir():
+        return (), ()
+
+    arquivos = sorted(
+        (arquivo for arquivo in MP_DEM_DIRETORIO.rglob("*")
+         if arquivo.is_file() and arquivo.suffix.lower() in (".tif", ".tiff")),
+        key=lambda arquivo: str(arquivo).casefold(),
+    )
+    catalogo = []
+    alertas = []
+    for arquivo in arquivos:
+        try:
+            stat = arquivo.stat()
+            oeste, sul, leste, norte = mp_dem_limites_geograficos(
+                str(arquivo), stat.st_mtime_ns, stat.st_size
+            )
+            catalogo.append((
+                str(arquivo), stat.st_mtime_ns, stat.st_size,
+                oeste, sul, leste, norte,
+            ))
+        except (OSError, ValueError, TypeError, RuntimeError, ImportError) as erro:
+            alertas.append(f"{arquivo.name}: {erro}")
+
+    # Prefere recortes de maior detalhe espacial, preservando ordenação
+    # determinística se dois arquivos cobrirem áreas do mesmo tamanho.
+    catalogo.sort(key=lambda x: (
+        (x[5] - x[3]) * (x[6] - x[4]), x[0].casefold()
+    ))
+    return tuple(catalogo), tuple(alertas)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def mp_cotas_terreno(caminho: str, versao: int, coordenadas: tuple) -> tuple:
+    """Amostra cotas do GeoTIFF em lote, retornando None quando não houver valor.
+
+    `coordenadas` é uma tupla de pares (latitude, longitude) em WGS84, na
+    mesma ordem dos registros exibidos no mapa. O arquivo é aberto uma vez.
+    `versao` é o mtime_ns, para invalidar o cache quando o raster for trocado.
     """
     _ = versao
     if not coordenadas:
         return ()
+
     import numpy as np
     import rasterio
     from rasterio.warp import transform
 
-    with rasterio.open(caminho) as terreno:
-        if terreno.crs is None or terreno.count < 1:
-            raise ValueError("Modelo digital de elevação sem referência geográfica válida.")
-        lats = [float(c[0]) for c in coordenadas]
-        lons = [float(c[1]) for c in coordenadas]
-        xs, ys = transform("EPSG:4326", terreno.crs, lons, lats)
-        limites = terreno.bounds
-        indices = [i for i, (x, y) in enumerate(zip(xs, ys))
-                   if math.isfinite(x) and math.isfinite(y)
-                   and limites.left <= x < limites.right
-                   and limites.bottom < y <= limites.top]
+    with rasterio.open(caminho) as origem:
+        if origem.crs is None or origem.count < 1:
+            raise ValueError("GeoTIFF de elevação sem georreferenciamento válido.")
+
+        latitudes = [float(c[0]) for c in coordenadas]
+        longitudes = [float(c[1]) for c in coordenadas]
+        xs, ys = transform("EPSG:4326", origem.crs, longitudes, latitudes)
+        limites = origem.bounds
+        validos = [
+            (math.isfinite(x) and math.isfinite(y)
+             and limites.left <= x < limites.right
+             and limites.bottom < y <= limites.top)
+            for x, y in zip(xs, ys)
+        ]
         resultado = [None] * len(coordenadas)
-        amostras = terreno.sample(((xs[i], ys[i]) for i in indices),
-                                 indexes=1, masked=True)
-        for i, amostra in zip(indices, amostras):
+        indices = [i for i, valido in enumerate(validos) if valido]
+        for indice, amostra in zip(
+            indices, origem.sample(((xs[i], ys[i]) for i in indices), indexes=1, masked=True)
+        ):
             valor = amostra[0]
             if np.ma.is_masked(valor):
                 continue
             cota = float(valor)
             if not math.isfinite(cota):
                 continue
-            if terreno.nodata is not None and np.isclose(cota, terreno.nodata):
+            if origem.nodata is not None and np.isclose(cota, origem.nodata):
                 continue
-            resultado[i] = cota
+            resultado[indice] = cota
         return tuple(resultado)
 
 
-@st.cache_data(show_spinner=False, max_entries=3)
-def mp_criar_relevo_sombreado(caminho: str, versao: int):
-    """Transforma o DSM local em relevo sombreado transparente para Folium.
+def mp_cotas_automaticas(coordenadas: tuple) -> tuple:
+    """Consulta em lote o GeoTIFF que cobre cada (latitude, longitude).
 
-    A imagem é gerada em memória e cacheada. O arquivo TIF nunca é exposto
-    como caminho público nem enviado a servidores de mapas de terceiros.
+    O catálogo é refeito a cada rerun (novos arquivos são detectados sem
+    alterações no código). Só abre rasters com pontos dentro dos seus limites.
+    Em áreas sobrepostas, um pixel NoData permite tentar o próximo arquivo.
     """
-    _ = versao
-    import numpy as np
-    import rasterio
-    from rasterio.enums import Resampling
+    catalogo, alertas_catalogo = mp_catalogo_topografia()
+    if not coordenadas or not catalogo:
+        return (None,) * len(coordenadas), alertas_catalogo
 
-    with rasterio.open(caminho) as terreno:
-        if terreno.crs is None or terreno.count < 1:
-            raise ValueError("O arquivo de topografia não possui georreferenciamento.")
-        if terreno.crs.to_epsg() != 4326:
-            raise ValueError("A camada de visualização exige DEM em EPSG:4326.")
-        escala = min(1.0, 720 / max(terreno.width, terreno.height))
-        largura = max(2, round(terreno.width * escala))
-        altura = max(2, round(terreno.height * escala))
-        grade = terreno.read(
-            1, out_shape=(altura, largura),
-            resampling=Resampling.bilinear, masked=True,
-        )
-        valores = np.asarray(grade.filled(np.nan), dtype=np.float32)
-        validos = np.isfinite(valores) & (~np.ma.getmaskarray(grade))
-        if terreno.nodata is not None:
-            validos &= ~np.isclose(valores, terreno.nodata)
-        if not validos.any():
-            raise ValueError("Modelo digital de elevação sem pixels válidos.")
-        media = float(np.median(valores[validos]))
-        valores = np.where(validos, valores, media)
+    cotas = [None] * len(coordenadas)
+    alertas = list(alertas_catalogo)
+    for caminho, versao, _tamanho, oeste, sul, leste, norte in catalogo:
+        pendentes = [
+            i for i, (lat, lon) in enumerate(coordenadas)
+            if cotas[i] is None
+            and math.isfinite(lat) and math.isfinite(lon)
+            and oeste <= lon <= leste and sul <= lat <= norte
+        ]
+        if not pendentes:
+            continue
+        amostras_coords = tuple(coordenadas[i] for i in pendentes)
+        try:
+            amostras = mp_cotas_terreno(caminho, versao, amostras_coords)
+        except (OSError, ValueError, TypeError, RuntimeError, ImportError) as erro:
+            alertas.append(f"{Path(caminho).name}: {erro}")
+            continue
+        for indice, valor in zip(pendentes, amostras):
+            if valor is not None and math.isfinite(float(valor)):
+                cotas[indice] = float(valor)
 
-        bounds = terreno.bounds
-        lat_central = (bounds.bottom + bounds.top) / 2
-        pixel_x_m = max(1, (bounds.right - bounds.left) * 111_320
-                        * math.cos(math.radians(lat_central)) / largura)
-        pixel_y_m = max(1, (bounds.top - bounds.bottom) * 111_320 / altura)
-        # Gradientes em metros para renderizar a iluminação do relevo.
-        grad_y, grad_x = np.gradient(valores, pixel_y_m, pixel_x_m)
-        normalizador = np.sqrt(1.0 + grad_x ** 2 + grad_y ** 2)
-        # Luz vinda de noroeste, com elevação moderada.
-        intensidade = (0.52 * grad_x + 0.52 * grad_y + 0.68) / normalizador
-        intensidade = np.clip(intensidade, -1.0, 1.0)
-        luz = np.clip(0.62 + 0.40 * intensidade, 0.18, 1.0)
+        if all(cota is not None for cota in cotas):
+            break
+    return tuple(cotas), tuple(alertas)
 
-        # Escala altimétrica discreta (verde suave para cinza-azulado),
-        # diferenciada das cores vibrantes que identificam pressão.
-        baixo, alto = np.percentile(valores[validos], [5, 95])
-        fracao = np.clip((valores - baixo) / max(float(alto - baixo), 1.0), 0, 1)
-        base_baixa = np.array([172, 204, 181], dtype=np.float32)
-        base_alta = np.array([196, 188, 170], dtype=np.float32)
-        rgb = (base_baixa[None, None, :] * (1 - fracao[:, :, None])
-               + base_alta[None, None, :] * fracao[:, :, None])
-        rgb = np.clip(rgb * luz[:, :, None], 0, 255).astype(np.uint8)
-        alpha = np.where(validos, 210, 0).astype(np.uint8)
-        rgba = np.dstack([rgb, alpha])
-        limites = [[bounds.bottom, bounds.left], [bounds.top, bounds.right]]
-        return rgba, limites
+
 
 SPREADSHEET_ID = "1idCgabn5g5X48hmdE-gqWfrUKUf2XxWGB5M_yJFk0yM"
 COLUNAS_PADRAO = ["Data", "Município", "Pontos", "Latitude", "Longitude", "MCA", "Observacao"]
@@ -1732,7 +1777,7 @@ st.divider()
 # ============================================================
 st.subheader("🗺️ Mapa de Mapeamento de Pressão")
 
-c_map1, c_map2, c_map3, c_map4 = st.columns([2.5, 1.4, 1.7, 2.4])
+c_map1, c_map2, c_map3 = st.columns([2.5, 1.4, 2.1])
 
 with c_map1:
 
@@ -1751,7 +1796,8 @@ with c_map2:
 
     mostrar_rotulos = st.checkbox(
         "Exibir rótulos",
-        value=False
+        value=True,
+        help="Mostra a pressão e, quando disponível, a cota do terreno junto ao marcador.",
     )
 
 
@@ -1762,15 +1808,6 @@ with c_map3:
         value=st.session_state.modo_adicionar_mapa
     )
 
-
-with c_map4:
-    mostrar_relevo_dem = st.checkbox(
-        "⛰️ Relevo Copernicus DSM 30",
-        value=True,
-        key="mp_exibir_relevo_dem",
-        help=("Camada de relevo sombreado baseada no GeoTIFF "
-              "dados/topografia/teresina_dem.tif. Não altera medições."),
-    )
 
 
 if (
@@ -1834,31 +1871,6 @@ else:
         name="Mapa Padrão (OpenStreetMap)"
     ).add_to(m)
 
-
-# Sobreposição topográfica baseada no mesmo Copernicus DSM 30 do Módulo 1.
-# Não depende de internet, além do mapa de fundo escolhido.
-if mostrar_relevo_dem:
-    if not MP_DEM_CAMINHO.is_file():
-        st.warning(
-            "Relevo Copernicus indisponível: adicione "
-            "`dados/topografia/teresina_dem.tif` ao repositório PRISMA."
-        )
-    else:
-        try:
-            mp_imagem_relevo, mp_bounds_relevo = mp_criar_relevo_sombreado(
-                str(MP_DEM_CAMINHO), MP_DEM_CAMINHO.stat().st_mtime_ns
-            )
-            folium.raster_layers.ImageOverlay(
-                image=mp_imagem_relevo,
-                bounds=mp_bounds_relevo,
-                name="Relevo Copernicus Global DSM 30",
-                opacity=0.52,
-                interactive=False,
-                cross_origin=False,
-                zindex=2,
-            ).add_to(m)
-        except (ImportError, OSError, ValueError, TypeError) as mp_erro:
-            st.warning(f"Não foi possível exibir o relevo Copernicus: {mp_erro}")
 
 # ============================================================
 # MARCADORES — MESMO PADRÃO VISUAL DO MÓDULO 1
@@ -1962,18 +1974,24 @@ def mp_preparar_marcadores_sem_duplicatas(df_mapa: pd.DataFrame) -> pd.DataFrame
 
 if not df_filtrado.empty:
     validos = mp_preparar_marcadores_sem_duplicatas(df_filtrado)
-    # Cotas reais do DSM onde houver cobertura; nenhuma interpolação inventada.
+    # Consulta pontual à cota do terreno, sem carregar relevo sombreado.
+    # O mesmo catálogo do Módulo 1 reconhece automaticamente os GeoTIFFs
+    # nas subpastas de dados/topografia, respeitando seus limites e CRS.
     cotas_mp = (None,) * len(validos)
-    if not validos.empty and MP_DEM_CAMINHO.is_file():
+    if not validos.empty:
         try:
             coords_mp = tuple(
                 (float(lat), float(lon))
                 for lat, lon in zip(validos["Latitude"], validos["Longitude"])
             )
-            cotas_mp = mp_consultar_cotas(
-                str(MP_DEM_CAMINHO), MP_DEM_CAMINHO.stat().st_mtime_ns, coords_mp
-            )
-        except (ImportError, OSError, ValueError, TypeError) as mp_erro_cota:
+            cotas_mp, alertas_mp = mp_cotas_automaticas(coords_mp)
+            if alertas_mp:
+                st.warning(
+                    "Alguns arquivos topográficos não puderam ser utilizados: "
+                    + "; ".join(alertas_mp[:3])
+                    + (f" (e mais {len(alertas_mp)-3})" if len(alertas_mp) > 3 else "")
+                )
+        except (ImportError, OSError, ValueError, TypeError, RuntimeError) as mp_erro_cota:
             st.warning(f"Não foi possível consultar cotas do terreno: {mp_erro_cota}")
 
     for (_, row), cota in zip(validos.iterrows(), cotas_mp):
@@ -2017,15 +2035,21 @@ if not df_filtrado.empty:
             <b>Cota da superfície (DSM):</b> {texto_cota}
           </div>{observacao_html}{info_coincidentes}
         </div>"""
-        # Rótulo do mapa: mostrar EXCLUSIVAMENTE a medição em mca.
-        # Município, ponto/matrícula, data, classificação, cota e observação
-        # permanecem disponíveis somente no popup ao clicar no marcador.
+        # Padrão do Módulo 1: medição + cota real do terreno, se disponível.
+        # O restante dos dados continua no popup. Nunca inventar altitude.
         rotulo = ""
         if mostrar_rotulos:
+            cota_rotulo = (
+                '<span class="bp-label-elevation" '
+                'title="Cota do terreno extraída do modelo digital de elevação">'
+                f'{float(cota):.0f} m</span>'
+                if cota_disponivel else ""
+            )
             rotulo = f"""
             <div class="bp-label-card bp-label-card-individual" data-bp-default="top">
                 <div class="bp-label-data">
                     <span class="bp-label-pressure">{mca_fmt} mca</span>
+                    {cota_rotulo}
                 </div>
             </div>"""
         prioridade = 4 if mca == 0 else 3 if mca <= 5 else 2 if mca <= 15 else 1
@@ -2209,10 +2233,10 @@ map_style_html = """
 
     .bp-label-card-individual {
 
-        /* Rótulo compacto: somente o valor de pressão, sem outros campos. */
+        /* Pressão + cota quando disponível, como no Módulo 1. */
         width: max-content;
-        min-width: 64px;
-        max-width: 120px;
+        min-width: 66px;
+        max-width: 165px;
 
         padding: 4px 6px 4px 8px;
         border-radius: 999px;
@@ -2234,6 +2258,19 @@ map_style_html = """
         gap: 6px;
 
         justify-content: center;
+    }
+
+    .bp-label-elevation {
+        display: inline-block;
+        flex: 0 0 auto;
+        padding: 2px 5px;
+        border: 1px solid #dbe3ee;
+        border-radius: 999px;
+        background: #f1f5f9;
+        font-size: 9px;
+        font-weight: 700;
+        color: #475569;
+        white-space: nowrap;
     }
 
     .bp-label-card-bairro {
@@ -2493,7 +2530,7 @@ legenda_mp = f"""
   <div><span style="color:{COR_EM_ATENCAO}">●</span> Em Atenção (&gt; 5 a 15)</div>
   <div><span style="color:{COR_ALTA_PRESSAO}">●</span> Alta Pressão (&gt; 15)</div>
   <div style="font-size:10px;color:#64748b;margin-top:4px">
-    Relevo: Copernicus DSM 30 (quando ativado)</div>
+    Cota do terreno nos rótulos quando disponível</div>
 </div>
 """
 m.get_root().html.add_child(Element(legenda_mp))
