@@ -730,6 +730,15 @@ def carregar_dados() -> pd.DataFrame:
             columns=COLUNAS_PADRAO
         )
 
+    # O histórico é opcional e lido SOMENTE no servidor. Falha do Storage
+    # jamais deve ser interpretada como ausência de registros.
+    from historico_pressao_supabase import combinar_modulo1, ErroHistorico
+    try:
+        valores, origens_arquivo = combinar_modulo1(valores)
+    except ErroHistorico as exc:
+        st.error(f"Histórico indisponível: {exc}")
+        st.stop()
+
     if not valores or len(valores) < 2:
 
         return pd.DataFrame(
@@ -745,7 +754,7 @@ def carregar_dados() -> pd.DataFrame:
 
     registros = []
 
-    for linha in valores[1:]:
+    for idx_origem, linha in enumerate(valores[1:]):
 
         if not any(
             str(c).strip()
@@ -766,6 +775,7 @@ def carregar_dados() -> pd.DataFrame:
                 else ""
             )
 
+        reg["_arquivo_historico"] = bool(origens_arquivo[idx_origem])
         registros.append(reg)
 
     if not registros:
@@ -885,7 +895,7 @@ def carregar_dados() -> pd.DataFrame:
     )
 
     return df[
-        COLUNAS_PADRAO + [BP_COLUNA_PROTOCOLO]
+        COLUNAS_PADRAO + [BP_COLUNA_PROTOCOLO, "_arquivo_historico"]
     ].reset_index(
         drop=True
     )
@@ -2062,6 +2072,9 @@ def modal_editar_ponto(
     if not df_edit_busca.empty:
 
         reg_edit = df_edit_busca.iloc[0]
+        if bool(reg_edit.get("_arquivo_historico", False)):
+            st.warning("Registro arquivado no Supabase: consulta somente leitura.")
+            return
 
         try:
 
@@ -4885,6 +4898,11 @@ if not df_filtrado.empty:
             id_sel = str(
                 registro["ID"]
             )
+            somente_leitura = bool(
+                df_filtrado.iloc[idx].get("_arquivo_historico", False)
+            )
+            if somente_leitura:
+                st.caption("Este registro está no histórico do Supabase e é somente leitura.")
 
             col_a, col_b, _ = st.columns(
                 [1, 1, 4]
@@ -4894,7 +4912,8 @@ if not df_filtrado.empty:
 
                 if st.button(
                     "✏️ Editar",
-                    use_container_width=True
+                    use_container_width=True,
+                    disabled=somente_leitura
                 ):
 
                     modal_editar_ponto(
@@ -4905,7 +4924,8 @@ if not df_filtrado.empty:
 
                 if st.button(
                     "🗑️ Excluir",
-                    use_container_width=True
+                    use_container_width=True,
+                    disabled=somente_leitura
                 ):
 
                     if excluir_ponto(
