@@ -511,7 +511,9 @@ def carregar_dados() -> pd.DataFrame:
         st.error(f"Erro ao ler planilha: {e}")
         return pd.DataFrame(columns=COLUNAS_PADRAO + ["_linha_real"])
 
-    if len(valores) < 2:
+    # A planilha pode ficar apenas com o cabeçalho após o arquivamento;
+    # nesse caso, as medições devem continuar disponíveis no Supabase.
+    if not valores:
         return pd.DataFrame(columns=COLUNAS_PADRAO + ["_linha_real"])
 
     modo = _formato_cabecalho(valores[0])
