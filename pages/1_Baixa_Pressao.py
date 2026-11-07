@@ -4,6 +4,7 @@ from google.oauth2.service_account import Credentials
 import json
 import pandas as pd
 import folium
+from folium.plugins import Fullscreen
 from streamlit_folium import st_folium
 import os
 import simplekml
@@ -3404,6 +3405,19 @@ m = folium.Map(
     control_scale=True
 )
 
+# ============================================================
+# CONTROLE DE TELA CHEIA — MAPA PRINCIPAL
+# ============================================================
+# O Fullscreen é um controle nativo do Leaflet/Folium; não altera
+# os filtros, as camadas, a base de dados ou a chave do st_folium.
+# O tamanho do mapa é recalculado ao expandir e ao restaurar.
+Fullscreen(
+    position="topright",
+    title="Expandir mapa para tela cheia",
+    title_cancel="Sair da tela cheia",
+    force_separate_button=True,
+).add_to(m)
+
 
 if "Satélite" in tipo_mapa:
 
@@ -4656,6 +4670,8 @@ class ReorganizarRotulosIndividuais(MacroElement):
     mapa.whenReady(function() {
         agendar();
         mapa.on("zoomend moveend resize viewreset",agendar);
+        // Reposiciona os rótulos também após transições de tela cheia.
+        mapa.on("enterFullscreen exitFullscreen",agendar);
         window.addEventListener("resize",agendar);
     });
 })();
