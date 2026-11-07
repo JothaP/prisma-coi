@@ -2365,6 +2365,141 @@ def ri7_pagina_panorama(pdf, concentracoes, grupos, pressao, pontos_todos,
                     f'{media:.2f} mca'.replace('.',',') if media is not None else '—', tamanho=18)
 
 
+
+# ============================================================
+# RELATORIO INSTITUCIONAL — STATUS DA O.S. COM PRESSAO AFERIDA
+# Usa exclusivamente as leituras efetivamente cadastradas no Modulo 1.
+# Nao altera os status originais no Farol nem o vinculo por proximidade.
+# ============================================================
+def ri7_chave_protocolo_os(valor):
+    """Extrai o numero-base da O.S. sem confundir sufixo /AAAA-1."""
+    texto = str(valor or "").strip()
+    encontrado = re.search(r"(?<!\d)(\d{5,})(?:/\d{4}-\d+)?(?!\d)", texto)
+    return encontrado.group(1) if encontrado else ""
+
+
+def ri7_chave_matricula(valor):
+    """Mantem a matricula como identificador, sem coagir para float."""
+    texto = str(valor or "").strip()
+    if texto.lower() in {"nan", "nat", "none", ""}:
+        return ""
+    # Eventuais exportacoes numericas podem adicionar um sufixo decimal .0.
+    if re.fullmatch(r"\d+\.0+", texto):
+        texto = texto.split(".", 1)[0]
+    return texto
+
+
+def ri7_preparar_indice_pressao_os(medicoes, os_periodo):
+    """Cria indices leves, uma vez por PDF (nao consulta o Sheets)."""
+    por_protocolo, por_matricula = {}, {}
+    matriculas_com_os = {}
+    if os_periodo is not None and not os_periodo.empty:
+        for _, os_ in os_periodo.iterrows():
+            cidade = normalizar(os_.get("Cidade", ""))
+            mat = ri7_chave_matricula(os_.get("Matrícula", ""))
+            numero = ri7_chave_protocolo_os(os_.get("Nº da O.S", ""))
+            if cidade and mat and numero:
+                matriculas_com_os.setdefault((cidade, mat), set()).add(numero)
+    if medicoes is not None and not medicoes.empty:
+        for _, med in medicoes.iterrows():
+            valor = med.get("_pressao")
+            if valor is None or pd.isna(valor):
+                continue
+            try:
+                valor = float(valor)
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(valor) or valor < 0:
+                continue
+            cidade = normalizar(med.get("Municipio", ""))
+            mat = ri7_chave_matricula(med.get("Matricula", ""))
+            cod = ri7_chave_protocolo_os(med.get(RI_BP_COLUNA_PROTOCOLO, ""))
+            data_med = data_parse(med.get("Data", ""))
+            if pd.isna(data_med):
+                data_med = med.get("_data", pd.NaT)
+            dia = pd.Timestamp(data_med).date() if pd.notna(data_med) else None
+            registro = (valor, dia, cod)
+            if cidade and cod:
+                por_protocolo.setdefault((cidade, cod), []).append(registro)
+            if cidade and mat:
+                por_matricula.setdefault((cidade, mat), []).append(registro)
+    return por_protocolo, por_matricula, matriculas_com_os
+
+
+def ri7_pressao_inequivoca(registros):
+    """Nao escolhe arbitrariamente entre leituras diferentes da mesma O.S."""
+    valores = {round(float(reg[0]), 4) for reg in registros}
+    if len(valores) != 1:
+        return None
+    valor = next(iter(valores))
+    return f"{valor:.2f}".rstrip("0").rstrip(".").replace(".", ",") + " mca"
+
+
+def ri7_status_os_institucional(os_, indice):
+    """Cancelada tem prioridade; pressao somente para O.S. atendida em campo.
+
+    Correspondencia: protocolo exato; ou matricula+municipio+mesma data;
+    ou matricula unica no periodo, com afericao posterior a emissao.
+    Sem vinculo seguro, preserva o status original.
+    """
+    original = str(os_.get("Status OS", "") or "").strip()
+    status = normalizar(original)
+    if "CANCEL" in status:
+        return "Cancelada"
+    if not any(t in status for t in ("VISIT", "EXECUT", "REALIZAD", "CONCLUID",
+                                      "ATENDID", "ENCERRAD", "FINALIZ")):
+        return original
+
+    por_protocolo, por_matricula, matriculas_com_os = indice
+    cidade = normalizar(os_.get("Cidade", ""))
+    numero = ri7_chave_protocolo_os(os_.get("Nº da O.S", ""))
+    mat = ri7_chave_matricula(os_.get("Matrícula", ""))
+    data_os = data_parse(os_.get("Dt. Emissão", ""))
+    dia_os = pd.Timestamp(data_os).date() if pd.notna(data_os) else None
+
+    if cidade and numero:
+        por_os = por_protocolo.get((cidade, numero), [])
+        if por_os:
+            return ri7_pressao_inequivoca(por_os) or original
+
+    if not (cidade and mat and dia_os):
+        return original
+    # Um protocolo explicito pertencente a OUTRA O.S. impede a associacao
+    # por matricula, mesmo que a data e a cidade coincidam.
+    candidatos = [reg for reg in por_matricula.get((cidade, mat), [])
+                  if not reg[2] or reg[2] == numero]
+    if not candidatos:
+        return original
+    protocolos = matriculas_com_os.get((cidade, mat), set())
+    if len(protocolos) != 1:
+        # Matricula compartilhada por varias O.S. no periodo:
+        # apenas o cruzamento direto de protocolo e seguro.
+        return original
+
+    # Mesmo dia, mesmo municipio e matricula: exige valor inequivoco.
+    mesmo_dia = [reg for reg in candidatos if reg[1] == dia_os]
+    if mesmo_dia:
+        return ri7_pressao_inequivoca(mesmo_dia) or original
+
+    # Visita posterior a emissao: aceitar apenas se ha UMA O.S. dessa matricula
+    # na selecao e UMA medicao posterior (evita atribuicoes por coincidencia).
+    posteriores = [reg for reg in candidatos if reg[1] is not None and reg[1] > dia_os]
+    if len(posteriores) == 1:
+        return ri7_pressao_inequivoca(posteriores) or original
+    return original
+
+
+def ri7_rotular_status_os_grupo(grupo, indice):
+    """Acrescenta somente uma coluna de exibicao, sem alterar Status OS."""
+    grupo = grupo.copy()
+    if grupo.empty:
+        grupo["Status no relatório"] = pd.Series(dtype=str)
+    else:
+        grupo["Status no relatório"] = grupo.apply(
+            lambda os_: ri7_status_os_institucional(os_, indice), axis=1)
+    return grupo
+
+
 def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculadas,
                             acompanhamento, contexto, pressao, inicio, fim,
                             raio_cluster, imagem_mapa=None):
@@ -2388,7 +2523,7 @@ def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculada
                   entrelinha=9, max_linhas=2)
     ri7_tarja(pdf,'Ordens de Serviço vinculadas à concentração',357,356,460,30,tamanho=10.8)
     ri7_retangulo(pdf, 357, 196, 460, 151, '#FFFFFF', '#C8DBEB')
-    colunas=[(366, 'O.S. / Ano'),(540,'Matrícula'),(674,'Status')]
+    colunas=[(366, 'O.S. / Ano'),(540,'Matrícula'),(674,'Status / Pressão')]
     pdf.setFillColor(_ri7_HexColor('#D9EAFB'))
     pdf.roundRect(363,325,448,19,5,stroke=0,fill=1)
     for xx, txt in colunas:
@@ -2402,7 +2537,7 @@ def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculada
             pdf.rect(364, yy-3, 446, 13, stroke=0, fill=1)
         ri7_escrever(pdf, protocolo_os_relatorio(r), 367, yy, 7.6, largura=161)
         ri7_escrever(pdf, str(r.get('Matrícula','')), 541, yy,7.6,largura=124)
-        ri7_escrever(pdf, str(r.get('Status OS','')), 675, yy,7.6,largura=130)
+        ri7_escrever(pdf, str(r.get('Status no relatório',r.get('Status OS',''))), 675, yy,7.6,largura=130)
     if len(registros)>max_registros:
         ri7_escrever(pdf, f'+ {len(registros)-max_registros} O.S. na página de continuação',
                      368,201,7.3,RI7_AZUL,negrito=True)
@@ -2449,7 +2584,7 @@ def ri7_pagina_os_continuacao(pdf, conc, registros, inicio, fim, n_pagina):
               25,460,792,30,tamanho=11)
     pdf.setFillColor(_ri7_HexColor('#DCEBFA'))
     pdf.roundRect(26,429,790,23,5,fill=1,stroke=0)
-    for x,t in [(40,'O.S. / Ano'),(285,'Matrícula'),(465,'Status'),(685,'Classificação')]:
+    for x,t in [(40,'O.S. / Ano'),(285,'Matrícula'),(465,'Status / Pressão'),(685,'Classificação')]:
         ri7_escrever(pdf,t,x,436,9.5,RI7_AZUL,negrito=True)
     for i,(r,grupo) in enumerate(registros):
         yy=410-i*16.1
@@ -2458,7 +2593,7 @@ def ri7_pagina_os_continuacao(pdf, conc, registros, inicio, fim, n_pagina):
             pdf.rect(27,yy-4,788,16.1,stroke=0,fill=1)
         ri7_escrever(pdf,protocolo_os_relatorio(r),40,yy,9,largura=226)
         ri7_escrever(pdf,str(r.get('Matrícula','')),285,yy,9,largura=167)
-        ri7_escrever(pdf,str(r.get('Status OS','')),465,yy,9,largura=200)
+        ri7_escrever(pdf,str(r.get('Status no relatório',r.get('Status OS',''))),465,yy,9,largura=200)
         ri7_escrever(pdf,grupo,685,yy,8,RI7_AZUL,largura=128)
 
 
@@ -2702,6 +2837,7 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
     pdf.setTitle('PRISMA COI — Relatório Integrado: Farol e Baixa Pressão')
     pdf.setAuthor('COI — Centro de Operações Integradas')
     numero_de_paginas = 0
+    indice_pressao_os = ri7_preparar_indice_pressao_os(pressao, pontos_todos)
 
     def terminar_pagina():
         nonlocal numero_de_paginas
@@ -2716,6 +2852,7 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
         for _, conc in resumo.iterrows():
             codigo = str(conc['Concentração'])
             grupo = grupos[grupos['_grupo']==conc['_grupo']].copy()
+            grupo = ri7_rotular_status_os_grupo(grupo, indice_pressao_os)
             eventos = eventos_da_concentracao(conc,contexto,inicio,fim)
             vinculadas,nao = classificar_os_eventos(grupo,eventos)
             acompanhamento,_,_ = ficha_acompanhamento(
