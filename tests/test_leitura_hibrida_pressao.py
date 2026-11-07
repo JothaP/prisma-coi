@@ -97,5 +97,82 @@ class TesteHistoricoSupabase(unittest.TestCase):
             historico.adicionar_modulo2([])
 
 
+
+    def _xls_mes(self, cabecalho, registros):
+        from io import BytesIO
+        from openpyxl import Workbook
+        livro = Workbook()
+        aba = livro.active
+        aba.title = "Medicoes"
+        aba.append(cabecalho)
+        for linha in registros:
+            aba.append(linha)
+        dados = BytesIO()
+        livro.save(dados)
+        return dados.getvalue()
+
+    @patch.object(historico, "_requisicao")
+    def test_xlsx_real_com_colunas_auxiliares_equivalentes(self, request):
+        """Mesmo padrão que originava erro: nomes distintos com a mesma normalização."""
+        cabecalho = H1 + ["PowerAppsId", "", "__"]
+        linha = ["A1", "01/10/2026", "TERESINA", "CENTRO", "-5", "-42",
+                 "0", "ok", "0012", "", "PA-1", "PA-2", None, None]
+        request.return_value = types.SimpleNamespace(
+            content=self._xls_mes(cabecalho, [linha])
+        )
+        nomes, registros = historico._ler_mes(
+            "https://exemplo.supabase.co", "test-key",
+            "modulo_1_baixa_pressao/2026/2026-10.xlsx",
+        )
+        self.assertEqual(len(registros), 1)
+        self.assertEqual(historico._linha_dict(nomes, registros[0])["pressaomca"], "0")
+        self.assertEqual(historico._linha_dict(nomes, registros[0])["matricula"], "0012")
+
+    @patch.object(historico, "_requisicao")
+    def test_alias_de_campo_operacional_igual_e_aceito(self, request):
+        cabecalho = H1 + ["Município"]
+        linha = ["A1", "01/10/2026", "TERESINA", "CENTRO", "-5", "-42",
+                 "0", "ok", "0012", "", "", "TERESINA"]
+        request.return_value = types.SimpleNamespace(
+            content=self._xls_mes(cabecalho, [linha])
+        )
+        nomes, registros = historico._ler_mes(
+            "https://exemplo.supabase.co", "test-key",
+            "modulo_1_baixa_pressao/2026/2026-10.xlsx",
+        )
+        self.assertEqual(
+            historico._linha_dict(nomes, registros[0])["municipio"],
+            "TERESINA",
+        )
+
+    @patch.object(historico, "_requisicao")
+    def test_alias_operacional_conflitante_bloqueia(self, request):
+        cabecalho = H1 + ["Pressão MCA"]
+        linha = ["A1", "01/10/2026", "TERESINA", "CENTRO", "-5", "-42",
+                 "0", "ok", "0012", "", "", "9"]
+        request.return_value = types.SimpleNamespace(
+            content=self._xls_mes(cabecalho, [linha])
+        )
+        with self.assertRaisesRegex(historico.ErroHistorico, "pressaomca"):
+            historico._ler_mes(
+                "https://exemplo.supabase.co", "test-key",
+                "modulo_1_baixa_pressao/2026/2026-10.xlsx",
+            )
+
+    @patch.object(historico, "_requisicao")
+    def test_alias_data_vazio_e_preenchido(self, request):
+        cabecalho = H1 + ["DATA"]
+        linha = ["A1", "", "TERESINA", "CENTRO", "-5", "-42",
+                 "0", "ok", "0012", "", "", "01/10/2026"]
+        request.return_value = types.SimpleNamespace(
+            content=self._xls_mes(cabecalho, [linha])
+        )
+        nomes, registros = historico._ler_mes(
+            "https://exemplo.supabase.co", "test-key",
+            "modulo_1_baixa_pressao/2026/2026-10.xlsx",
+        )
+        self.assertEqual(historico._linha_dict(nomes, registros[0])["data"], "01/10/2026")
+
+
 if __name__ == "__main__":
     unittest.main()
