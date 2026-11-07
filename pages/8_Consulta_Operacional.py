@@ -26,9 +26,10 @@ import uuid
 import zipfile
 import json
 import xml.etree.ElementTree as ET
+from branca.element import Element
 
 import folium
-from folium.plugins import MarkerCluster, Draw
+from folium.plugins import Draw
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -66,7 +67,10 @@ ARQUIVO_REDE_AGUA = PASTA_DADOS / "Rede_Agua_THE.kmz"
 # Não envia rede de toda a cidade ao navegador. Limites protetivos por consulta.
 LIMITE_REDE_TRECHOS = 4000
 LIMITE_REDE_VERTICES = 90000
-LIMITE_MARCADORES_AREA = 800
+LIMITE_MARCADORES_AREA = 350
+LIMITE_ROTULOS_AREA = 100
+LIMITE_EQUIPAMENTOS_MAPA = 350
+PASTA_TOPOGRAFIA = PASTA_DADOS / "topografia"
 
 COLUNAS_MATRICULAS = (
     "CATEGORIA", "NUM_LIGACAO", "BAIRRO",
@@ -684,73 +688,8 @@ def _identificar_influencias(lat: float, lon: float, areas: list[dict]) -> list[
     return correspondentes
 
 
-def _mapa_consulta(clientes: pd.DataFrame, ativos: list[dict], raio: int,
-                   bairros: list[dict], mostrar_bairros: bool, areas: list[dict]) -> folium.Map:
-    latitudes = clientes["_lat"].astype(float).tolist()
-    longitudes = clientes["_lon"].astype(float).tolist()
-    mapa = folium.Map(location=[sum(latitudes) / len(latitudes), sum(longitudes) / len(longitudes)],
-                      zoom_start=14, control_scale=True, tiles="OpenStreetMap")
-
-    if mostrar_bairros and bairros:
-        grupo = folium.FeatureGroup(name="Limites de bairros", show=True)
-        for bairro in bairros:
-            folium.Polygon(
-                locations=bairro["coords"], color="#578bba", weight=1.5,
-                fill=True, fill_color="#88b8de", fill_opacity=0.06,
-                tooltip=f"Bairro: {bairro['nome']}",
-            ).add_to(grupo)
-        grupo.add_to(mapa)
-
-    # Nova camada separada dos bairros. Transparência para não ocultar marcadores.
-    if areas:
-        grupo_influencias = folium.FeatureGroup(name="Áreas de influência", show=True)
-        for area in areas:
-            folium.Polygon(
-                locations=([area["contorno"]] + area["buracos"]
-                           if area["buracos"] else area["contorno"]),
-                color="#8762ab", weight=1.7, fill=True,
-                fill_color="#8762ab", fill_opacity=0.11,
-                tooltip=f"Área de influência: {area['nome']}",
-            ).add_to(grupo_influencias)
-        grupo_influencias.add_to(mapa)
-
-    grupo_clientes = folium.FeatureGroup(name="Matrículas", show=True)
-    aglomerador = MarkerCluster(name="Matrículas", overlay=False, control=False).add_to(grupo_clientes)
-    for _, linha in clientes.iterrows():
-        lat, lon = float(linha["_lat"]), float(linha["_lon"])
-        folium.Marker(
-            [lat, lon], tooltip=f"Matrícula: {linha['NUM_LIGACAO']}",
-            popup=folium.Popup(_popup_cliente(linha), max_width=370),
-            icon=folium.Icon(color="green", icon="home", prefix="fa"),
-        ).add_to(aglomerador)
-        folium.Circle([lat, lon], radius=raio, color="#227ab6", fill=False,
-                      weight=1, opacity=0.30, tooltip=f"Raio de busca: {raio} m").add_to(grupo_clientes)
-    grupo_clientes.add_to(mapa)
-
-    # Mesmos ícones. Mudam SOMENTE as cores dos marcadores.
-    for tipo, cor, icone in (("Poço / Ativo", "blue", "tint"), ("Logger", "orange", "signal")):
-        grupo = folium.FeatureGroup(name=tipo + " próximo(s)", show=True)
-        for ativo in ativos:
-            if ativo.get("_tipo") != tipo:
-                continue
-            folium.Marker(
-                [float(ativo["_lat"]), float(ativo["_lon"])],
-                tooltip=f"{tipo}: {ativo.get('IDENTIFICACAO_ATIVO', '')}",
-                popup=folium.Popup(_popup_ativo(ativo), max_width=360),
-                icon=folium.Icon(color=cor, icon=icone, prefix="fa"),
-            ).add_to(grupo)
-        grupo.add_to(mapa)
-
-    if len(clientes) > 1:
-        mapa.fit_bounds([[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]], padding=(45, 45))
-    folium.LayerControl(collapsed=False).add_to(mapa)
-    return mapa
-
-
-
-# ============================================================
-# SELEÇÃO DE ÁREA — REDE DE ÁGUA E ORDENS DE SERVIÇO
-# ============================================================
+# A interface integrada utiliza um único mapa Folium. A busca de matrículas,
+# o desenho de perímetros, os ativos e o recorte da rede são combinados abaixo.
 
 def _geometria_area_bairro(bairros: list[dict], nome: str):
     """Une feições do mesmo bairro sem substituir seus contornos originais."""
@@ -773,30 +712,11 @@ def _validar_area_selecionada(geometria):
     if not (-180 <= xmin <= xmax <= 180 and -90 <= ymin <= ymax <= 90):
         return None, "O polígono possui coordenadas geográficas inválidas."
     # Evita que um desenho acidental cubra toda a cidade e congestione o mapa.
-    if xmax - xmin > 0.28 or ymax - ymin > 0.28:
-        return None, "Área muito extensa. Selecione um bairro ou desenhe um polígono menor."
+    if xmax - xmin > 0.075 or ymax - ymin > 0.075:
+        return None, "Área muito extensa. Desenhe um polígono menor para manter o mapa responsivo."
     if geometria.area < 1e-11:
         return None, "Polígono muito pequeno ou degenerado."
     return geometria, None
-
-
-def _mapa_selecao_area(geometria=None, permitir_desenho=False) -> folium.Map:
-    """Mapa leve: sem rede ou cadastros; carregamento apenas sob demanda."""
-    mapa = folium.Map(location=[-5.0892, -42.8019], zoom_start=12,
-                      control_scale=True, tiles="OpenStreetMap")
-    if geometria is not None:
-        from shapely.geometry import mapping
-        folium.GeoJson(mapping(geometria), name="Área selecionada",
-                       style_function=lambda _: {"color": "#007d8c", "weight": 3,
-                                                  "fillColor": "#24b7b5", "fillOpacity": .14}).add_to(mapa)
-        xmin, ymin, xmax, ymax = geometria.bounds
-        mapa.fit_bounds([[ymin, xmin], [ymax, xmax]], padding=(22, 22))
-    if permitir_desenho:
-        Draw(export=False, position="topleft",
-             draw_options={"polygon": True, "rectangle": True, "polyline": False,
-                           "circle": False, "marker": False, "circlemarker": False},
-             edit_options={"edit": False}).add_to(mapa)
-    return mapa
 
 
 def _local_tag(tag) -> str:
@@ -989,387 +909,575 @@ def _matriculas_na_area(area):
     return _consultar_cadastro_no_poligono(_assinatura(indice), area.wkb), metadados
 
 
-def _mapa_rede_e_cadastro(area, rede: dict | None, cadastro_area: pd.DataFrame) -> folium.Map:
-    """Mapa com rede recortada e matrícula(s) do mesmo cadastro indexado."""
+
+
+# ============================================================
+# COTAS TOPOGRÁFICAS (mesmo mecanismo do Módulo 1/2)
+# ============================================================
+
+@st.cache_data(show_spinner=False, max_entries=128)
+def _m8_limites_dem(caminho: str, versao: int, tamanho: int) -> tuple:
+    """Limites geográficos do raster, cacheados pela versão do arquivo."""
+    _ = (versao, tamanho)
+    import rasterio
+    from rasterio.warp import transform_bounds
+    with rasterio.open(caminho) as ds:
+        if ds.crs is None or ds.count < 1:
+            raise ValueError("Modelo topográfico sem referência geográfica.")
+        return tuple(float(v) for v in transform_bounds(ds.crs, "EPSG:4326", *ds.bounds, densify_pts=21))
+
+
+def _m8_catalogo_topografia():
+    if not PASTA_TOPOGRAFIA.is_dir():
+        return (), ()
+    catalogo, erros = [], []
+    for arquivo in PASTA_TOPOGRAFIA.rglob("*"):
+        if not arquivo.is_file() or arquivo.suffix.lower() not in {".tif", ".tiff"}:
+            continue
+        try:
+            info = arquivo.stat()
+            oeste, sul, leste, norte = _m8_limites_dem(str(arquivo), info.st_mtime_ns, info.st_size)
+            if (oeste < leste and sul < norte and
+                    all(math.isfinite(v) for v in (oeste, sul, leste, norte))):
+                catalogo.append((str(arquivo), info.st_mtime_ns, oeste, sul, leste, norte))
+        except (OSError, ValueError, TypeError, ImportError, RuntimeError) as erro:
+            erros.append(f"{arquivo.name}: {erro}")
+    # Prefere raster de cobertura menor, possivelmente com maior detalhamento.
+    catalogo.sort(key=lambda x: ((x[4] - x[2]) * (x[5] - x[3]), x[0]))
+    return tuple(catalogo), tuple(erros)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _m8_amostrar_dem(caminho: str, versao: int, coordenadas: tuple) -> tuple:
+    """Lê em lote somente os pixels nas posições solicitadas, sem rasterizar o mapa."""
+    _ = versao
+    if not coordenadas:
+        return ()
+    import rasterio
+    import numpy as np
+    from rasterio.warp import transform
+    with rasterio.open(caminho) as ds:
+        if ds.crs is None or ds.count < 1:
+            raise ValueError("GeoTIFF sem referência geográfica.")
+        xs, ys = transform("EPSG:4326", ds.crs,
+                           [lon for lat, lon in coordenadas],
+                           [lat for lat, lon in coordenadas])
+        b = ds.bounds
+        posicoes = [i for i, (x, y) in enumerate(zip(xs, ys))
+                    if math.isfinite(x) and math.isfinite(y)
+                    and b.left <= x < b.right and b.bottom < y <= b.top]
+        resultado = [None] * len(coordenadas)
+        amostras = ds.sample(((xs[i], ys[i]) for i in posicoes), indexes=1, masked=True)
+        for indice, amostra in zip(posicoes, amostras):
+            valor = amostra[0]
+            if np.ma.is_masked(valor):
+                continue
+            cota = float(valor)
+            if not math.isfinite(cota):
+                continue
+            if ds.nodata is not None and np.isclose(cota, ds.nodata):
+                continue
+            resultado[indice] = cota
+        return tuple(resultado)
+
+
+def _m8_cotas_automaticas(coordenadas: tuple):
+    """Busca a cota DSM/MDE. Sem cobertura: None (nunca inventa altitude)."""
+    if not coordenadas:
+        return (), ()
+    catalogo, erros = _m8_catalogo_topografia()
+    resultado, alertas = [None] * len(coordenadas), list(erros)
+    for caminho, versao, oeste, sul, leste, norte in catalogo:
+        pendentes = [i for i, (lat, lon) in enumerate(coordenadas)
+                     if resultado[i] is None and sul <= lat <= norte and oeste <= lon <= leste]
+        if not pendentes:
+            continue
+        try:
+            amostras = _m8_amostrar_dem(caminho, versao, tuple(coordenadas[i] for i in pendentes))
+            for i, cota in zip(pendentes, amostras):
+                if cota is not None:
+                    resultado[i] = cota
+        except (OSError, ValueError, TypeError, ImportError, RuntimeError) as erro:
+            alertas.append(f"{Path(caminho).name}: {erro}")
+        if all(v is not None for v in resultado):
+            break
+    return tuple(resultado), tuple(alertas)
+
+
+def _m8_formatar_cota(cota):
+    return f"{float(cota):.0f} m" if cota is not None and math.isfinite(float(cota)) else ""
+
+
+def _m8_area_desenhada(desenhos):
+    """Converte o último polígono/retângulo do Leaflet para Shapely (WGS84)."""
+    from shapely.geometry import shape
+    if not desenhos:
+        return None
+    for item in reversed(desenhos):
+        try:
+            geometria = shape(item.get("geometry", item))
+            geometria, erro = _validar_area_selecionada(geometria)
+            if erro is None:
+                return geometria
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return None
+
+
+def _m8_ativos_na_area(area, bases):
+    """Conserva os ativos dentro do polígono, inclusive na borda."""
+    if area is None:
+        return []
+    from shapely.geometry import Point
+    from shapely.prepared import prep
+    oeste, sul, leste, norte = area.bounds
+    prepared = prep(area)
+    saida = []
+    for base in bases.values():
+        if base.empty:
+            continue
+        candidatos = base.loc[base["_lat"].between(sul, norte) & base["_lon"].between(oeste, leste)]
+        for registro in candidatos.to_dict("records"):
+            if prepared.covers(Point(float(registro["_lon"]), float(registro["_lat"]))):
+                saida.append(registro)
+    return saida
+
+
+def _m8_unir_ativos(ativos_proximos, ativos_area):
+    """União com chave coordenada e identificador; evita marcadores duplicados."""
+    saida = {}
+    for ativo in [*ativos_proximos, *ativos_area]:
+        tipo = str(ativo.get("_tipo", ""))
+        identificador = str(ativo.get("ID_POCO") or ativo.get("ID_LOGGER") or
+                            ativo.get("IDENTIFICACAO_ATIVO", ""))
+        chave = (tipo, identificador, round(float(ativo["_lat"]), 6), round(float(ativo["_lon"]), 6))
+        saida[chave] = ativo
+    return list(saida.values())
+
+
+def _m8_rótulo_html(texto, tipo="matricula"):
+    classe = "m8-label-equip" if tipo == "ativo" else "m8-label-mat"
+    return f'<div class="{classe}">{html_escape(str(texto))}</div>'
+
+
+def _m8_adicionar_rotulo(mapa_grupo, lat, lon, texto, tipo="matricula", deslocamento=15):
+    """Rótulo Leaflet não interativo: clique continua no marcador original."""
+    folium.Marker(
+        [lat, lon],
+        icon=folium.DivIcon(
+            html=_m8_rótulo_html(texto, tipo),
+            icon_size=(0, 0),
+            icon_anchor=(-deslocamento, 15),
+            class_name="m8-label-anchor",
+        ),
+        interactive=False,
+    ).add_to(mapa_grupo)
+
+
+def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
+                        cadastro_area, rede, cotas_clientes, cotas_area, exibir_rotulos=True):
+    """ÚNICO mapa: consulta, desenho, matrículas, ativos e recorte de rede."""
     from shapely.geometry import mapping
 
-    xmin, ymin, xmax, ymax = area.bounds
-    mapa = folium.Map(location=[(ymin + ymax) / 2, (xmin + xmax) / 2],
-                      zoom_start=15, tiles="OpenStreetMap", control_scale=True)
-    folium.GeoJson(mapping(area), name="Área selecionada",
-                   style_function=lambda _: {"color": "#087c8f", "weight": 2.6,
-                                              "fillColor": "#32bec3", "fillOpacity": 0.07}).add_to(mapa)
-    if rede is not None and rede.get("trechos", 0):
-        folium.GeoJson(rede["geojson"], name="Rede de água (recorte)", show=True,
-                       style_function=lambda _: {"color": "#0868b3", "weight": 2.5,
-                                                  "opacity": .85}).add_to(mapa)
-    grupo = folium.FeatureGroup(name="Matrículas dentro do polígono", show=True)
-    for _, linha in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
+    lats = clientes["_lat"].astype(float).tolist()
+    lons = clientes["_lon"].astype(float).tolist()
+    mapa = folium.Map(location=[sum(lats)/len(lats), sum(lons)/len(lons)],
+                      zoom_start=16 if len(clientes) == 1 else 13,
+                      tiles="OpenStreetMap", control_scale=True)
+    mapa.get_root().header.add_child(Element("""
+    <style>
+    .m8-label-anchor {background:transparent!important; border:0!important;}
+    .m8-label-mat,.m8-label-equip {
+      white-space:nowrap; display:inline-block; pointer-events:none;
+      padding:3px 6px; border-radius:5px;
+      background:rgba(255,255,255,.96); color:#18354a;
+      box-shadow:0 1px 5px rgba(12,42,64,.28);
+      border:1px solid rgba(22,84,128,.25);
+      font:600 11px/1.2 Arial,sans-serif;
+    }
+    .m8-label-mat{border-left:3px solid #16934b;}
+    .m8-label-equip{border-left:3px solid #e68e23;font-size:10px;}
+    .leaflet-control-layers-expanded {max-height:260px;overflow-y:auto;
+       font:11px/1.25 Arial,sans-serif;}
+    </style>
+    """))
+
+    if bairros:
+        grupo = folium.FeatureGroup(name="Limites dos bairros", show=True)
+        for bairro in bairros:
+            folium.Polygon(locations=bairro["coords"], color="#6387a3", weight=1.15,
+                           fill=True, fill_color="#88b8de", fill_opacity=.035,
+                           tooltip=f"Bairro: {html_escape(str(bairro['nome']))}").add_to(grupo)
+        grupo.add_to(mapa)
+    if influencias:
+        grupo = folium.FeatureGroup(name="Áreas de influência", show=True)
+        for zona in influencias:
+            folium.Polygon(locations=([zona["contorno"]] + zona["buracos"]
+                                      if zona["buracos"] else zona["contorno"]),
+                           color="#9871b2", weight=1.5, fill=True,
+                           fill_opacity=.06, tooltip=html_escape(str(zona["nome"]))).add_to(grupo)
+        grupo.add_to(mapa)
+    if area is not None:
+        folium.GeoJson(mapping(area), name="Área desenhada", show=True,
+                       style_function=lambda _: {"color":"#087d8c", "weight":3,
+                                                  "fillColor":"#22b8b8", "fillOpacity":.09}).add_to(mapa)
+    if rede and rede.get("trechos", 0):
+        folium.GeoJson(rede["geojson"], name="Rede de água — recorte", show=True,
+                       style_function=lambda _: {"color":"#0874bc", "weight":2.6,
+                                                  "opacity":.9},
+                       tooltip=folium.GeoJsonTooltip(fields=["nome"], aliases=["Trecho:"],
+                                                     sticky=True)).add_to(mapa)
+
+    selecionadas = {str(v) for v in clientes["NUM_LIGACAO"].astype(str)}
+    grupo_area = folium.FeatureGroup(name="Outras matrículas no perímetro", show=True)
+    avisos_outras = 0
+    for i, linha in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
+        matricula = str(linha.get("NUM_LIGACAO", ""))
+        if matricula in selecionadas:
+            continue
         lat = _coordenada(linha.get("COD_LATITUDE"), "lat")
         lon = _coordenada(linha.get("COD_LONGITUDE"), "lon")
         if lat is None or lon is None:
             continue
-        matricula = html_escape(str(linha.get("NUM_LIGACAO", "")))
-        bairro = html_escape(str(linha.get("BAIRRO", "")))
-        endereco = html_escape(str(linha.get("END_LIGACAO", "")))
-        categoria = html_escape(str(linha.get("CATEGORIA", "")))
-        folium.CircleMarker([lat, lon], radius=4.5, weight=1,
-                            color="#ffffff", fill=True, fill_color="#16a34a",
-                            fill_opacity=.95, tooltip=f"Matrícula: {matricula}",
-                            popup=folium.Popup(f"<b>Matrícula:</b> {matricula}<br>"
-                                               f"<b>Bairro:</b> {bairro}<br>"
-                                               f"<b>Endereço:</b> {endereco}<br>"
-                                               f"<b>Categoria:</b> {categoria}",
-                                               max_width=360)).add_to(grupo)
-    grupo.add_to(mapa)
-    mapa.fit_bounds([[ymin, xmin], [ymax, xmax]], padding=(20, 20))
-    folium.LayerControl(collapsed=True).add_to(mapa)
+        cota = cotas_area.get((lat, lon))
+        elevacao = _m8_formatar_cota(cota)
+        pop = (f"<b>Matrícula:</b> {html_escape(matricula)}<br>"
+               f"<b>Endereço:</b> {html_escape(str(linha.get('END_LIGACAO', '')))}<br>"
+               f"<b>Bairro:</b> {html_escape(str(linha.get('BAIRRO', '')))}<br>"
+               f"<b>Categoria:</b> {html_escape(str(linha.get('CATEGORIA', '')))}"
+               + (f"<br><b>Cota da superfície:</b> {elevacao}" if elevacao else ""))
+        folium.CircleMarker([lat, lon], radius=4, color="#ffffff", weight=1,
+                            fill=True, fill_color="#199e53", fill_opacity=.95,
+                            tooltip=f"Matrícula {matricula}"+(f" • {elevacao}" if elevacao else ""),
+                            popup=folium.Popup(pop, max_width=350)).add_to(grupo_area)
+        if exibir_rotulos and avisos_outras < LIMITE_ROTULOS_AREA:
+            _m8_adicionar_rotulo(grupo_area, lat, lon,
+                                 f"{matricula} • {elevacao}" if elevacao else matricula,
+                                 deslocamento=9)
+            avisos_outras += 1
+    if not cadastro_area.empty:
+        grupo_area.add_to(mapa)
+
+    grupo_clientes = folium.FeatureGroup(name="Matrículas consultadas", show=True)
+    for _, linha in clientes.iterrows():
+        lat, lon = float(linha["_lat"]), float(linha["_lon"])
+        matricula = str(linha["NUM_LIGACAO"])
+        cota = cotas_clientes.get((lat, lon))
+        elevacao = _m8_formatar_cota(cota)
+        pop = _popup_cliente(linha)
+        if elevacao:
+            pop += f"<div><b>Cota da superfície:</b> {elevacao}</div>"
+        folium.Marker([lat, lon], tooltip=f"Matrícula {matricula}" +
+                      (f" • {elevacao}" if elevacao else ""),
+                      popup=folium.Popup(pop, max_width=380),
+                      icon=folium.Icon(color="green", icon="home", prefix="fa")).add_to(grupo_clientes)
+        folium.Circle([lat, lon], radius=raio, color="#397cba", fill=False,
+                      opacity=.32, weight=1, tooltip=f"Proximidade: {raio} m").add_to(grupo_clientes)
+        if exibir_rotulos:
+            _m8_adicionar_rotulo(grupo_clientes, lat, lon,
+                                 f"{matricula} • {elevacao}" if elevacao else matricula,
+                                 deslocamento=19)
+    grupo_clientes.add_to(mapa)
+
+    for tipo, cor, icone in (("Poço / Ativo", "blue", "tint"), ("Logger", "orange", "signal")):
+        grupo = folium.FeatureGroup(name=tipo + "(s)", show=True)
+        filtrados = [ativo for ativo in ativos if ativo.get("_tipo") == tipo]
+        for i, ativo in enumerate(filtrados[:LIMITE_EQUIPAMENTOS_MAPA]):
+            lat, lon = float(ativo["_lat"]), float(ativo["_lon"])
+            folium.Marker([lat, lon], popup=folium.Popup(_popup_ativo(ativo), max_width=360),
+                          tooltip=f"{tipo}: {str(ativo.get('IDENTIFICACAO_ATIVO', ''))}",
+                          icon=folium.Icon(color=cor, icon=icone, prefix="fa")).add_to(grupo)
+            if exibir_rotulos and i < 110:
+                nome = str(ativo.get("IDENTIFICACAO_ATIVO") or ativo.get("_nome") or "").strip()
+                if nome:
+                    _m8_adicionar_rotulo(grupo, lat, lon, nome[:36], tipo="ativo", deslocamento=17)
+        grupo.add_to(mapa)
+
+    Draw(export=False, position="topleft",
+         draw_options={"polygon": {"allowIntersection": False, "showArea": True},
+                       "rectangle": True, "polyline": False, "circle": False,
+                       "circlemarker": False, "marker": False},
+         edit_options={"edit": False, "remove": True}).add_to(mapa)
+    if area is not None:
+        oeste, sul, leste, norte = area.bounds
+        mapa.fit_bounds([[sul, oeste], [norte, leste]], padding=(35, 35), max_zoom=17)
+    elif len(clientes) > 1:
+        mapa.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]],
+                        padding=(60, 60), max_zoom=16)
+    folium.LayerControl(collapsed=True, position="topright").add_to(mapa)
     return mapa
 
 
-def exibir_selecao_area_rede_cadastro() -> None:
-    """Área selecionada, registros cadastrais no polígono e rede sob demanda."""
-    st.subheader("🗺️ Seleção de área — Rede de água e matrículas")
-    st.caption("Selecione um bairro de Teresina ou desenhe um polígono. "
-               "Os registros de dados/matriculas.xlsx são filtrados pelas coordenadas, "
-               "incluindo pontos na borda. A rede só será lida quando solicitada.")
-
-    modo = st.radio("Como deseja selecionar a área?",
-                    ("Selecionar bairro", "Desenhar polígono"), horizontal=True,
-                    key="m8_modo_area")
-    bairro_area = None
-    area = None
-    if modo == "Selecionar bairro":
-        caminho = _caminho_bairros_teresina()
-        if caminho is None:
-            st.warning("Arquivo de bairros de Teresina não encontrado. Use a opção Desenhar polígono.")
-        else:
-            try:
-                bairros = _bairros_geograficos(_assinatura(caminho))
-                opcoes = sorted({str(b["nome"]).strip() for b in bairros if str(b["nome"]).strip()},
-                                key=_normalizar_texto)
-                bairro_area = st.selectbox("Bairro", options=opcoes, index=None,
-                                           placeholder="Escolha o bairro para consultar",
-                                           key="m8_bairro_selecionado")
-                if bairro_area:
-                    area = _geometria_area_bairro(bairros, bairro_area)
-            except Exception as erro:
-                st.warning(f"Não foi possível carregar os bairros: {erro}")
-    else:
-        st.info("Use a ferramenta de polígono ou retângulo no canto superior esquerdo "
-                "do mapa. Ao finalizar o desenho, clique em Consultar matrículas da área.")
-        wkb_desenho = st.session_state.get("m8_poligono_desenhado")
-        if wkb_desenho:
-            from shapely import wkb
-            area = wkb.loads(wkb_desenho)
-        if st.button("Limpar desenho", key="m8_limpar_desenho"):
-            st.session_state.pop("m8_poligono_desenhado", None)
-            # Novo identificador reinicia também o estado da ferramenta Draw.
-            st.session_state["m8_versao_mapa_desenho"] = (
-                st.session_state.get("m8_versao_mapa_desenho", 0) + 1
-            )
-            st.rerun()
-
-    # Não depende das matrículas e não lê o KMZ de rede nesta etapa.
-    vista = _mapa_selecao_area(area, permitir_desenho=(modo == "Desenhar polígono"))
-    retorno = st_folium(vista, width=None, height=490,
-                        returned_objects=["all_drawings"] if modo == "Desenhar polígono" else [],
-                        key=(f"m8_mapa_escolha_area_{'desenho' if modo == 'Desenhar polígono' else 'bairro'}_"
-                             f"{st.session_state.get('m8_versao_mapa_desenho', 0)}"))
-    if modo == "Desenhar polígono" and isinstance(retorno, dict):
-        desenhos = retorno.get("all_drawings") or []
-        for item in reversed(desenhos):
-            try:
-                from shapely.geometry import shape
-                candidato = shape(item.get("geometry", item))
-                candidato, erro = _validar_area_selecionada(candidato)
-                if erro is None:
-                    if candidato.wkb != st.session_state.get("m8_poligono_desenhado"):
-                        st.session_state["m8_poligono_desenhado"] = candidato.wkb
-                    area = candidato
-                    break
-            except (ValueError, TypeError, KeyError):
-                continue
-
-    if area is None:
-        st.caption("Selecione a área antes de consultar as matrículas ou a rede.")
-        return
-    area, erro_area = _validar_area_selecionada(area)
-    if erro_area:
-        st.warning(erro_area)
-        return
-
-    nome = bairro_area or "Área desenhada"
-    area_id = hashlib.sha256(area.wkb).hexdigest()
-    st.caption(f"Área selecionada: **{nome}**")
-    if st.button("🔎 Consultar matrículas dentro da área", key="m8_consultar_matriculas_area", type="primary"):
-        st.session_state["m8_area_consultada"] = {"nome": nome, "wkb": area.wkb, "id": area_id}
-        st.session_state.pop("m8_rede_carregada_id", None)
-
-    consulta = st.session_state.get("m8_area_consultada")
-    if not consulta or consulta["id"] != area_id:
-        st.info("Clique em Consultar matrículas dentro da área para obter a listagem correspondente.")
-        return
-
-    cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
-    try:
-        with st.spinner("Identificando matrículas do cadastro dentro do polígono..."):
-            cadastro_area, metadados = _matriculas_na_area(area)
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Registros na área", len(cadastro_area))
-        c2.metric("Matrículas distintas", cadastro_area["NUM_LIGACAO"].nunique())
-        c3.metric("Bairros identificados", cadastro_area["BAIRRO"].loc[
-            lambda x: x.str.strip().ne("")].nunique())
-        st.caption("Fonte exclusiva: cadastro de matrículas do Módulo 8 "
-                   f"({metadados.get('fonte', 'dados/matriculas.sqlite')}). "
-                   "Não existe vínculo com o Farol, histórico de O.S. ou Google Sheets.")
-        st.caption("A estrutura atualmente lida do cadastro contém matrícula, categoria, "
-                   "bairro, endereço e coordenadas; não contém número/status de O.S. "
-                   "Por isso, os registros são mostrados como matrículas, não como ordens de serviço.")
-    except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
-        st.error(f"Não foi possível consultar o cadastro de matrículas da área: {erro}")
-
-    if cadastro_area.empty:
-        st.info("Nenhum registro cadastral com coordenadas dentro do polígono selecionado.")
-    else:
-        st.markdown("#### Matrículas encontradas no polígono")
-        exibidas = list(COLUNAS_MATRICULAS)
-        st.dataframe(cadastro_area.loc[:, exibidas].rename(columns={
-            "CATEGORIA": "Categoria", "NUM_LIGACAO": "Matrícula", "BAIRRO": "Bairro",
-            "COD_LATITUDE": "Latitude", "COD_LONGITUDE": "Longitude",
-            "END_LIGACAO": "Endereço"
-        }), hide_index=True, use_container_width=True)
-        csv = cadastro_area.loc[:, exibidas].to_csv(index=False, sep=";").encode("utf-8-sig")
-        st.download_button("⬇️ Exportar matrículas da área (CSV)", data=csv,
-                           file_name="matriculas_area_selecionada.csv", mime="text/csv",
-                           key="m8_baixar_matriculas_area")
-
-    st.markdown("#### Rede de água da área selecionada")
-    rede = None
-    if not ARQUIVO_REDE_AGUA.is_file():
-        st.warning("Arquivo não encontrado: dados/Rede_Agua_THE.kmz. "
-                   "A listagem cadastral continua disponível sem a rede.")
-    else:
-        ativo = st.session_state.get("m8_rede_carregada_id") == area_id
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            if st.button("🧭 Carregar rede apenas desta área", key="m8_carregar_rede",
-                         disabled=ativo, use_container_width=True):
-                st.session_state["m8_rede_carregada_id"] = area_id
-                ativo = True
-        with col2:
-            if st.button("Ocultar rede", key="m8_ocultar_rede", disabled=not ativo,
-                         use_container_width=True):
-                st.session_state.pop("m8_rede_carregada_id", None)
-                ativo = False
-        if ativo:
-            try:
-                with st.spinner("Lendo a rede KMZ e recortando ao perímetro selecionado..."):
-                    rede = _rede_recortada_kmz(_assinatura(ARQUIVO_REDE_AGUA), area.wkb)
-                st.caption(f"Trechos de rede exibidos: {rede['trechos']:,} · "
-                           f"Vértices enviados ao navegador: {rede['vertices']:,}".replace(",", "."))
-                if rede["limitado"]:
-                    st.warning("A rede foi limitada para preservar o desempenho. "
-                               "Selecione um polígono menor para visualizar todos os trechos da área.")
-                elif not rede["trechos"]:
-                    st.info("O KMZ foi lido, mas nenhuma linha de rede intersecta a área escolhida. "
-                            "Verifique se o arquivo contém geometrias do tipo LineString.")
-            except Exception as erro:
-                st.error(f"Não foi possível ler o KMZ da rede: {erro}")
-
-    st_folium(_mapa_rede_e_cadastro(area, rede, cadastro_area), width=None, height=610,
-              returned_objects=[], key="m8_mapa_resultado_area")
-    if len(cadastro_area) > LIMITE_MARCADORES_AREA:
-        st.caption("Para manter o mapa responsivo, foram desenhados apenas os primeiros "
-                   f"{LIMITE_MARCADORES_AREA} marcadores. A tabela e o CSV "
-                   "contêm todos os registros cadastrais localizados.")
-    st.caption("Rede recortada por interseção geográfica, sem editar o KMZ original. "
-               "A presença de uma tubulação no polígono não comprova que ela abasteça cada matrícula.")
-
-
 def exibir_consulta_operacional() -> None:
-    """Pesquisa e mapa são gerados só depois de o usuário clicar em Pesquisar."""
+    """Único fluxo: pesquisar -> desenhar no MESMO mapa -> consultar/rede."""
     if (not verificar_autenticacao()
             or str(st.session_state.get("perfil", "")).strip().lower() not in PERFIS_CONSULTA):
         st.error("Acesso não autorizado. Entre pelo Hub Central.")
         st.stop()
 
-    # Retorno ao Hub Central sem encerrar a sessão autenticada.
-    if st.button("⬅️ Voltar ao Menu Principal", key="voltar_menu_principal_consulta_operacional"):
+    if st.button("⬅️ Voltar ao Menu Principal", key="m8_voltar_menu"):
         st.switch_page("app.py")
+    st.title("🔍 Consulta Operacional — Matrículas e Rede")
+    st.caption("Uma única visualização • Cadastro de matrículas • Rede por perímetro • Somente leitura")
+    if _arquivo_matriculas() is None and _arquivo_sqlite_publicado() is None:
+        st.error("Base cadastral ausente: dados/matriculas.xlsx, matriculas.xls ou matriculas.sqlite.")
+        return
 
-    st.title("🔍 Consulta Operacional")
-    st.caption("Teresina • Consultas somente leitura • Sem histórico de consultas")
-    ferramenta = st.radio("Ferramenta de consulta",
-                          ("Pesquisa de matrículas", "Seleção de área — Rede e Matrículas"),
-                          horizontal=True, key="m8_ferramenta")
-    if ferramenta == "Seleção de área — Rede e Matrículas":
-        exibir_selecao_area_rede_cadastro()
-    else:
-        exibir_consulta_por_matricula()
-
-
-def exibir_consulta_por_matricula() -> None:
-    """Consulta V3 existente, mantida sem alterações na lógica de busca."""
-    fonte = _arquivo_matriculas()
-    indice = _arquivo_sqlite_publicado()
-    if fonte is None and indice is None:
-        st.error("Base ausente. Adicione dados/matriculas.xls, dados/matriculas.xlsx "
-                 "ou dados/matriculas.sqlite a um repositório privado.")
-        st.stop()
-    if fonte is not None:
-        st.caption(f"Base de consulta: dados/{fonte.name} • leitura somente após pesquisar")
-    else:
-        st.caption(f"Base de consulta: dados/{indice.name} • índice de pesquisa")
-
-    # Descarta apenas o valor de demonstração herdado da versão anterior,
-    # sem limpar a consulta atual em futuras atualizações da interface.
-    if "consulta_operacional_v3_inicializou" not in st.session_state:
+    if "m8_integrado_inicializou" not in st.session_state:
         st.session_state.pop("consulta_operacional_entrada", None)
-        st.session_state.pop("consulta_operacional_consulta", None)
-        st.session_state["consulta_operacional_v3_inicializou"] = True
+        st.session_state["m8_integrado_inicializou"] = True
 
-    with st.form("consulta_operacional_busca"):
-        pesquisa = st.text_area("Matrícula(s)", value="", placeholder="Digite uma ou várias matrículas",
-                                help="Informe uma ou várias matrículas, separadas por vírgula, espaço ou quebra de linha.",
-                                height=105, key="consulta_operacional_entrada")
-        c1, c2 = st.columns([2, 1])
-        with c1:
-            raio = st.number_input("Raio de busca dos ativos e loggers (metros)",
+    with st.form("m8_busca_integrada"):
+        texto = st.text_area("Matrícula(s)", key="consulta_operacional_entrada", height=78,
+                             placeholder="Informe uma ou mais matrículas, separadas por vírgula, espaço ou linha")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            raio = st.number_input("Raio para identificar equipamentos próximos (m)",
                                    min_value=50, max_value=5000, value=750, step=50,
-                                   key="consulta_operacional_raio")
-        with c2:
-            exibir_bairros = st.checkbox("Exibir limites dos bairros", value=True,
-                                        key="consulta_operacional_bairros")
-        executar = st.form_submit_button("🔎 Pesquisar matrículas", type="primary", use_container_width=True)
+                                   key="m8_raio_integrado")
+        with col2:
+            mostrar_bairros = st.checkbox("Limites dos bairros", value=True,
+                                         key="m8_bairros_integrado")
+        pesquisar = st.form_submit_button("🔎 Consultar matrícula(s)", type="primary",
+                                          use_container_width=True)
 
-    if executar:
-        codigos, invalidos_pesquisa = _interpretar_pesquisa(pesquisa)
-        if invalidos_pesquisa:
-            st.error("Valores inválidos na pesquisa: " + ", ".join(invalidos_pesquisa[:10]) + ". Use apenas números de matrícula.")
-            st.session_state.pop("consulta_operacional_consulta", None)
+    if pesquisar:
+        codigos, invalidos = _interpretar_pesquisa(texto)
+        if invalidos:
+            st.error("Matrículas inválidas: " + ", ".join(invalidos[:12]))
         elif not codigos:
-            st.warning("Informe ao menos uma matrícula para consultar.")
-            st.session_state.pop("consulta_operacional_consulta", None)
+            st.warning("Informe pelo menos uma matrícula.")
         elif len(codigos) > 200:
-            st.warning("Para manter o mapa responsivo, pesquise até 200 matrículas por consulta.")
-            st.session_state.pop("consulta_operacional_consulta", None)
+            st.warning("Para preservar o desempenho, consulte até 200 matrículas de cada vez.")
         else:
-            # Somente o estado da consulta corrente no navegador; NÃO registra histórico.
-            st.session_state["consulta_operacional_consulta"] = (codigos, int(raio), bool(exibir_bairros))
+            st.session_state["m8_integrado_consulta"] = (codigos, int(raio), bool(mostrar_bairros))
+            st.session_state.pop("m8_integrado_area", None)
+            st.session_state.pop("m8_integrado_rede_id", None)
+            st.session_state["m8_integrado_versao_mapa"] = st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+            st.rerun()
 
-    consulta = st.session_state.get("consulta_operacional_consulta")
-    if not consulta:
-        st.info("Informe a(s) matrícula(s) e clique em Pesquisar para visualizar o mapa e os ativos próximos.")
+    atual = st.session_state.get("m8_integrado_consulta")
+    if not atual:
+        st.info("Pesquise uma matrícula. No mapa de resultado, desenhe um polígono ou retângulo ao redor dela para analisar a região.")
         return
-
-    matriculas, raio_consulta, mostrar_bairros = consulta
+    codigos, raio, mostrar_bairros = atual
     try:
-        with st.spinner("Consultando cadastro de matrículas... Na primeira pesquisa, a criação do índice pode demorar."):
-            encontrados, meta = _buscar_matriculas(matriculas)
+        with st.spinner("Consultando índice cadastral..."):
+            clientes, metadados = _buscar_matriculas(codigos)
     except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
-        st.error(f"Não foi possível consultar a base de matrículas: {erro}")
+        st.error(f"Não foi possível consultar a matrícula: {erro}")
         return
-
-    st.caption(f"Cadastro indexado: {int(meta.get('quantidade', 0)):,} registros".replace(",", "."))
-    presentes = set(encontrados["NUM_LIGACAO"])
-    ausentes = [m for m in matriculas if m not in presentes]
-    validos = encontrados.loc[encontrados["_lat"].notna() & encontrados["_lon"].notna()].copy()
-    invalidos = encontrados.loc[encontrados["_lat"].isna() | encontrados["_lon"].isna()].copy()
-
+    presentes = set(clientes["NUM_LIGACAO"].astype(str))
+    faltantes = [v for v in codigos if v not in presentes]
+    validos = clientes.loc[clientes["_lat"].notna() & clientes["_lon"].notna()].copy()
     c1, c2, c3 = st.columns(3)
-    c1.metric("Matrículas localizadas", len(presentes))
-    c2.metric("Com coordenadas válidas", int(validos["NUM_LIGACAO"].nunique()))
-    c3.metric("Não encontradas", len(ausentes))
-
-    if ausentes:
-        st.warning("Matrícula(s) não encontrada(s): " + ", ".join(ausentes))
-    if not invalidos.empty:
-        st.warning("Encontradas sem coordenadas válidas: " + ", ".join(sorted(invalidos["NUM_LIGACAO"].unique())))
-    duplicadas = encontrados["NUM_LIGACAO"][encontrados["NUM_LIGACAO"].duplicated(keep=False)].unique()
-    if len(duplicadas):
-        st.warning("Matrículas com registros duplicados na base: " + ", ".join(duplicadas))
-
-    if not encontrados.empty:
-        st.subheader("📋 Dados cadastrais das matrículas")
-        st.dataframe(encontrados.loc[:, list(COLUNAS_MATRICULAS)], hide_index=True,
-                     use_container_width=True)
+    c1.metric("Matrículas encontradas", len(presentes))
+    c2.metric("Com coordenadas", validos["NUM_LIGACAO"].nunique())
+    c3.metric("Não encontradas", len(faltantes))
+    if faltantes:
+        st.warning("Matrículas ausentes: " + ", ".join(faltantes))
     if validos.empty:
-        st.info("Nenhuma matrícula com coordenadas geográficas válidas para exibir no mapa.")
+        st.info("Nenhum dos registros encontrados possui coordenadas válidas.")
         return
 
-    # Independente do filtro de limites de bairros: influência sempre é calculada.
-    areas = []
-    caminho_areas = _caminho_influencias()
-    if caminho_areas:
+    from shapely import wkb
+    area = None
+    if st.session_state.get("m8_integrado_area"):
         try:
-            areas = _ler_influencias(_assinatura(caminho_areas))
+            area = wkb.loads(st.session_state["m8_integrado_area"])
+            area, invalida = _validar_area_selecionada(area)
+            if invalida:
+                st.warning(invalida)
+                area = None
+        except (ValueError, TypeError):
+            area = None
+    area_id = hashlib.sha256(area.wkb).hexdigest() if area is not None else None
+
+    # Leitura das camadas é restrita ao contexto da consulta. Nunca exibe a rede
+    # da cidade inteira nem todas as matrículas na interface.
+    influencias = []
+    arquivo_influencias = _caminho_influencias()
+    if arquivo_influencias:
+        try:
+            todas_influencias = _ler_influencias(_assinatura(arquivo_influencias))
+            validos["_influencia"] = validos.apply(
+                lambda linha: "; ".join(_identificar_influencias(float(linha["_lat"]), float(linha["_lon"]), todas_influencias))
+                or "Área de influência não identificada", axis=1)
+            # No mapa, apenas feições próximas; o catálogo completo não é enviado.
+            from shapely.geometry import box
+            if area is not None:
+                contexto = box(*area.bounds).buffer(.008)
+            else:
+                contexto = box(min(validos["_lon"])-.008, min(validos["_lat"])-.008,
+                               max(validos["_lon"])+.008, max(validos["_lat"])+.008)
+            influencias = [z for z in todas_influencias if z["geometria"].intersects(contexto)][:90]
         except Exception as erro:
-            st.warning(f"Não foi possível carregar áreas de influência: {erro}")
+            st.warning(f"Áreas de influência indisponíveis: {erro}")
+            validos["_influencia"] = "Não disponível"
     else:
-        st.warning("KMZ de influência não encontrado: adicione geodados/areas_influencia/Area_de_influencia_Teresina.kmz.")
+        validos["_influencia"] = "Não disponível"
 
-    if areas:
-        validos["_influencia"] = validos.apply(
-            lambda linha: "; ".join(_identificar_influencias(float(linha["_lat"]), float(linha["_lon"]), areas))
-            or "Área de influência não identificada", axis=1)
-    else:
-        validos["_influencia"] = "Área de influência indisponível" if caminho_areas is None or not areas else "Área de influência não identificada"
+    bairros = []
+    if mostrar_bairros:
+        caminho_bairros = _caminho_bairros_teresina()
+        if caminho_bairros:
+            try:
+                todas = _bairros_geograficos(_assinatura(caminho_bairros))
+                if area is not None:
+                    bx = area.bounds
+                    oeste, sul, leste, norte = bx[0]-.008, bx[1]-.008, bx[2]+.008, bx[3]+.008
+                else:
+                    oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
+                    leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
+                bairros = [b for b in todas if not (b["limites"][2] < oeste or b["limites"][0] > leste
+                                                      or b["limites"][3] < sul or b["limites"][1] > norte)][:90]
+            except Exception as erro:
+                st.warning(f"Limites de bairros não puderam ser carregados: {erro}")
 
-    bases: dict[str, pd.DataFrame] = {}
+    cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
+    if area is not None:
+        try:
+            with st.spinner("Localizando as matrículas dentro do desenho..."):
+                cadastro_area, _ = _matriculas_na_area(area)
+        except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
+            st.error(f"Não foi possível consultar as matrículas do polígono: {erro}")
+
+    bases = {}
     for tipo, caminho in (("Poço / Ativo", ARQUIVO_POCOS), ("Logger", ARQUIVO_LOGGERS)):
         if not caminho.is_file():
-            st.warning(f"{caminho.relative_to(RAIZ)} não encontrado; {tipo.lower()}(s) não serão exibidos.")
+            st.warning(f"Cadastro ausente: {caminho.name}.")
             continue
         try:
             bases[tipo] = _ler_ativos_csv(_assinatura(caminho), tipo)
         except (OSError, ValueError, pd.errors.ParserError) as erro:
             st.warning(f"Não foi possível carregar {caminho.name}: {erro}")
+    proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
+    ativos_area = _m8_ativos_na_area(area, bases)
+    ativos = _m8_unir_ativos(ativos_perto, ativos_area)
 
-    proximidade, ativos_mapa = _consultar_proximidade(validos, bases, raio_consulta)
-    qtd_pocos = sum(a.get("_tipo") == "Poço / Ativo" for a in ativos_mapa)
-    qtd_loggers = sum(a.get("_tipo") == "Logger" for a in ativos_mapa)
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Poços / ativos próximos", qtd_pocos)
-    c5.metric("Loggers próximos", qtd_loggers)
-    c6.metric("Raio de pesquisa", f"{raio_consulta} m")
+    # Cotas são amostradas somente para os pontos efetivamente renderizados.
+    coords_selecionadas = tuple((float(r["_lat"]), float(r["_lon"])) for _, r in validos.iterrows())
+    coords_area = []
+    for _, r in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
+        lat = _coordenada(r.get("COD_LATITUDE"), "lat")
+        lon = _coordenada(r.get("COD_LONGITUDE"), "lon")
+        if lat is not None and lon is not None:
+            coords_area.append((lat, lon))
+    coords_para_cotas = tuple(dict.fromkeys([*coords_selecionadas, *coords_area]))
+    try:
+        cotas, avisos_cota = _m8_cotas_automaticas(coords_para_cotas)
+        mapa_cotas = dict(zip(coords_para_cotas, cotas))
+        if avisos_cota:
+            st.caption("Alguns arquivos topográficos não puderam ser consultados; "+"; ".join(avisos_cota[:2]))
+    except (ImportError, OSError, ValueError, RuntimeError) as erro:
+        st.warning(f"Elevação indisponível: {erro}")
+        mapa_cotas = {}
 
-    bairros = []
-    if mostrar_bairros:
-        arquivo_bairros = _caminho_bairros_teresina()
-        if arquivo_bairros:
+    col_mapa, col_rede, col_limpar = st.columns([3.5, 1.4, 1.2], vertical_alignment="bottom")
+    with col_mapa:
+        st.subheader("🗺️ Mapa integrado")
+        st.caption("Use as ferramentas de polígono ou retângulo no canto superior esquerdo do mapa. A listagem será atualizada ao terminar o desenho.")
+    with col_rede:
+        rede_ativa = bool(area_id and st.session_state.get("m8_integrado_rede_id") == area_id)
+        rotulo_botao = "Ocultar rede" if rede_ativa else "Exibir rede da área"
+        if st.button(rotulo_botao, key="m8_integrado_botao_rede", disabled=area is None,
+                     use_container_width=True):
+            if rede_ativa:
+                st.session_state.pop("m8_integrado_rede_id", None)
+            else:
+                st.session_state["m8_integrado_rede_id"] = area_id
+            st.rerun()
+    with col_limpar:
+        if st.button("Limpar desenho", key="m8_integrado_limpar_area",
+                     disabled=area is None, use_container_width=True):
+            st.session_state.pop("m8_integrado_area", None)
+            st.session_state.pop("m8_integrado_rede_id", None)
+            st.session_state["m8_integrado_versao_mapa"] = st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+            st.rerun()
+
+    rede = None
+    if area is not None and st.session_state.get("m8_integrado_rede_id") == area_id:
+        if ARQUIVO_REDE_AGUA.is_file():
             try:
-                bairros = _bairros_geograficos(_assinatura(arquivo_bairros))
-            except Exception as erro:
-                st.warning(f"Não foi possível carregar os limites dos bairros: {erro}")
+                with st.spinner("Recortando a rede apenas para a área desenhada..."):
+                    rede = _rede_recortada_kmz(_assinatura(ARQUIVO_REDE_AGUA), area.wkb)
+                st.caption(f"Rede visível: {rede['trechos']:,} trecho(s), {rede['vertices']:,} vértices".replace(",", "."))
+                if rede["limitado"]:
+                    st.warning("A rede foi limitada para manter o mapa fluido. Desenhe uma área menor para ver todos os trechos.")
+            except (OSError, ValueError, RuntimeError, zipfile.BadZipFile, ET.ParseError) as erro:
+                st.error(f"Não foi possível carregar o recorte da rede: {erro}")
         else:
-            st.caption("Camada de bairros indisponível: nenhum arquivo geográfico de Teresina foi encontrado.")
+            st.warning("Arquivo dados/Rede_Agua_THE.kmz não encontrado no repositório.")
 
-    st.subheader("🗺️ Contexto geográfico das matrículas")
-    st.caption("Verde: matrículas • Azul: poços / ativos • Laranja: loggers • "
-               "Círculos: raio de proximidade. Proximidade não comprova abastecimento pelo ativo.")
-    mapa = _mapa_consulta(validos, ativos_mapa, raio_consulta, bairros, mostrar_bairros, areas)
-    st_folium(mapa, width=None, height=640,
-              returned_objects=[], key="consulta_operacional_mapa")
+    rotulos = st.checkbox("Exibir rótulos das matrículas, ativos e loggers", value=True,
+                         key="m8_integrado_rotulos")
+    mapa = _m8_mapa_unificado(validos, ativos, raio, bairros, influencias, area,
+                              cadastro_area, rede, mapa_cotas, mapa_cotas, rotulos)
+    retorno = st_folium(
+        mapa, width=None, height=660, returned_objects=["all_drawings"],
+        key=f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}",
+    )
+    if isinstance(retorno, dict):
+        nova_area = _m8_area_desenhada(retorno.get("all_drawings") or [])
+        if nova_area is not None:
+            novo_wkb = nova_area.wkb
+            if novo_wkb != st.session_state.get("m8_integrado_area"):
+                st.session_state["m8_integrado_area"] = novo_wkb
+                st.session_state.pop("m8_integrado_rede_id", None)
+                st.rerun()
 
-    st.subheader("📍 Ativos e loggers próximos por matrícula")
-    if proximidade.empty:
-        st.info(f"Nenhum ativo ou logger encontrado dentro de {raio_consulta} m das matrículas localizadas.")
+    if area is None:
+        st.info("Desenhe uma área no mapa para listar todas as matrículas do perímetro e habilitar o recorte da rede, sem abrir outro mapa.")
     else:
-        st.dataframe(proximidade, hide_index=True, use_container_width=True)
-        st.caption("As distâncias são medidas em linha reta entre coordenadas; "
-                   "o mesmo equipamento pode aparecer vinculado a mais de uma matrícula.")
+        x1, x2, x3 = st.columns(3)
+        x1.metric("Registros no polígono", len(cadastro_area))
+        x2.metric("Matrículas distintas", cadastro_area["NUM_LIGACAO"].nunique() if not cadastro_area.empty else 0)
+        x3.metric("Equipamentos no polígono", len(ativos_area))
+        st.markdown("#### Matrículas dentro da área desenhada")
+        if cadastro_area.empty:
+            st.info("Nenhuma matrícula com coordenadas válidas foi localizada no polígono.")
+        else:
+            colunas = list(COLUNAS_MATRICULAS)
+            st.dataframe(cadastro_area[colunas].rename(columns={
+                "CATEGORIA": "Categoria", "NUM_LIGACAO": "Matrícula", "BAIRRO": "Bairro",
+                "COD_LATITUDE": "Latitude", "COD_LONGITUDE": "Longitude", "END_LIGACAO": "Endereço"
+            }), hide_index=True, use_container_width=True, height=315)
+            st.download_button("⬇️ Exportar matrículas do polígono (CSV)",
+                data=cadastro_area[colunas].to_csv(index=False, sep=";").encode("utf-8-sig"),
+                file_name="matriculas_perimetro_PRISMA.csv", mime="text/csv",
+                key="m8_exportar_poligono")
+            if len(cadastro_area) > LIMITE_MARCADORES_AREA:
+                st.caption(f"Para o mapa não ficar pesado, aparecem os primeiros {LIMITE_MARCADORES_AREA} "
+                           "marcadores do perímetro; a tabela e o CSV incluem todos os registros.")
+            if len(cadastro_area) > LIMITE_ROTULOS_AREA:
+                st.caption(f"Os rótulos das outras matrículas são limitados a {LIMITE_ROTULOS_AREA}. "
+                           "Os rótulos das matrículas consultadas têm prioridade.")
 
-    st.subheader("🌐 Região de influência do abastecimento")
-    if areas:
-        st.dataframe(validos[["NUM_LIGACAO", "_influencia"]].rename(columns={
-            "NUM_LIGACAO": "Matrícula", "_influencia": "Área de Influência"
+    st.markdown("#### Equipamentos próximos")
+    if ativos:
+        tipos = [str(a.get("_tipo", "")) for a in ativos]
+        st.caption(f"{tipos.count('Poço / Ativo')} poço(s)/ativo(s) e {tipos.count('Logger')} logger(s) "
+                   "próximos às matrículas consultadas ou dentro da área desenhada.")
+        resumo_ativos = pd.DataFrame([{
+            "Tipo": a.get("_tipo", ""), "Identificação": a.get("IDENTIFICACAO_ATIVO", ""),
+            "Nome / Endereço": a.get("_nome", ""),
+            "Latitude": round(float(a["_lat"]), 6), "Longitude": round(float(a["_lon"]), 6),
+        } for a in ativos])
+        st.dataframe(resumo_ativos, hide_index=True, use_container_width=True, height=230)
+    else:
+        st.info("Nenhum equipamento encontrado no raio de pesquisa ou na área desenhada.")
+
+    with st.expander("Dados cadastrais e áreas de influência das matrículas consultadas", expanded=False):
+        st.dataframe(validos.loc[:, list(COLUNAS_MATRICULAS) + ["_influencia"]].rename(columns={
+            "NUM_LIGACAO": "Matrícula", "_influencia": "Área de Influência",
         }), hide_index=True, use_container_width=True)
-        st.caption("A associação resulta da interseção geográfica com os polígonos do KMZ. "
-                   "Quando há sobreposições, todas as áreas correspondentes são apresentadas.")
-    else:
-        st.info("A base de áreas de influência ainda não está disponível para cruzamento geográfico.")
-    st.caption("Para visualizar a rede de água e matrículas por perímetro, use Seleção de área — Rede e Matrículas.")
+        if not proximidade.empty:
+            st.markdown("**Distâncias dos equipamentos às matrículas consultadas**")
+            st.dataframe(proximidade, hide_index=True, use_container_width=True)
+
+    st.caption("As cotas são da superfície do modelo digital de elevação (DSM/MDE), não da tubulação. "
+               "A proximidade da rede e dos ativos não comprova vínculo hidráulico. "
+               "Os registros da área vêm exclusivamente do cadastro de matrículas, sem vínculo com o Farol.")
 
 
 exibir_consulta_operacional()
