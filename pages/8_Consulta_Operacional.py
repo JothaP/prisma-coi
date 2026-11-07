@@ -67,8 +67,6 @@ ARQUIVO_REDE_AGUA = PASTA_DADOS / "Rede_Agua_THE.kmz"
 # Não envia rede de toda a cidade ao navegador. Limites protetivos por consulta.
 LIMITE_REDE_TRECHOS = 4000
 LIMITE_REDE_VERTICES = 90000
-LIMITE_MARCADORES_AREA = 350
-LIMITE_ROTULOS_AREA = 100
 LIMITE_EQUIPAMENTOS_MAPA = 350
 PASTA_TOPOGRAFIA = PASTA_DADOS / "topografia"
 
@@ -1075,8 +1073,8 @@ def _m8_adicionar_rotulo(mapa_grupo, lat, lon, texto, tipo="matricula", deslocam
 
 
 def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
-                        cadastro_area, rede, cotas_clientes, cotas_area, exibir_rotulos=True):
-    """ÚNICO mapa: consulta, desenho, matrículas, ativos e recorte de rede."""
+                        rede, cotas, exibir_rotulos=True):
+    """Mapa único: só matrículas pesquisadas; demais matrículas apenas na tabela."""
     from shapely.geometry import mapping
 
     lats = clientes["_lat"].astype(float).tolist()
@@ -1128,41 +1126,15 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
                        tooltip=folium.GeoJsonTooltip(fields=["nome"], aliases=["Trecho:"],
                                                      sticky=True)).add_to(mapa)
 
-    selecionadas = {str(v) for v in clientes["NUM_LIGACAO"].astype(str)}
-    grupo_area = folium.FeatureGroup(name="Outras matrículas no perímetro", show=True)
-    avisos_outras = 0
-    for i, linha in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
-        matricula = str(linha.get("NUM_LIGACAO", ""))
-        if matricula in selecionadas:
-            continue
-        lat = _coordenada(linha.get("COD_LATITUDE"), "lat")
-        lon = _coordenada(linha.get("COD_LONGITUDE"), "lon")
-        if lat is None or lon is None:
-            continue
-        cota = cotas_area.get((lat, lon))
-        elevacao = _m8_formatar_cota(cota)
-        pop = (f"<b>Matrícula:</b> {html_escape(matricula)}<br>"
-               f"<b>Endereço:</b> {html_escape(str(linha.get('END_LIGACAO', '')))}<br>"
-               f"<b>Bairro:</b> {html_escape(str(linha.get('BAIRRO', '')))}<br>"
-               f"<b>Categoria:</b> {html_escape(str(linha.get('CATEGORIA', '')))}"
-               + (f"<br><b>Cota da superfície:</b> {elevacao}" if elevacao else ""))
-        folium.CircleMarker([lat, lon], radius=4, color="#ffffff", weight=1,
-                            fill=True, fill_color="#199e53", fill_opacity=.95,
-                            tooltip=f"Matrícula {matricula}"+(f" • {elevacao}" if elevacao else ""),
-                            popup=folium.Popup(pop, max_width=350)).add_to(grupo_area)
-        if exibir_rotulos and avisos_outras < LIMITE_ROTULOS_AREA:
-            _m8_adicionar_rotulo(grupo_area, lat, lon,
-                                 f"{matricula} • {elevacao}" if elevacao else matricula,
-                                 deslocamento=9)
-            avisos_outras += 1
-    if not cadastro_area.empty:
-        grupo_area.add_to(mapa)
+    # Os demais registros do polígono são apresentados apenas na tabela e no CSV.
+    # Nunca criar marcadores ou rótulos para centenas de matrículas da área.
+    # Assim, a leitura visual prioriza a matrícula pesquisada e os equipamentos.
 
     grupo_clientes = folium.FeatureGroup(name="Matrículas consultadas", show=True)
     for _, linha in clientes.iterrows():
         lat, lon = float(linha["_lat"]), float(linha["_lon"])
         matricula = str(linha["NUM_LIGACAO"])
-        cota = cotas_clientes.get((lat, lon))
+        cota = cotas.get((lat, lon))
         elevacao = _m8_formatar_cota(cota)
         pop = _popup_cliente(linha)
         if elevacao:
@@ -1184,13 +1156,20 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
         filtrados = [ativo for ativo in ativos if ativo.get("_tipo") == tipo]
         for i, ativo in enumerate(filtrados[:LIMITE_EQUIPAMENTOS_MAPA]):
             lat, lon = float(ativo["_lat"]), float(ativo["_lon"])
-            folium.Marker([lat, lon], popup=folium.Popup(_popup_ativo(ativo), max_width=360),
-                          tooltip=f"{tipo}: {str(ativo.get('IDENTIFICACAO_ATIVO', ''))}",
+            nome = str(ativo.get("IDENTIFICACAO_ATIVO") or ativo.get("_nome") or "").strip()
+            elevacao = _m8_formatar_cota(cotas.get((lat, lon)))
+            # A cota é do terreno (DSM/MDE), nunca a altitude hidráulica do ativo.
+            popup = _popup_ativo(ativo)
+            if elevacao:
+                popup += f"<div><b>Cota da superfície:</b> {elevacao}</div>"
+            tooltip = f"{tipo}: {nome}" + (f" • {elevacao}" if elevacao else "")
+            folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=360),
+                          tooltip=tooltip,
                           icon=folium.Icon(color=cor, icon=icone, prefix="fa")).add_to(grupo)
-            if exibir_rotulos and i < 110:
-                nome = str(ativo.get("IDENTIFICACAO_ATIVO") or ativo.get("_nome") or "").strip()
-                if nome:
-                    _m8_adicionar_rotulo(grupo, lat, lon, nome[:36], tipo="ativo", deslocamento=17)
+            if exibir_rotulos and i < 110 and nome:
+                texto_rotulo = f"{nome[:36]} • {elevacao}" if elevacao else nome[:36]
+                _m8_adicionar_rotulo(grupo, lat, lon, texto_rotulo,
+                                     tipo="ativo", deslocamento=17)
         grupo.add_to(mapa)
 
     Draw(export=False, position="topleft",
@@ -1218,7 +1197,7 @@ def exibir_consulta_operacional() -> None:
     if st.button("⬅️ Voltar ao Menu Principal", key="m8_voltar_menu"):
         st.switch_page("app.py")
     st.title("🔍 Consulta Operacional — Matrículas e Rede")
-    st.caption("Uma única visualização • Cadastro de matrículas • Rede por perímetro • Somente leitura")
+    st.caption("Mapa unificado • Matrículas da área em tabela • Equipamentos com elevação • Somente leitura")
     if _arquivo_matriculas() is None and _arquivo_sqlite_publicado() is None:
         st.error("Base cadastral ausente: dados/matriculas.xlsx, matriculas.xls ou matriculas.sqlite.")
         return
@@ -1355,15 +1334,18 @@ def exibir_consulta_operacional() -> None:
     ativos_area = _m8_ativos_na_area(area, bases)
     ativos = _m8_unir_ativos(ativos_perto, ativos_area)
 
-    # Cotas são amostradas somente para os pontos efetivamente renderizados.
-    coords_selecionadas = tuple((float(r["_lat"]), float(r["_lon"])) for _, r in validos.iterrows())
-    coords_area = []
-    for _, r in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
-        lat = _coordenada(r.get("COD_LATITUDE"), "lat")
-        lon = _coordenada(r.get("COD_LONGITUDE"), "lon")
-        if lat is not None and lon is not None:
-            coords_area.append((lat, lon))
-    coords_para_cotas = tuple(dict.fromkeys([*coords_selecionadas, *coords_area]))
+    # As cotas do DSM/MDE são calculadas apenas para matrículas consultadas
+    # e equipamentos que serão desenhados no mapa. Matrículas adicionais do
+    # polígono ficam exclusivamente na tabela, evitando leituras desnecessárias.
+    coords_selecionadas = [(float(r["_lat"]), float(r["_lon"])) for _, r in validos.iterrows()]
+    coords_equipamentos = []
+    for tipo in ("Poço / Ativo", "Logger"):
+        equipamento_tipo = [a for a in ativos if a.get("_tipo") == tipo]
+        coords_equipamentos.extend(
+            (float(a["_lat"]), float(a["_lon"]))
+            for a in equipamento_tipo[:LIMITE_EQUIPAMENTOS_MAPA]
+        )
+    coords_para_cotas = tuple(dict.fromkeys([*coords_selecionadas, *coords_equipamentos]))
     try:
         cotas, avisos_cota = _m8_cotas_automaticas(coords_para_cotas)
         mapa_cotas = dict(zip(coords_para_cotas, cotas))
@@ -1409,10 +1391,10 @@ def exibir_consulta_operacional() -> None:
         else:
             st.warning("Arquivo dados/Rede_Agua_THE.kmz não encontrado no repositório.")
 
-    rotulos = st.checkbox("Exibir rótulos das matrículas, ativos e loggers", value=True,
+    rotulos = st.checkbox("Exibir rótulos das matrículas consultadas e equipamentos", value=True,
                          key="m8_integrado_rotulos")
     mapa = _m8_mapa_unificado(validos, ativos, raio, bairros, influencias, area,
-                              cadastro_area, rede, mapa_cotas, mapa_cotas, rotulos)
+                              rede, mapa_cotas, rotulos)
     retorno = st_folium(
         mapa, width=None, height=660, returned_objects=["all_drawings"],
         key=f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}",
@@ -1446,12 +1428,8 @@ def exibir_consulta_operacional() -> None:
                 data=cadastro_area[colunas].to_csv(index=False, sep=";").encode("utf-8-sig"),
                 file_name="matriculas_perimetro_PRISMA.csv", mime="text/csv",
                 key="m8_exportar_poligono")
-            if len(cadastro_area) > LIMITE_MARCADORES_AREA:
-                st.caption(f"Para o mapa não ficar pesado, aparecem os primeiros {LIMITE_MARCADORES_AREA} "
-                           "marcadores do perímetro; a tabela e o CSV incluem todos os registros.")
-            if len(cadastro_area) > LIMITE_ROTULOS_AREA:
-                st.caption(f"Os rótulos das outras matrículas são limitados a {LIMITE_ROTULOS_AREA}. "
-                           "Os rótulos das matrículas consultadas têm prioridade.")
+            st.caption("As matrículas adicionais do polígono são exibidas somente nesta tabela e no CSV. "
+                       "O mapa mantém os marcadores das matrículas pesquisadas e dos equipamentos.")
 
     st.markdown("#### Equipamentos próximos")
     if ativos:
