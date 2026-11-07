@@ -169,9 +169,38 @@ def storage_request(base: str, chave: str, bucket: str, caminho: str, metodo: st
         with urlopen(req, timeout=60) as resposta:
             return resposta.read()
     except HTTPError as erro:
-        if metodo == "GET" and erro.code == 404:
+        # Algumas versões do Supabase Storage retornam HTTP 400 com
+        # "error": "not_found" e "message": "Object not found" para arquivo
+        # inexistente. Esse caso pode iniciar um upload novo; todos os demais
+        # erros devem interromper o processamento (incluindo autenticação/RLS).
+        try:
+            resposta_erro = json.loads(erro.read(2048).decode("utf-8", errors="replace"))
+        except (ValueError, UnicodeDecodeError):
+            resposta_erro = {}
+        if not isinstance(resposta_erro, dict):
+            resposta_erro = {}
+        codigo = str(resposta_erro.get("code") or resposta_erro.get("error") or "").lower()
+        mensagem = str(resposta_erro.get("message") or "").lower()
+        ausencia_confirmada = (
+            erro.code in (400, 404)
+            and (
+                codigo in ("nosuchkey", "not_found", "404")
+                and ("object not found" in mensagem or "no such key" in mensagem)
+            )
+        )
+        if metodo == "GET" and ausencia_confirmada:
             return None
-        raise RuntimeError(f"Supabase Storage retornou HTTP {erro.code} na operação {metodo}.") from erro
+        # Não colocar no log a resposta original: pode incluir parâmetros
+        # confidenciais. Exibe apenas um código padronizado e conhecido.
+        codigos_permitidos = {
+            "invalidjwt", "invalid_jwt", "accessdenied", "unauthorized",
+            "invalidrequest", "nosuchbucket", "invalidapikey", "invalid_api_key",
+            "not_found", "nosuchkey",
+        }
+        detalhe = f"; código={codigo}" if codigo in codigos_permitidos else ""
+        raise RuntimeError(
+            f"Supabase Storage retornou HTTP {erro.code} na operação {metodo}{detalhe}."
+        ) from erro
     except URLError as erro:
         raise RuntimeError("Não foi possível conectar ao Supabase Storage.") from erro
 
