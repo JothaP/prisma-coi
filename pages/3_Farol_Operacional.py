@@ -325,10 +325,10 @@ def evento_abrange_municipio(valor):
 def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
     """Lê bairros informados em Áreas Impactadas e valida contra a base local.
 
-    Reconhece também o rótulo 'Áreas Afetadas' e listas abreviadas como
-    'Itararé 1 e 2', mas só desdobra nomes quando AMBOS existem nos polígonos
-    do mesmo município. Nomes sem correspondência são mantidos no resultado,
-    permitindo diagnosticá-los sem inventar uma localização.
+    Reconhece o rótulo 'Áreas Afetadas' mesmo precedido pelo município.
+    Desdobra 'Itararé 1 e 2' em dois bairros, independentemente da cobertura
+    geográfica: cada bairro é validado separadamente ao desenhar o mapa.
+    Preserva rótulos sem polígono no diagnóstico, sem inventar geometrias.
     """
     if valor is None or str(valor).strip().lower() in ("", "nan", "none"):
         return []
@@ -352,19 +352,23 @@ def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
         parcial = bool(re.search(r"\(\s*PARCIAL\s*\)", original, flags=re.I))
         chave = resolver_nome_bairro(original, nomes)
         candidatos = [(chave, original)]
-        if nomes and chave not in nomes:
-            # Abreviação verificável: 'ITARARÉ 1 E 2' -> ITARARÉ 1, ITARARÉ 2.
+        if chave not in nomes:
+            # A enumeração numérica explícita é inequívoca, mesmo se um ou
+            # ambos os polígonos estiverem ausentes do cadastro cartográfico.
+            # Isso permite marcar o bairro disponível e diagnosticar o ausente.
             abreviado = re.fullmatch(r"(.+?)\s+(\d+)\s+E\s+(\d+)", chave)
             if abreviado:
                 radical, numero_1, numero_2 = abreviado.groups()
-                dois_bairros = [f"{radical} {numero_1}", f"{radical} {numero_2}"]
-                if all(p in nomes for p in dois_bairros):
-                    candidatos = [(p, p) for p in dois_bairros]
-            if candidatos == [(chave, original)]:
-                # Ex.: 'BAIRRO SÃO DOMINGOS E GUABIRABA'. Não separa o 'E'
-                # de um nome composto se as duas partes não forem reconhecidas.
+                candidatos = [(f"{radical} {numero_1}", f"{radical} {numero_1}"),
+                              (f"{radical} {numero_2}", f"{radical} {numero_2}")]
+            else:
+                # Separar 'Bairro São Domingos e Guabiraba' é uma intenção
+                # explícita do campo; nos demais nomes só separar se TODOS os
+                # componentes existirem no catálogo do mesmo município.
                 pedacos = [resolver_nome_bairro(p, nomes) for p in re.split(r"\s+E\s+", chave)]
-                if len(pedacos) >= 2 and all(p in nomes for p in pedacos):
+                lista_explicita = bool(re.match(r"^BAIRRO\b", normalizar_texto(original)))
+                if len(pedacos) >= 2 and (lista_explicita or
+                                          (nomes and all(p in nomes for p in pedacos))):
                     candidatos = [(p, p) for p in pedacos]
         for bairro, origem in candidatos:
             if bairro and bairro not in vistos:
@@ -2303,7 +2307,31 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
             mapa.options["zoom"] = 15
         else:
             mapa.fit_bounds(coordenadas_visiveis, padding=(25, 25), max_zoom=15)
-    folium.LayerControl(collapsed=False).add_to(mapa)
+    # Menu de camadas compacto: mantém todas as opções acessíveis sem
+    # cobrir permanentemente parte do mapa no detalhamento operacional.
+    # O controle se expande ao clicar ou passar o mouse sobre o ícone.
+    mapa.get_root().header.add_child(Element("""
+    <style>
+      .leaflet-control-layers-expanded {
+        padding: 5px 8px !important;
+        max-width: 245px !important;
+        max-height: 52vh !important;
+        overflow-y: auto !important;
+        box-sizing: border-box;
+      }
+      .leaflet-control-layers-list {
+        font-size: 12px !important;
+        line-height: 1.25 !important;
+      }
+      .leaflet-control-layers label {
+        margin-bottom: 2px !important;
+      }
+      .leaflet-control-layers label span {
+        white-space: normal;
+      }
+    </style>
+    """))
+    folium.LayerControl(collapsed=True).add_to(mapa)
     return mapa
 
 
@@ -3474,6 +3502,11 @@ def modal_eventos():
                     for a in areas_diag
                 ])
                 st.dataframe(diagnostico, hide_index=True, width="stretch")
+                encontrados_diag = int((diagnostico["Polígono no município"] == "Encontrado").sum())
+                st.caption(
+                    f"Bairros reconhecidos no arquivo cartográfico: "
+                    f"{encontrados_diag} de {len(diagnostico)} informados no evento."
+                )
                 ausentes = diagnostico.loc[
                     diagnostico["Polígono no município"] == "Não encontrado",
                     "Bairro interpretado",
@@ -3491,6 +3524,14 @@ def modal_eventos():
                 f"Cobertura cartográfica carregada: {len(catalogo_diag)} "
                 "nome(s) distinto(s) de bairro neste município."
             )
+            with st.expander("Ver nomes de bairros existentes na base cartográfica", expanded=False):
+                if catalogo_diag:
+                    st.write(", ".join(sorted(catalogo_diag)))
+                else:
+                    st.warning(
+                        "Nenhum polígono foi carregado para este município. "
+                        "Confira os arquivos de geodados/municipios."
+                    )
 
     # O gráfico utiliza APENAS a cidade selecionada, nunca mistura municípios.
     st.markdown("### Distribuição das O.S. nos bairros impactados")
