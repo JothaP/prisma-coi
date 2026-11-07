@@ -5,6 +5,7 @@ Consulta de matrículas e seleção territorial com rede de água sob demanda.
 - Base de matrículas XLS/XLSX ou SQLite indexado, somente leitura.
 - Índice SQLite local criado SOMENTE na primeira pesquisa caso necessário.
 - Nenhum histórico de consultas, nem escrita no Excel ou em dados de produção.
+- Seleção de área reutiliza o cadastro de matrículas, sem conexão com o Farol.
 - Regiões de influência extraídas exclusivamente dos polígonos KMZ/KML.
 """
 from __future__ import annotations
@@ -65,7 +66,7 @@ ARQUIVO_REDE_AGUA = PASTA_DADOS / "Rede_Agua_THE.kmz"
 # Não envia rede de toda a cidade ao navegador. Limites protetivos por consulta.
 LIMITE_REDE_TRECHOS = 4000
 LIMITE_REDE_VERTICES = 90000
-LIMITE_MARCADORES_OS = 800
+LIMITE_MARCADORES_AREA = 800
 
 COLUNAS_MATRICULAS = (
     "CATEGORIA", "NUM_LIGACAO", "BAIRRO",
@@ -780,7 +781,7 @@ def _validar_area_selecionada(geometria):
 
 
 def _mapa_selecao_area(geometria=None, permitir_desenho=False) -> folium.Map:
-    """Mapa leve: não contém a camada de rede nem os registros do Farol."""
+    """Mapa leve: sem rede ou cadastros; carregamento apenas sob demanda."""
     mapa = folium.Map(location=[-5.0892, -42.8019], zoom_start=12,
                       control_scale=True, tiles="OpenStreetMap")
     if geometria is not None:
@@ -927,56 +928,69 @@ def _rede_recortada_kmz(assinatura: tuple[str, int, int], area_wkb: bytes,
             "limitado": atingiu_limite, "arquivos_kml": quantidade_kml}
 
 
-@st.cache_data(ttl=120, max_entries=2, show_spinner=False)
-def _ler_os_farol_para_area(id_planilha: str) -> pd.DataFrame:
-    """Lê somente a aba PONTOS do Farol, sem gravar ou modificar registros."""
-    import gspread
-    from google.oauth2.service_account import Credentials
+@st.cache_data(show_spinner=False, max_entries=12)
+def _consultar_cadastro_no_poligono(assinatura_indice: tuple[str, int, int], area_wkb: bytes) -> pd.DataFrame:
+    """Consulta espacial somente leitura no MESMO índice da pesquisa de matrícula.
 
-    conf = st.secrets["gcp_json"]
-    if isinstance(conf, str):
-        conf = json.loads(conf)
-    else:
-        conf = dict(conf)
-    creds = Credentials.from_service_account_info(
-        conf, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-    registros = (gspread.authorize(creds).open_by_key(id_planilha)
-                 .worksheet("PONTOS").get_all_values())
-    if not registros:
-        return pd.DataFrame()
-    cabecalho = [str(c).strip() for c in registros[0]]
-    dados = [linha[:len(cabecalho)] + [""] * max(0, len(cabecalho) - len(linha))
-             for linha in registros[1:] if any(str(c).strip() for c in linha)]
-    return pd.DataFrame(dados, columns=cabecalho)
-
-
-def _filtrar_os_no_poligono(base: pd.DataFrame, area):
-    """Usa coordenadas reais; inclui pontos na borda e todas as situações de O.S."""
+    A planilha dados/matriculas.xlsx (ou o índice SQLite dela) é a única fonte.
+    Usa envelope na consulta SQL para evitar transferir o cadastro inteiro para
+    o Python, seguido de teste geométrico exato, incluindo pontos na borda.
+    Não abre planilha do Farol, não cria O.S. e não escreve dados de produção.
+    """
+    from shapely import wkb
     from shapely.geometry import Point
     from shapely.prepared import prep
 
-    if base is None or base.empty:
-        return pd.DataFrame(), 0
-    essenciais = {"Latitude", "Longitude", "Nº da O.S"}
-    ausentes = essenciais - set(base.columns)
-    if ausentes:
-        raise ValueError("Aba PONTOS sem coluna(s): " + ", ".join(sorted(ausentes)))
-    lat = base["Latitude"].map(lambda v: _coordenada(v, "lat"))
-    lon = base["Longitude"].map(lambda v: _coordenada(v, "lon"))
-    validas = lat.notna() & lon.notna()
-    ignoradas = int((~validas).sum())
+    area = wkb.loads(area_wkb)
     xmin, ymin, xmax, ymax = area.bounds
-    candidatas = base.loc[validas & lat.between(ymin, ymax) & lon.between(xmin, xmax)].copy()
-    if candidatas.empty:
-        return candidatas, ignoradas
+    # O índice original guarda coordenadas como texto e recebe dados com
+    # ponto ou vírgula. A conversão SQL faz uma pré-seleção rápida; coordenadas
+    # de formatação mista (ambos separadores) são conferidas no Python, evitando
+    # falsos negativos por conversão simplificada no SQLite.
+    consulta_sql = """
+        SELECT CATEGORIA, NUM_LIGACAO, BAIRRO,
+               COD_LATITUDE, COD_LONGITUDE, END_LIGACAO
+        FROM matriculas
+        WHERE (
+            CAST(REPLACE(COD_LATITUDE, ',', '.') AS REAL) BETWEEN ? AND ?
+            AND CAST(REPLACE(COD_LONGITUDE, ',', '.') AS REAL) BETWEEN ? AND ?
+        ) OR (
+            (INSTR(COD_LATITUDE, ',') > 0 AND INSTR(COD_LATITUDE, '.') > 0)
+            OR (INSTR(COD_LONGITUDE, ',') > 0 AND INSTR(COD_LONGITUDE, '.') > 0)
+        )
+    """
+    registros = []
     preparado = prep(area)
-    dentro = [preparado.covers(Point(float(lon.at[i]), float(lat.at[i])))
-              for i in candidatas.index]
-    return candidatas.loc[dentro].copy().reset_index(drop=True), ignoradas
+    with _conexao_leitura(Path(assinatura_indice[0])) as conexao:
+        # Chunks evitam ocupar a memória com candidatos volumosos.
+        cursor = conexao.execute(consulta_sql, (ymin, ymax, xmin, xmax))
+        while True:
+            lote = cursor.fetchmany(6000)
+            if not lote:
+                break
+            for categoria, matricula, bairro, latitude, longitude, endereco in lote:
+                lat = _coordenada(latitude, "lat")
+                lon = _coordenada(longitude, "lon")
+                if lat is None or lon is None:
+                    continue
+                if not (ymin <= lat <= ymax and xmin <= lon <= xmax):
+                    continue
+                if not preparado.covers(Point(lon, lat)):
+                    continue
+                registros.append((str(categoria or ""), str(matricula or ""),
+                                  str(bairro or ""), str(latitude or ""),
+                                  str(longitude or ""), str(endereco or "")))
+    return pd.DataFrame(registros, columns=list(COLUNAS_MATRICULAS))
 
 
-def _mapa_rede_e_os(area, rede: dict | None, os_area: pd.DataFrame) -> folium.Map:
-    """Apresenta apenas feições já recortadas e amostra limitada de marcadores."""
+def _matriculas_na_area(area):
+    """Reutiliza o índice e metadados já empregados na pesquisa individual."""
+    indice, metadados = _indice_matriculas()
+    return _consultar_cadastro_no_poligono(_assinatura(indice), area.wkb), metadados
+
+
+def _mapa_rede_e_cadastro(area, rede: dict | None, cadastro_area: pd.DataFrame) -> folium.Map:
+    """Mapa com rede recortada e matrícula(s) do mesmo cadastro indexado."""
     from shapely.geometry import mapping
 
     xmin, ymin, xmax, ymax = area.bounds
@@ -989,32 +1003,36 @@ def _mapa_rede_e_os(area, rede: dict | None, os_area: pd.DataFrame) -> folium.Ma
         folium.GeoJson(rede["geojson"], name="Rede de água (recorte)", show=True,
                        style_function=lambda _: {"color": "#0868b3", "weight": 2.5,
                                                   "opacity": .85}).add_to(mapa)
-    grupo = folium.FeatureGroup(name="O.S. dentro do polígono", show=True)
-    for _, linha in os_area.head(LIMITE_MARCADORES_OS).iterrows():
-        lat, lon = _coordenada(linha.get("Latitude"), "lat"), _coordenada(linha.get("Longitude"), "lon")
+    grupo = folium.FeatureGroup(name="Matrículas dentro do polígono", show=True)
+    for _, linha in cadastro_area.head(LIMITE_MARCADORES_AREA).iterrows():
+        lat = _coordenada(linha.get("COD_LATITUDE"), "lat")
+        lon = _coordenada(linha.get("COD_LONGITUDE"), "lon")
         if lat is None or lon is None:
             continue
-        numero = html_escape(str(linha.get("Nº da O.S", "")))
-        status = html_escape(str(linha.get("Status OS", "")))
-        matricula = html_escape(str(linha.get("Matrícula", "")))
+        matricula = html_escape(str(linha.get("NUM_LIGACAO", "")))
+        bairro = html_escape(str(linha.get("BAIRRO", "")))
+        endereco = html_escape(str(linha.get("END_LIGACAO", "")))
+        categoria = html_escape(str(linha.get("CATEGORIA", "")))
         folium.CircleMarker([lat, lon], radius=4.5, weight=1,
-                            color="#ffffff", fill=True, fill_color="#f18b22",
-                            fill_opacity=.95, tooltip=f"O.S.: {numero}",
-                            popup=folium.Popup(f"<b>O.S.:</b> {numero}<br>"
-                                               f"<b>Matrícula:</b> {matricula}<br>"
-                                               f"<b>Status:</b> {status}", max_width=320)).add_to(grupo)
+                            color="#ffffff", fill=True, fill_color="#16a34a",
+                            fill_opacity=.95, tooltip=f"Matrícula: {matricula}",
+                            popup=folium.Popup(f"<b>Matrícula:</b> {matricula}<br>"
+                                               f"<b>Bairro:</b> {bairro}<br>"
+                                               f"<b>Endereço:</b> {endereco}<br>"
+                                               f"<b>Categoria:</b> {categoria}",
+                                               max_width=360)).add_to(grupo)
     grupo.add_to(mapa)
     mapa.fit_bounds([[ymin, xmin], [ymax, xmax]], padding=(20, 20))
     folium.LayerControl(collapsed=True).add_to(mapa)
     return mapa
 
 
-def exibir_selecao_area_rede_os() -> None:
-    """Área selecionada, O.S. no polígono e rede sob demanda, sem depender de matrícula."""
-    st.subheader("🗺️ Seleção de área — Rede de água e O.S.")
+def exibir_selecao_area_rede_cadastro() -> None:
+    """Área selecionada, registros cadastrais no polígono e rede sob demanda."""
+    st.subheader("🗺️ Seleção de área — Rede de água e matrículas")
     st.caption("Selecione um bairro de Teresina ou desenhe um polígono. "
-               "As O.S. são filtradas pelas coordenadas, incluindo pontos na borda. "
-               "A rede só será lida quando você solicitar sua exibição.")
+               "Os registros de dados/matriculas.xlsx são filtrados pelas coordenadas, "
+               "incluindo pontos na borda. A rede só será lida quando solicitada.")
 
     modo = st.radio("Como deseja selecionar a área?",
                     ("Selecionar bairro", "Desenhar polígono"), horizontal=True,
@@ -1039,7 +1057,7 @@ def exibir_selecao_area_rede_os() -> None:
                 st.warning(f"Não foi possível carregar os bairros: {erro}")
     else:
         st.info("Use a ferramenta de polígono ou retângulo no canto superior esquerdo "
-                "do mapa. Ao finalizar o desenho, clique em Consultar O.S. da área.")
+                "do mapa. Ao finalizar o desenho, clique em Consultar matrículas da área.")
         wkb_desenho = st.session_state.get("m8_poligono_desenhado")
         if wkb_desenho:
             from shapely import wkb
@@ -1074,7 +1092,7 @@ def exibir_selecao_area_rede_os() -> None:
                 continue
 
     if area is None:
-        st.caption("Selecione a área antes de consultar as O.S. ou a rede.")
+        st.caption("Selecione a área antes de consultar as matrículas ou a rede.")
         return
     area, erro_area = _validar_area_selecionada(area)
     if erro_area:
@@ -1084,55 +1102,53 @@ def exibir_selecao_area_rede_os() -> None:
     nome = bairro_area or "Área desenhada"
     area_id = hashlib.sha256(area.wkb).hexdigest()
     st.caption(f"Área selecionada: **{nome}**")
-    if st.button("🔎 Consultar O.S. dentro da área", key="m8_consultar_os_area", type="primary"):
+    if st.button("🔎 Consultar matrículas dentro da área", key="m8_consultar_matriculas_area", type="primary"):
         st.session_state["m8_area_consultada"] = {"nome": nome, "wkb": area.wkb, "id": area_id}
         st.session_state.pop("m8_rede_carregada_id", None)
 
     consulta = st.session_state.get("m8_area_consultada")
     if not consulta or consulta["id"] != area_id:
-        st.info("Clique em Consultar O.S. dentro da área para obter a listagem correspondente.")
+        st.info("Clique em Consultar matrículas dentro da área para obter a listagem correspondente.")
         return
 
-    id_farol = str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip()
-    os_area = pd.DataFrame()
-    if not id_farol:
-        st.warning("Configure 'farol_producao_spreadsheet_id' nos Secrets do PRISMA "
-                   "para consultar a aba PONTOS do Farol.")
-    else:
-        try:
-            with st.spinner("Localizando as O.S. do Farol dentro do polígono..."):
-                base_os = _ler_os_farol_para_area(id_farol)
-                os_area, sem_coords = _filtrar_os_no_poligono(base_os, area)
-            c1, c2, c3 = st.columns(3)
-            c1.metric("O.S. dentro da área", len(os_area))
-            c2.metric("Matrículas distintas", os_area["Matrícula"].astype(str).loc[
-                lambda x: x.str.strip().ne("")].nunique() if "Matrícula" in os_area else 0)
-            c3.metric("O.S. sem coordenadas na base", sem_coords)
-            st.caption("Fonte: aba PONTOS do Módulo Farol. A listagem compreende "
-                       "os registros atualmente mantidos nessa aba (janela operacional de até 8 dias, "
-                       "quando a retenção automática estiver ativa), não todo o histórico do BI. "
-                       "Registros sem coordenadas não podem ser classificados espacialmente.")
-        except Exception as erro:
-            st.error(f"Não foi possível consultar O.S. do Farol: {erro}")
+    cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
+    try:
+        with st.spinner("Identificando matrículas do cadastro dentro do polígono..."):
+            cadastro_area, metadados = _matriculas_na_area(area)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Registros na área", len(cadastro_area))
+        c2.metric("Matrículas distintas", cadastro_area["NUM_LIGACAO"].nunique())
+        c3.metric("Bairros identificados", cadastro_area["BAIRRO"].loc[
+            lambda x: x.str.strip().ne("")].nunique())
+        st.caption("Fonte exclusiva: cadastro de matrículas do Módulo 8 "
+                   f"({metadados.get('fonte', 'dados/matriculas.sqlite')}). "
+                   "Não existe vínculo com o Farol, histórico de O.S. ou Google Sheets.")
+        st.caption("A estrutura atualmente lida do cadastro contém matrícula, categoria, "
+                   "bairro, endereço e coordenadas; não contém número/status de O.S. "
+                   "Por isso, os registros são mostrados como matrículas, não como ordens de serviço.")
+    except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
+        st.error(f"Não foi possível consultar o cadastro de matrículas da área: {erro}")
 
-    if os_area.empty:
-        st.info("Nenhuma O.S. com coordenadas dentro do polígono na base disponível.")
+    if cadastro_area.empty:
+        st.info("Nenhum registro cadastral com coordenadas dentro do polígono selecionado.")
     else:
-        st.markdown("#### O.S. encontradas no polígono")
-        preferidas = ("Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS",
-                      "Dt. Emissão", "Serviço Executado", "Latitude", "Longitude")
-        exibidas = [col for col in preferidas if col in os_area.columns]
-        st.dataframe(os_area.loc[:, exibidas], hide_index=True, use_container_width=True)
-        csv = os_area.loc[:, exibidas].to_csv(index=False, sep=";").encode("utf-8-sig")
-        st.download_button("⬇️ Exportar O.S. da área (CSV)", data=csv,
-                           file_name="os_area_selecionada.csv", mime="text/csv",
-                           key="m8_baixar_os_area")
+        st.markdown("#### Matrículas encontradas no polígono")
+        exibidas = list(COLUNAS_MATRICULAS)
+        st.dataframe(cadastro_area.loc[:, exibidas].rename(columns={
+            "CATEGORIA": "Categoria", "NUM_LIGACAO": "Matrícula", "BAIRRO": "Bairro",
+            "COD_LATITUDE": "Latitude", "COD_LONGITUDE": "Longitude",
+            "END_LIGACAO": "Endereço"
+        }), hide_index=True, use_container_width=True)
+        csv = cadastro_area.loc[:, exibidas].to_csv(index=False, sep=";").encode("utf-8-sig")
+        st.download_button("⬇️ Exportar matrículas da área (CSV)", data=csv,
+                           file_name="matriculas_area_selecionada.csv", mime="text/csv",
+                           key="m8_baixar_matriculas_area")
 
     st.markdown("#### Rede de água da área selecionada")
     rede = None
     if not ARQUIVO_REDE_AGUA.is_file():
         st.warning("Arquivo não encontrado: dados/Rede_Agua_THE.kmz. "
-                   "A listagem de O.S. continua disponível sem a rede.")
+                   "A listagem cadastral continua disponível sem a rede.")
     else:
         ativo = st.session_state.get("m8_rede_carregada_id") == area_id
         col1, col2 = st.columns([2, 1])
@@ -1161,11 +1177,12 @@ def exibir_selecao_area_rede_os() -> None:
             except Exception as erro:
                 st.error(f"Não foi possível ler o KMZ da rede: {erro}")
 
-    st_folium(_mapa_rede_e_os(area, rede, os_area), width=None, height=610,
+    st_folium(_mapa_rede_e_cadastro(area, rede, cadastro_area), width=None, height=610,
               returned_objects=[], key="m8_mapa_resultado_area")
-    if len(os_area) > LIMITE_MARCADORES_OS:
-        st.caption(f"Para manter o mapa responsivo, foram desenhadas somente as primeiras "
-                   f"{LIMITE_MARCADORES_OS} O.S. A tabela e o CSV contêm todas as O.S. localizadas.")
+    if len(cadastro_area) > LIMITE_MARCADORES_AREA:
+        st.caption("Para manter o mapa responsivo, foram desenhados apenas os primeiros "
+                   f"{LIMITE_MARCADORES_AREA} marcadores. A tabela e o CSV "
+                   "contêm todos os registros cadastrais localizados.")
     st.caption("Rede recortada por interseção geográfica, sem editar o KMZ original. "
                "A presença de uma tubulação no polígono não comprova que ela abasteça cada matrícula.")
 
@@ -1184,10 +1201,10 @@ def exibir_consulta_operacional() -> None:
     st.title("🔍 Consulta Operacional")
     st.caption("Teresina • Consultas somente leitura • Sem histórico de consultas")
     ferramenta = st.radio("Ferramenta de consulta",
-                          ("Pesquisa de matrículas", "Seleção de área — Rede e O.S."),
+                          ("Pesquisa de matrículas", "Seleção de área — Rede e Matrículas"),
                           horizontal=True, key="m8_ferramenta")
-    if ferramenta == "Seleção de área — Rede e O.S.":
-        exibir_selecao_area_rede_os()
+    if ferramenta == "Seleção de área — Rede e Matrículas":
+        exibir_selecao_area_rede_cadastro()
     else:
         exibir_consulta_por_matricula()
 
@@ -1352,7 +1369,7 @@ def exibir_consulta_por_matricula() -> None:
                    "Quando há sobreposições, todas as áreas correspondentes são apresentadas.")
     else:
         st.info("A base de áreas de influência ainda não está disponível para cruzamento geográfico.")
-    st.caption("Para visualizar a rede de água e O.S. por perímetro, use Seleção de área — Rede e O.S.")
+    st.caption("Para visualizar a rede de água e matrículas por perímetro, use Seleção de área — Rede e Matrículas.")
 
 
 exibir_consulta_operacional()
