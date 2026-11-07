@@ -828,11 +828,28 @@ def ri_bp_carregar_poligonos_sanear(caminho: str, versao: int):
 
 
 def ri_bp_mapa(base):
-    """Mapa de pontos, incluindo também as medições entre 10 e 15 MCA."""
-    validos=base.dropna(subset=["Latitude","Longitude","_pressao"]).copy()
-    if validos.empty:return None
-    mapa=folium.Map(location=[float(validos["Latitude"].mean()),float(validos["Longitude"].mean())],
-        zoom_start=12,tiles="OpenStreetMap",control_scale=True,zoom_control=False)
+    """Mapa de aferições com coordenadas numéricas (Sheets aceita vírgula decimal).
+
+    Nunca calcula a média das colunas brutas Latitude/Longitude: quando são
+    strings, pandas pode concatená-las e falhar ao converter o resultado.
+    Utiliza as coordenadas já normalizadas de preparar_pressao quando existem;
+    a conversão local também protege chamadas de outras rotinas do PDF.
+    """
+    if base is None or base.empty:
+        return None
+    validos = base.copy()
+    coluna_lat = "_lat" if "_lat" in validos.columns else "Latitude"
+    coluna_lon = "_lon" if "_lon" in validos.columns else "Longitude"
+    if coluna_lat not in validos.columns or coluna_lon not in validos.columns:
+        return None
+    validos["Latitude"] = validos[coluna_lat].map(lambda valor: coordenada(valor, "lat"))
+    validos["Longitude"] = validos[coluna_lon].map(lambda valor: coordenada(valor, "lon"))
+    validos = validos.dropna(subset=["Latitude", "Longitude", "_pressao"])
+    if validos.empty:
+        return None
+    mapa = folium.Map(
+        location=[float(validos["Latitude"].mean()), float(validos["Longitude"].mean())],
+        zoom_start=12, tiles="OpenStreetMap", control_scale=True, zoom_control=False)
     posicoes=[]
     for _,r in validos.iterrows():
         lat=float(r["Latitude"]);lon=float(r["Longitude"])
