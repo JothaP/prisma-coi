@@ -276,8 +276,14 @@ def slug_hash(*valores):
 
 
 def limpar_nome_bairro(valor):
+    """Chave única para O.S., eventos e feições, sem o rótulo genérico BAIRRO.
+
+    Preserva o nome original de exibição em `bairro["nome"]` e remove apenas
+    o prefixo isolado no começo, nunca a palavra dentro do nome do bairro.
+    """
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
+    texto = re.sub(r"^BAIRRO(?:\s*[-–—:]\s*|\s+)", "", texto)
     texto = re.sub(r"\s+", " ", texto).strip(" \t.,;:!?")
     return texto
 
@@ -1465,7 +1471,15 @@ def descobrir_kmz():
             assinaturas.append((caminho, info.st_size, info.st_mtime_ns))
         except OSError:
             continue
-    return carregar_geometrias_municipais(tuple(assinaturas))
+    # Recalcula a chave de cada feição inclusive se o GeoPackage/KMZ tiver
+    # sido recuperado de um cache criado antes da normalização do prefixo.
+    # `nome` permanece intacto para rótulos e pop-ups do mapa.
+    geometrias = carregar_geometrias_municipais(tuple(assinaturas))
+    for bairro in geometrias:
+        bairro["nome_normalizado"] = limpar_nome_bairro(
+            bairro.get("nome") or bairro.get("nome_normalizado", "")
+        )
+    return geometrias
 
 
 def ponto_em_poligono(lat, lon, poligono):
