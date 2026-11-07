@@ -1,0 +1,31 @@
+name: PRISMA - Testes da leitura híbrida de pressões
+
+on:
+  pull_request:
+    paths:
+      - 'historico_pressao_supabase.py'
+      - 'pages/1_Baixa_Pressao.py'
+      - 'pages/2_Mapeamento_Pressao.py'
+      - 'tests/test_leitura_hibrida_pressao.py'
+      - '.github/workflows/testes_leitura_hibrida_pressao.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar dependencias dos testes
+        run: python -m pip install openpyxl requests
+      - name: Verificar sintaxe dos dois modulos e do leitor
+        run: |
+          python -m py_compile historico_pressao_supabase.py pages/1_Baixa_Pressao.py pages/2_Mapeamento_Pressao.py
+      - name: Testar leitura hibrida sem acessar dados privados
+        run: python -m unittest discover -s tests -p 'test_leitura_hibrida_pressao.py' -v
