@@ -250,7 +250,12 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except FalhaAuditoria as exc:
+        # Mensagens de controle sem valores operacionais.
+        print(f"FALHA NA AUDITORIA: {exc}", file=sys.stderr)
+        sys.exit(1)
     except Exception as exc:
-        # Logs mostram só classe e mensagem controlada; nunca conteúdo de registros.
-        print(f"FALHA NA AUDITORIA: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # Bibliotecas externas podem incluir URLs e parâmetros em mensagens.
+        # Não divulgar dados operacionais nos logs de repositório público.
+        print(f"FALHA NA AUDITORIA: {type(exc).__name__}", file=sys.stderr)
         sys.exit(1)
