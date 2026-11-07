@@ -2463,8 +2463,18 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
         if not proximidades.empty else pd.DataFrame()
     )
     relacionados = []
-    if eventos is not None and not eventos.empty and not os_grupo.empty:
-        for _, evento in eventos.iterrows():
+    if (eventos is not None and not eventos.empty and not os_grupo.empty
+            and "Cidade" in eventos.columns and "Cidade" in os_grupo.columns):
+        # Um evento de outro município jamais será associado às O.S. do grupo.
+        # Filtrar primeiro evita reprocessar todas as áreas e geometrias dos
+        # eventos de API/THE/TIM para cada concentração, especialmente em reruns.
+        cidades_do_grupo = {
+            normalizar_municipio(valor) for valor in os_grupo["Cidade"]
+        } - {""}
+        eventos_candidatos = eventos.loc[
+            eventos["Cidade"].map(normalizar_municipio).isin(cidades_do_grupo)
+        ]
+        for _, evento in eventos_candidatos.iterrows():
             if not evento_pertinente_data_analise(evento):
                 continue
             cidade = normalizar_municipio(evento.get("Cidade", ""))
@@ -3111,15 +3121,24 @@ def gerar_pdf_concentracao(concentracao, os_grupo, ativos, eventos_relacionados,
     return buffer.getvalue()
 
 
-def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximidades, eventos, raio, bairros_geograficos=None):
+def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximidades, eventos,
+                                  raio, bairros_geograficos=None, dados_preparados=None):
+    """Renderiza somente a ficha solicitada; reaproveita o cruzamento já calculado.
+
+    Nenhuma outra concentração deve criar tabelas, widgets de logger ou relatórios
+    durante um rerun decorrente da edição do acompanhamento operacional.
+    """
     registro = concentracoes[concentracoes["ID_CONCENTRACAO"] == codigo]
     if registro.empty:
         st.warning("Concentração não encontrada com os filtros atuais.")
         return
     concentracao = registro.iloc[0]
-    os_grupo, ativos, eventos_relacionados = dados_relatorio_concentracao(
-        concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos
-    )
+    if dados_preparados is None:
+        os_grupo, ativos, eventos_relacionados = dados_relatorio_concentracao(
+            concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos
+        )
+    else:
+        os_grupo, ativos, eventos_relacionados = dados_preparados
     cidades = sorted({str(c).strip() for c in os_grupo["Cidade"] if str(c).strip()})
     st.subheader(f"{codigo} — {', '.join(cidades) or 'Município não informado'}")
     st.caption(f"Bairros: {concentracao['BAIRROS'] or 'Não informados'}")
@@ -4747,6 +4766,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     # espacialmente coincidente, se a versão do componente informar.
                     if melhor_concentracao and menor_centro <= 4 and not tooltip_clique.startswith("O.S. "):
                         st.session_state["farol_v2_concentracao"] = melhor_concentracao
+                        st.session_state["farol_v2_detalhe_aberto"] = melhor_concentracao
                         st.session_state["farol_concentracao_expandida"] = melhor_concentracao
                         st.session_state.pop("farol_v2_os_selecionada", None)
                         st.rerun()
@@ -4769,6 +4789,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     ):
                         st.session_state["farol_v2_os_raio_aberto"] = chave_ponto(os_selecionada)
                         st.session_state["farol_v2_concentracao"] = ""
+                        st.session_state["farol_v2_detalhe_aberto"] = ""
                         st.session_state["farol_concentracao_expandida"] = ""
                         st.rerun()
                 # A lista tradicional de concentrações permanece abaixo do mapa.
@@ -4815,7 +4836,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 )
         else:
             st.markdown("### 📋 Análise das Concentrações")
-            st.caption("Expanda uma concentração para consultar O.S., equipamentos, eventos relacionados e baixar o PDF.")
+            st.caption("Expanda uma concentração e clique em **Carregar detalhes** para consultar O.S., equipamentos, eventos e PDFs. Apenas a ficha escolhida é processada.")
             observacoes_df = carregar_observacoes_concentracoes()
             resumo_pdf = concentracoes.copy()
             grupos_os = {chave: quadro for chave, quadro in pontos_cluster.groupby("_grupo", sort=False)} if not pontos_cluster.empty else {}
@@ -4836,12 +4857,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             ])
             for aba, abrangencia in ((aba_the, "THE"), (aba_api, "API"), (aba_tim, "TIM")):
                 with aba:
-                    cidades_abrangencia = sorted({
-                        cidade
-                        for _, conc in concentracoes.iterrows()
-                        for cidade in cidades_da_concentracao(conc, pontos_cluster)
-                        if unidade_da_cidade_farol(cidade) == abrangencia
-                    }, key=normalizar_texto)
                     concentracoes_abrangencia = concentracoes.loc[
                         concentracoes["ID_CONCENTRACAO"].astype(str).str.startswith(f"{abrangencia} ")
                     ].copy()
@@ -4854,7 +4869,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         cidades_grupo = sorted({str(v).strip() for v in os_grupo["Cidade"] if str(v).strip()})
                         qtd_ativos = (int((proximidades["Concentração"] == codigo).sum())
                                       if not proximidades.empty else 0)
-                        _, _, eventos_do_grupo = dados_relatorio_concentracao(
+                        # Calcular o vínculo de eventos uma única vez por concentração.
+                        # A ficha detalhada reutiliza este resultado quando for aberta.
+                        os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
                             concentracao, pontos_cluster, proximidades, df_eventos, bairros
                         )
                         indicador_eventos = (
@@ -4885,11 +4902,18 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             f"{int(concentracao['QTD_MATRICULAS'])} matrículas · "
                             f"{qtd_ativos} ativo(s) próximo(s) · {indicador_eventos} · {indicador_nota}"
                         )
-                        # Preservar TODOS os registros no formato original de expansores.
-                        # Somente a concentração ativa carrega o relatório detalhado,
-                        # evitando gerar tabelas e componentes pesados para as demais.
-                        ativa = str(codigo) == str(st.session_state.get("farol_v2_concentracao", ""))
-                        with st.expander(titulo, expanded=ativa):
+                        # st.expander não faz carregamento preguiçoso: mesmo FECHADO,
+                        # o Streamlit executa todo o conteúdo dentro dele. O detalhamento
+                        # (tabelas, loggers, PDFs) só é construído para UM código escolhido.
+                        # A seleção cartográfica continua determinando qual expansor
+                        # abre inicialmente, sem alterar os dados do acompanhamento.
+                        codigo_texto = str(codigo)
+                        detalhe_escolhido = st.session_state.get("farol_v2_detalhe_aberto")
+                        if detalhe_escolhido is None:
+                            detalhe_escolhido = st.session_state.get("farol_v2_concentracao", "")
+                        detalhe_ativo = codigo_texto == str(detalhe_escolhido or "")
+                        mapa_ativo = codigo_texto == str(st.session_state.get("farol_v2_concentracao", ""))
+                        with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
                                 st.success(indicador_nota)
                             else:
@@ -4911,16 +4935,34 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     "origem": "producao",
                                 }
                                 popup_acompanhamento_farol(contexto_popup, pode_editar=PODE_EDITAR_FAROL)
-                            if st.button("🗺️ Abrir mapa desta concentração" if not ativa else "📍 Mapa desta concentração aberto",
-                                         key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=ativa):
-                                st.session_state["farol_v2_concentracao"] = str(codigo)
-                                st.session_state["farol_concentracao_expandida"] = str(codigo)
+                            if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
+                                         key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
+                                st.session_state["farol_v2_concentracao"] = codigo_texto
+                                st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
+                                st.session_state["farol_concentracao_expandida"] = codigo_texto
                                 st.session_state.pop("farol_v2_os_raio_aberto", None)
                                 st.rerun()
-                            exibir_relatorio_concentracao(
-                                codigo, concentracoes, pontos_cluster, proximidades,
-                                df_eventos, int(raio_operacional), bairros
-                            )
+
+                            # Evita criar vários st.dataframe e executar uma consulta aos
+                            # gráficos dos loggers para CADA expansor em todo rerun.
+                            if detalhe_ativo:
+                                if st.button("▴ Ocultar detalhes desta concentração",
+                                             key=f"farol_v2_ocultar_detalhe_{abrangencia}_{codigo}"):
+                                    # String vazia: não reabrir o detalhe apenas por haver
+                                    # uma concentração selecionada no mapa.
+                                    st.session_state["farol_v2_detalhe_aberto"] = ""
+                                    st.rerun()
+                                exibir_relatorio_concentracao(
+                                    codigo, concentracoes, pontos_cluster, proximidades,
+                                    df_eventos, int(raio_operacional), bairros,
+                                    dados_preparados=(os_eventos, ativos_eventos, eventos_do_grupo),
+                                )
+                            else:
+                                st.caption("As tabelas, os loggers e o PDF são carregados somente quando solicitados.")
+                                if st.button("📋 Carregar detalhes desta concentração",
+                                             key=f"farol_v2_carregar_detalhe_{abrangencia}_{codigo}"):
+                                    st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
+                                    st.rerun()
         # Disponível também quando não há concentrações no filtro atual.
         if concentracoes.empty:
             resumo_pdf = concentracoes.copy()
