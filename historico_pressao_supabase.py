@@ -48,6 +48,53 @@ def _normalizar(nome: object) -> str:
     return "".join(ch for ch in texto if not unicodedata.combining(ch) and ch.isalnum())
 
 
+def _validar_colunas_equivalentes(
+    cabecalho: list[str], registros: list[list[str]], caminho: str
+) -> None:
+    """Aceita aliases de cabeçalho sem permitir ambiguidades nos dados operacionais.
+
+    Exemplo: __PowerAppsId__ e PowerAppsId representam a mesma chave
+    normalizada, mas são colunas auxiliares, sem uso na consulta da pressão.
+    Campos essenciais duplicados só são aceitos quando seus valores concordam
+    ou quando uma das cópias está vazia.
+    """
+    nomes = [_normalizar(nome) for nome in cabecalho]
+    indices = {}
+    for posicao, nome in enumerate(nomes):
+        if nome:
+            indices.setdefault(nome, []).append(posicao)
+
+    # A exportação M1 inclui eventualmente campos auxiliares do PowerApps;
+    # os campos usados nos mapas, relatórios e protocolos permanecem protegidos.
+    if caminho.startswith(PASTAS["1"] + "/"):
+        campos_protegidos = {
+            "id", "data", "municipio", "bairro", "latitude", "longitude",
+            "pressaomca", "observacao", "matricula", "codprotocolo",
+        }
+    elif caminho.startswith(PASTAS["2"] + "/"):
+        campos_protegidos = {
+            "id", "data", "municipio", "pontos", "latitude",
+            "longitude", "mca", "observacao",
+        }
+    else:
+        raise ErroHistorico("Caminho de histórico inesperado.")
+
+    for campo, posicoes in indices.items():
+        if len(posicoes) < 2 or campo not in campos_protegidos:
+            continue
+        for linha in registros:
+            preenchidos = {
+                str(linha[pos]).strip()
+                for pos in posicoes
+                if pos < len(linha) and str(linha[pos]).strip()
+            }
+            if len(preenchidos) > 1:
+                # Exibe só o nome do campo, nunca o conteúdo dos registros.
+                raise ErroHistorico(
+                    f"Arquivo histórico contém valores conflitantes para o campo {campo}."
+                )
+
+
 def _configuracao() -> tuple[str, str]:
     try:
         url = str(st.secrets.get("PRISMA_SUPABASE_URL", "")).strip().rstrip("/")
@@ -152,8 +199,6 @@ def _ler_mes(url: str, chave: str, caminho: str) -> tuple[list[str], list[list[s
     if len(linhas) < 2:
         raise ErroHistorico("Arquivo mensal sem registros; confira o arquivamento.")
     cabecalho = ["" if x is None else str(x).strip() for x in linhas[0]]
-    if len(set(map(_normalizar, cabecalho))) != len(cabecalho):
-        raise ErroHistorico("O cabeçalho do arquivo contém campos duplicados.")
     registros = [
         ["" if v is None else str(v) for v in linha[:len(cabecalho)]]
         + [""] * max(0, len(cabecalho) - len(linha))
@@ -162,9 +207,10 @@ def _ler_mes(url: str, chave: str, caminho: str) -> tuple[list[str], list[list[s
     chaves = list(map(_normalizar, cabecalho))
     if "data" not in chaves:
         raise ErroHistorico("Arquivo mensal sem coluna de data.")
+    _validar_colunas_equivalentes(cabecalho, registros, caminho)
     competencia = PurePosixPath(caminho).stem
     for linha in registros:
-        if _mes_data(linha[chaves.index("data")]) != competencia:
+        if _mes_data(_linha_dict(cabecalho, linha).get("data", "")) != competencia:
             raise ErroHistorico("Arquivo histórico contém medições de outra competência ou data inválida.")
     return cabecalho, registros
 
@@ -185,10 +231,17 @@ def _arquivos(modulo: str) -> list[tuple[str, list[str], list[list[str]]]]:
 
 
 def _linha_dict(cabecalho: list[str], valores: list[str]) -> dict[str, str]:
-    return {
-        _normalizar(nome): (str(valores[i]) if i < len(valores) else "")
-        for i, nome in enumerate(cabecalho)
-    }
+    # Não sobrescrever um campo preenchido com outra coluna equivalente vazia.
+    # Os aliases operacionais foram previamente validados em _ler_mes.
+    saida = {}
+    for indice, nome in enumerate(cabecalho):
+        chave = _normalizar(nome)
+        if not chave:
+            continue
+        valor = str(valores[indice]) if indice < len(valores) else ""
+        if chave not in saida or (not saida[chave].strip() and valor.strip()):
+            saida[chave] = valor
+    return saida
 
 
 def _assinatura_conteudo(linha: dict[str, str], campos: tuple[str, ...]) -> tuple[str, ...]:
