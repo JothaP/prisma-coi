@@ -98,6 +98,15 @@ def confirmar(email,codigo,tipo="signup"):
     if tipo not in ("signup","recovery"):raise ErroPRISMA("Tipo de verificação inválido")
     return _request("POST","/auth/v1/verify",payload={"email":email.strip().lower(),"token":codigo.strip(),"type":tipo})
 
+
+def reenviar_confirmacao(email):
+    """Reenvia o código de confirmação sem recriar nem aprovar a conta."""
+    if not dominio_permitido(email):
+        raise ErroPRISMA("Informe um e-mail corporativo válido.")
+    return _request("POST", "/auth/v1/resend",
+                    payload={"email":email.strip().lower(), "type":"signup"})
+
+
 def entrar(email,senha):
     return _request("POST","/auth/v1/token",params={"grant_type":"password"},payload={"email":email.strip().lower(),"password":senha})
 
