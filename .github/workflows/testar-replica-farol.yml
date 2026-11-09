@@ -1,0 +1,28 @@
+name: Testar replica Farol
+
+on:
+  push:
+    paths:
+      - 'scripts/replicar_acompanhamento_farol.py'
+      - 'tests/test_replica_farol.py'
+      - '.github/workflows/testar-replica-farol.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias do teste
+        run: python -m pip install 'requests>=2.32,<3' 'gspread>=6,<7' 'google-auth>=2.35,<3'
+      - name: Sintaxe Python
+        run: python -m py_compile scripts/replicar_acompanhamento_farol.py pages/99_Migracao_Acompanhamento.py
+      - name: Testes isolados (sem Secrets e sem gravacao)
+        run: python -m unittest discover -s tests -p 'test_replica_farol.py' -v
