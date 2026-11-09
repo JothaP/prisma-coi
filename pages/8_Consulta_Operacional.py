@@ -1274,6 +1274,15 @@ def exibir_consulta_operacional() -> None:
         st.session_state.pop("consulta_operacional_entrada", None)
         st.session_state["m8_integrado_inicializou"] = True
 
+    def _m8_limpar_pesquisa():
+        """Remove a busca de matrículas, mas mantém o desenho e a rede da área."""
+        st.session_state["consulta_operacional_entrada"] = ""
+        st.session_state.pop("m8_integrado_consulta", None)
+        # Remonta o mapa sem marcadores da consulta anterior.
+        st.session_state["m8_integrado_versao_mapa"] = (
+            st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+        )
+
     with st.form("m8_busca_integrada"):
         texto = st.text_area("Matrícula(s)", key="consulta_operacional_entrada", height=78,
                              placeholder="Informe uma ou mais matrículas, separadas por vírgula, espaço ou linha")
@@ -1289,6 +1298,12 @@ def exibir_consulta_operacional() -> None:
             "🔎 Consultar matrículas / Atualizar mapa", type="primary",
             use_container_width=True,
         )
+
+    st.button(
+        "🧹 Limpar pesquisa", key="m8_limpar_pesquisa",
+        on_click=_m8_limpar_pesquisa,
+        help="Apaga as matrículas consultadas e seus resultados sem remover a área desenhada.",
+    )
 
     if pesquisar:
         codigos, invalidos = _interpretar_pesquisa(texto)
