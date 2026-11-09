@@ -1420,7 +1420,14 @@ def exibir_consulta_operacional() -> None:
                 bases[tipo] = _ler_ativos_csv(_assinatura(caminho), tipo)
             except (OSError, ValueError, pd.errors.ParserError) as erro:
                 st.warning(f"Não foi possível carregar {caminho.name}: {erro}")
-    proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
+    if validos.empty:
+        # No modo livre, não constrói índice de proximidade sem matrículas.
+        proximidade = pd.DataFrame(columns=[
+            "Matrícula", "Tipo", "Identificação", "Nome / endereço", "Distância (m)"
+        ])
+        ativos_perto = []
+    else:
+        proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
     ativos_area = _m8_ativos_na_area(area, bases)
     ativos = _m8_unir_ativos(ativos_perto, ativos_area)
 
