@@ -54,7 +54,7 @@ jobs:
         run: python scripts/replicar_acompanhamento_farol.py --full --dry-run
 
   backup-historico:
-    if: ${{ vars.FAROL_REPLICA_ATIVA == 'true' && github.ref == 'refs/heads/main' && vars.FAROL_BACKUP_ATIVO == 'true' && (github.event.schedule == '17 3 * * *' || (github.event_name == 'workflow_dispatch' && inputs.backup == true)) }}
+    if: ${{ vars.FAROL_REPLICA_ATIVA == 'true' && github.ref == 'refs/heads/main' && ((github.event_name == 'workflow_dispatch' && inputs.backup == true) || (github.event_name == 'schedule' && github.event.schedule == '17 3 * * *' && vars.FAROL_BACKUP_ATIVO == 'true')) }}
     needs: replicar
     runs-on: ubuntu-latest
     timeout-minutes: 15
