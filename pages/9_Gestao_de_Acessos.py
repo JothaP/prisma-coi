@@ -58,7 +58,7 @@ if salvar:
     except ErroPRISMA as erro:st.error(str(erro))
 
 st.subheader("Permissões por ferramenta")
-st.caption("As opções abaixo substituem as permissões padrão do perfil. O módulo só permite outras ações quando Visualizar está liberado.")
+st.caption("As opções abaixo substituem as permissões padrão do perfil. A visualização do Módulo 9 — Gestão de Ativos é liberada para todas as contas ativas; as demais ações continuam individuais.")
 if u["perfil"]=="admin":
     st.info("O perfil Administrador tem acesso integral. Para personalizar, utilize o perfil Usuário ou Consulta.")
 else:
@@ -74,7 +74,12 @@ else:
             for j,acao in enumerate(ACOES):
                 with colunas[j]:
                     chave=f"perm_{u['id']}_{mod}_{acao}"
-                    alterar[(mod,acao)]=st.checkbox(acao.title(),value=matriz.get((mod,acao),False),key=chave)
+                    leitura_universal = (mod, acao) == ("9", "visualizar")
+                    alterar[(mod,acao)]=st.checkbox(
+                        acao.title(), value=True if leitura_universal else matriz.get((mod,acao),False),
+                        key=chave, disabled=leitura_universal,
+                        help="Liberado para todas as contas ativas." if leitura_universal else None,
+                    )
             st.divider()
         salvar=st.form_submit_button("Salvar permissões individuais",type="primary",use_container_width=True)
     if salvar:
