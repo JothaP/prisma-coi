@@ -49,8 +49,8 @@ CORES_STATUS = {
     "operando": "#2563EB",       # Azul
     "parado": "#EF4444",         # Vermelho
     "em_manutencao": "#FACC15",  # Amarelo
-    "inativo": "#64748B",        # Cinza
-    "validar": "#9333EA",        # Roxo
+    "inativo": "#111111",        # Preto
+    "validar": "#D1D5DB",        # Cinza claro
     "": "#94A3B8",               # Sem status: cinza claro
 }
 ROTULOS = {
