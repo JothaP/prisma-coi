@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 import folium
 from folium.plugins import Fullscreen
+from branca.element import Element, MacroElement
+from jinja2 import Template
 import streamlit as st
 from streamlit_folium import st_folium
 
@@ -207,62 +209,121 @@ def _fechar_painel():
     st.session_state.pop("ga_painel", None)
 
 
-def _seletor_status_rapido(registro):
-    """Seleção rápida do status, com as mesmas permissões e auditoria da ficha."""
-    ativo_id = str(registro["id"])
-    planta = _texto(registro.get("planta")) or "Sem identificação"
-    nome = _texto(registro.get("nome"))
+
+def _status_popup_html(registro, permitido):
+    """Apresentação do formulário do Leaflet; gravação continua no Python."""
+    planta = escape(_texto(registro.get("planta")) or "Ativo")
+    nome = escape(_texto(registro.get("nome")))
+    municipio = escape(_texto(registro.get("municipio")))
     atual = _texto(registro.get("status"))
-    opcoes = [codigo for codigo in STATUS if codigo]
-    if atual not in opcoes:
-        opcoes.insert(0, "")  # Cadastros antigos ainda sem status.
-
     cores = {
-        "": "⚪", "operando": "🟢", "parado": "🔴",
-        "em_manutencao": "🟡", "inativo": "⚫",
+        "operando": "#16a34a", "parado": "#ef4444",
+        "em_manutencao": "#f59e0b", "inativo": "#64748b",
     }
-    permitido = pode_executar_acao("9", "editar") and HISTORICO_DISPONIVEL
+    opcoes = []
+    for codigo, cor in cores.items():
+        selecionado = " checked" if atual == codigo else ""
+        desabilitado = " disabled" if not permitido else ""
+        opcoes.append(
+            '<label class="ga-status-opcao">'
+            f'<input type="radio" name="ga_status" value="{codigo}"{selecionado}{desabilitado}>'
+            f'<span class="ga-status-cor" style="background:{cor}"></span>'
+            f'<span>{escape(STATUS[codigo])}</span></label>'
+        )
+    botao = (
+        '<button type="submit" class="ga-status-salvar">Atualizar status</button>'
+        if permitido else
+        '<div class="ga-status-sem-permissao">Somente leitura: edição não autorizada.</div>'
+    )
+    return (
+        '<div class="ga-status-popup">'
+        f'<div class="ga-status-titulo">{planta}</div>'
+        f'<div class="ga-status-subtitulo">{nome or municipio}</div>'
+        '<div class="ga-status-divisor"></div>'
+        '<div class="ga-status-legenda">Status da atividade</div>'
+        f'<form class="ga-status-form" data-ativo="{escape(str(registro["id"]))}" '
+        f'data-atual="{escape(atual)}">'
+        + "".join(opcoes)
+        + f'<div class="ga-status-atual">Atual: {escape(STATUS.get(atual, "Não informado"))}</div>'
+        + '<div class="ga-status-mensagem" role="status"></div>'
+        + botao + '</form></div>'
+    )
 
-    with st.container(border=True):
-        st.markdown("#### Atualização rápida de status")
-        st.markdown(f"**{planta}**" + (f" · {nome}" if nome else ""))
-        st.caption(_texto(registro.get("municipio")) + " · Selecione uma situação")
-        with st.form("ga_form_status_" + ativo_id):
-            selecao = st.radio(
-                "Status da atividade",
-                options=opcoes,
-                index=opcoes.index(atual) if atual in opcoes else 0,
-                format_func=lambda codigo: f"{cores[codigo]}  {STATUS[codigo]}",
-                disabled=not permitido,
-                key="ga_status_rapido_" + ativo_id + "_" + str(registro.get("atualizado_em") or ""),
-            )
-            atualizar = st.form_submit_button(
-                "Atualizar status", type="primary",
-                use_container_width=True, disabled=not permitido,
-            )
-        if not permitido:
-            st.caption(
-                "Somente usuários com permissão de edição podem atualizar o status."
-            )
-        if atualizar:
-            novo_status = selecao or None
-            if novo_status == (registro.get("status") or None):
-                st.info("O status selecionado já é o atual.")
-            else:
-                campos = {campo: registro.get(campo) for campo in CAMPOS_EDITAVEIS}
-                campos["status"] = novo_status
-                try:
-                    salvo = editar_ativo(ativo_id, campos, registro.get("atualizado_em"))
-                    _auditar("editar", salvo)
-                    _limpar_cache()
-                    st.session_state["ga_mensagem"] = (
-                        f"Status de {planta} atualizado para "
-                        f"{STATUS.get(_texto(salvo.get('status')), 'Não informado')}. "
-                        "Alteração registrada no histórico."
-                    )
-                    st.rerun()
-                except ErroPRISMA as exc:
-                    st.error(str(exc))
+
+ESTILO_STATUS_NO_MAPA = """
+<style>
+.ga-status-popup {min-width:255px;max-width:340px;color:#1d2c43;
+    font-family:Segoe UI,Arial,sans-serif;font-size:13px;}
+.ga-status-titulo {font-weight:800;font-size:17px;}
+.ga-status-subtitulo {font-size:12px;color:#64748b;margin:3px 0;}
+.ga-status-divisor {height:1px;background:#e2e8f0;margin:12px 0;}
+.ga-status-legenda {font-weight:700;font-size:14px;margin-bottom:8px;}
+.ga-status-opcao {display:flex;align-items:center;gap:11px;padding:9px;
+    border-radius:8px;cursor:pointer;font-weight:600;}
+.ga-status-opcao:has(input:checked) {background:#e8f0ff;color:#1453bb;}
+.ga-status-opcao:has(input:disabled) {cursor:default;opacity:.75;}
+.ga-status-opcao input {width:17px;height:17px;margin:0;accent-color:#1666e3;}
+.ga-status-cor {width:17px;height:17px;border-radius:50%;flex-shrink:0;}
+.ga-status-atual {color:#66778c;font-size:11px;margin:8px 2px;}
+.ga-status-mensagem {font-size:11px;color:#b45309;}
+.ga-status-salvar {background:#1765e9;color:white;border:0;border-radius:8px;
+    padding:11px 12px;width:100%;font:700 13px Segoe UI,Arial,sans-serif;
+    margin-top:8px;cursor:pointer;}
+.ga-status-salvar:disabled {opacity:.65;cursor:progress;}
+.ga-status-sem-permissao {font-size:11px;color:#66778c;margin-top:8px;}
+.leaflet-popup-content:has(.ga-status-popup) {margin:12px 14px;}
+</style>
+"""
+
+
+class PonteStatusFolium(MacroElement):
+    """O popup sinaliza uma escolha ao st_folium via evento de marcador.
+
+    A operação real usa editar_ativo, que valida permissão e versão no servidor.
+    """
+    def __init__(self):
+        super().__init__()
+        self._name = "PonteStatusFolium"
+        self._template = Template(r"""
+{% macro script(this, kwargs) %}
+(function() {
+    var mapa = {{this._parent.get_name()}};
+    mapa.on("popupopen", function(e) {
+        var el = e.popup && e.popup.getElement();
+        var form = el && el.querySelector(".ga-status-form");
+        if (!form || form.dataset.conectado === "1") return;
+        form.dataset.conectado = "1";
+        var marcador = e.popup._source;
+        if (!marcador || !marcador.getTooltip || !marcador.getTooltip()) return;
+        L.DomEvent.disableClickPropagation(el);
+        L.DomEvent.disableScrollPropagation(el);
+        form.addEventListener("submit", function(evento) {
+            evento.preventDefault();
+            evento.stopPropagation();
+            var msg = form.querySelector(".ga-status-mensagem");
+            var radio = form.querySelector('input[name="ga_status"]:checked');
+            if (!radio) { msg.textContent = "Selecione um status."; return; }
+            if (radio.value === form.dataset.atual) {
+                msg.textContent = "O status selecionado já é o atual.";
+                return;
+            }
+            if (["operando","parado","em_manutencao","inativo"].indexOf(radio.value) < 0) return;
+            // Capturado pelo last_object_clicked_tooltip do streamlit-folium.
+            // Sem chamada REST e sem segredos no navegador.
+            var tooltip = marcador.getTooltip().getContent();
+            var token = String(Date.now())+"_"+Math.random().toString(36).slice(2,10);
+            marcador.setTooltipContent("PRISMA_STATUS="+form.dataset.ativo+
+                "|"+radio.value+"|"+token);
+            marcador.fire("click", {latlng:marcador.getLatLng(),sourceTarget:marcador});
+            marcador.setTooltipContent(tooltip);
+            var botao = form.querySelector(".ga-status-salvar");
+            if (botao) botao.disabled = true;
+            msg.textContent = "Salvando no PRISMA...";
+        });
+    });
+})();
+{% endmacro %}
+""")
 
 
 def _painel_ativo(ativo_id, registro=None):
