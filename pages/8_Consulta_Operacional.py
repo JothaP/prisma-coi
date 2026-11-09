@@ -1117,8 +1117,17 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
 
     lats = clientes["_lat"].astype(float).tolist()
     lons = clientes["_lon"].astype(float).tolist()
-    mapa = folium.Map(location=[sum(lats)/len(lats), sum(lons)/len(lons)],
-                      zoom_start=16 if len(clientes) == 1 else 13,
+    # Mapa independente da pesquisa de matrícula.
+    if lats:
+        centro = [sum(lats) / len(lats), sum(lons) / len(lons)]
+        zoom_inicial = 16 if len(clientes) == 1 else 13
+    elif area is not None:
+        centro = [float(area.centroid.y), float(area.centroid.x)]
+        zoom_inicial = 13
+    else:
+        centro = [-5.089, -42.801]
+        zoom_inicial = 12
+    mapa = folium.Map(location=centro, zoom_start=zoom_inicial,
                       tiles="OpenStreetMap", control_scale=True)
     mapa.get_root().header.add_child(Element("""
     <style>
@@ -1242,7 +1251,7 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
 
 
 def exibir_consulta_operacional() -> None:
-    """Único fluxo: pesquisar -> desenhar no MESMO mapa -> consultar/rede."""
+    """Mapa livre por área ou pesquisa por matrícula, mantendo ferramentas integradas."""
     if (not verificar_autenticacao()
             or str(st.session_state.get("perfil", "")).strip().lower() not in PERFIS_CONSULTA):
         st.error("Acesso não autorizado. Entre pelo Hub Central.")
@@ -1252,9 +1261,14 @@ def exibir_consulta_operacional() -> None:
         st.switch_page("app.py")
     st.title("🔍 Consulta Operacional — Matrículas e Rede")
     st.caption("Mapa unificado • Matrículas da área em tabela • Equipamentos com elevação • Somente leitura")
-    if _arquivo_matriculas() is None and _arquivo_sqlite_publicado() is None:
-        st.error("Base cadastral ausente: dados/matriculas.xlsx, matriculas.xls ou matriculas.sqlite.")
-        return
+    base_matriculas_disponivel = (
+        _arquivo_matriculas() is not None or _arquivo_sqlite_publicado() is not None
+    )
+    if not base_matriculas_disponivel:
+        st.warning(
+            "Base cadastral indisponível: mapa e rede disponíveis, "
+            "mas sem consulta ou listagem de matrículas."
+        )
 
     if "m8_integrado_inicializou" not in st.session_state:
         st.session_state.pop("consulta_operacional_entrada", None)
@@ -1271,47 +1285,64 @@ def exibir_consulta_operacional() -> None:
         with col2:
             mostrar_bairros = st.checkbox("Limites dos bairros", value=True,
                                          key="m8_bairros_integrado")
-        pesquisar = st.form_submit_button("🔎 Consultar matrícula(s)", type="primary",
-                                          use_container_width=True)
+        pesquisar = st.form_submit_button(
+            "🔎 Consultar matrículas / Atualizar mapa", type="primary",
+            use_container_width=True,
+        )
 
     if pesquisar:
         codigos, invalidos = _interpretar_pesquisa(texto)
         if invalidos:
             st.error("Matrículas inválidas: " + ", ".join(invalidos[:12]))
-        elif not codigos:
-            st.warning("Informe pelo menos uma matrícula.")
         elif len(codigos) > 200:
             st.warning("Para preservar o desempenho, consulte até 200 matrículas de cada vez.")
+        elif codigos and not base_matriculas_disponivel:
+            st.warning("A base de matrículas está indisponível para pesquisa.")
         else:
-            st.session_state["m8_integrado_consulta"] = (codigos, int(raio), bool(mostrar_bairros))
-            st.session_state.pop("m8_integrado_area", None)
-            st.session_state.pop("m8_integrado_rede_id", None)
-            st.session_state["m8_integrado_versao_mapa"] = st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+            # Sem códigos, o mapa permanece livre e o desenho atual é preservado.
+            st.session_state["m8_integrado_consulta"] = (
+                codigos, int(raio), bool(mostrar_bairros)
+            )
+            if codigos:
+                st.session_state.pop("m8_integrado_area", None)
+                st.session_state.pop("m8_integrado_rede_id", None)
+                st.session_state["m8_integrado_versao_mapa"] = (
+                    st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+                )
             st.rerun()
 
     atual = st.session_state.get("m8_integrado_consulta")
-    if not atual:
-        st.info("Pesquise uma matrícula. No mapa de resultado, desenhe um polígono ou retângulo ao redor dela para analisar a região.")
-        return
-    codigos, raio, mostrar_bairros = atual
-    try:
-        with st.spinner("Consultando índice cadastral..."):
-            clientes, metadados = _buscar_matriculas(codigos)
-    except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
-        st.error(f"Não foi possível consultar a matrícula: {erro}")
-        return
-    presentes = set(clientes["NUM_LIGACAO"].astype(str))
-    faltantes = [v for v in codigos if v not in presentes]
-    validos = clientes.loc[clientes["_lat"].notna() & clientes["_lon"].notna()].copy()
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Matrículas encontradas", len(presentes))
-    c2.metric("Com coordenadas", validos["NUM_LIGACAO"].nunique())
-    c3.metric("Não encontradas", len(faltantes))
-    if faltantes:
-        st.warning("Matrículas ausentes: " + ", ".join(faltantes))
-    if validos.empty:
-        st.info("Nenhum dos registros encontrados possui coordenadas válidas.")
-        return
+    codigos, raio, mostrar_bairros = (
+        atual if atual is not None else ([], int(raio), bool(mostrar_bairros))
+    )
+    validos = pd.DataFrame(columns=[*COLUNAS_MATRICULAS, "_lat", "_lon"])
+    if codigos and base_matriculas_disponivel:
+        try:
+            with st.spinner("Consultando índice cadastral..."):
+                clientes, _ = _buscar_matriculas(codigos)
+            presentes = set(clientes["NUM_LIGACAO"].astype(str))
+            faltantes = [v for v in codigos if v not in presentes]
+            validos = clientes.loc[
+                clientes["_lat"].notna() & clientes["_lon"].notna()
+            ].copy()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Matrículas encontradas", len(presentes))
+            c2.metric("Com coordenadas", validos["NUM_LIGACAO"].nunique())
+            c3.metric("Não encontradas", len(faltantes))
+            if faltantes:
+                st.warning("Matrículas ausentes: " + ", ".join(faltantes))
+            if validos.empty:
+                st.info(
+                    "Nenhuma matrícula pesquisada possui coordenadas válidas. "
+                    "O mapa continua disponível para análise da área."
+                )
+        except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
+            st.error(f"Não foi possível consultar as matrículas: {erro}")
+    elif not codigos:
+        st.caption(
+            "Consulta livre: desenhe um polígono ou retângulo no mapa. "
+            "Não é necessário informar matrícula."
+        )
 
     from shapely import wkb
     area = None
@@ -1330,12 +1361,13 @@ def exibir_consulta_operacional() -> None:
     # da cidade inteira nem todas as matrículas na interface.
     influencias = []
     arquivo_influencias = _caminho_influencias()
-    if arquivo_influencias:
+    if arquivo_influencias and (area is not None or not validos.empty):
         try:
             todas_influencias = _ler_influencias(_assinatura(arquivo_influencias))
-            validos["_influencia"] = validos.apply(
-                lambda linha: "; ".join(_identificar_influencias(float(linha["_lat"]), float(linha["_lon"]), todas_influencias))
-                or "Área de influência não identificada", axis=1)
+            if not validos.empty:
+                validos["_influencia"] = validos.apply(
+                    lambda linha: "; ".join(_identificar_influencias(float(linha["_lat"]), float(linha["_lon"]), todas_influencias))
+                    or "Área de influência não identificada", axis=1)
             # No mapa, apenas feições próximas; o catálogo completo não é enviado.
             from shapely.geometry import box
             if area is not None:
@@ -1359,16 +1391,18 @@ def exibir_consulta_operacional() -> None:
                 if area is not None:
                     bx = area.bounds
                     oeste, sul, leste, norte = bx[0]-.008, bx[1]-.008, bx[2]+.008, bx[3]+.008
-                else:
+                elif not validos.empty:
                     oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
                     leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
+                else:
+                    oeste, sul, leste, norte = -42.94, -5.23, -42.66, -4.96
                 bairros = [b for b in todas if not (b["limites"][2] < oeste or b["limites"][0] > leste
                                                       or b["limites"][3] < sul or b["limites"][1] > norte)][:90]
             except Exception as erro:
                 st.warning(f"Limites de bairros não puderam ser carregados: {erro}")
 
     cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
-    if area is not None:
+    if area is not None and base_matriculas_disponivel:
         try:
             with st.spinner("Localizando as matrículas dentro do desenho..."):
                 cadastro_area, _ = _matriculas_na_area(area)
@@ -1376,14 +1410,16 @@ def exibir_consulta_operacional() -> None:
             st.error(f"Não foi possível consultar as matrículas do polígono: {erro}")
 
     bases = {}
-    for tipo, caminho in (("Poço / Ativo", ARQUIVO_POCOS), ("Logger", ARQUIVO_LOGGERS)):
-        if not caminho.is_file():
-            st.warning(f"Cadastro ausente: {caminho.name}.")
-            continue
-        try:
-            bases[tipo] = _ler_ativos_csv(_assinatura(caminho), tipo)
-        except (OSError, ValueError, pd.errors.ParserError) as erro:
-            st.warning(f"Não foi possível carregar {caminho.name}: {erro}")
+    # Evita carregar milhares de ativos antes da primeira consulta/desenho.
+    if area is not None or not validos.empty:
+        for tipo, caminho in (("Poço / Ativo", ARQUIVO_POCOS), ("Logger", ARQUIVO_LOGGERS)):
+            if not caminho.is_file():
+                st.warning(f"Cadastro ausente: {caminho.name}.")
+                continue
+            try:
+                bases[tipo] = _ler_ativos_csv(_assinatura(caminho), tipo)
+            except (OSError, ValueError, pd.errors.ParserError) as erro:
+                st.warning(f"Não foi possível carregar {caminho.name}: {erro}")
     proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
     ativos_area = _m8_ativos_na_area(area, bases)
     ativos = _m8_unir_ativos(ativos_perto, ativos_area)
@@ -1531,13 +1567,14 @@ def exibir_consulta_operacional() -> None:
     else:
         st.info("Nenhum equipamento encontrado no raio de pesquisa ou na área desenhada.")
 
-    with st.expander("Dados cadastrais e áreas de influência das matrículas consultadas", expanded=False):
-        st.dataframe(validos.loc[:, list(COLUNAS_MATRICULAS) + ["_influencia"]].rename(columns={
-            "NUM_LIGACAO": "Matrícula", "_influencia": "Área de Influência",
-        }), hide_index=True, use_container_width=True)
-        if not proximidade.empty:
-            st.markdown("**Distâncias dos equipamentos às matrículas consultadas**")
-            st.dataframe(proximidade, hide_index=True, use_container_width=True)
+    if not validos.empty:
+        with st.expander("Dados cadastrais e áreas de influência das matrículas consultadas", expanded=False):
+            st.dataframe(validos.loc[:, list(COLUNAS_MATRICULAS) + ["_influencia"]].rename(columns={
+                "NUM_LIGACAO": "Matrícula", "_influencia": "Área de Influência",
+            }), hide_index=True, use_container_width=True)
+            if not proximidade.empty:
+                st.markdown("**Distâncias dos equipamentos às matrículas consultadas**")
+                st.dataframe(proximidade, hide_index=True, use_container_width=True)
 
     st.caption("As cotas são da superfície do modelo digital de elevação (DSM/MDE), não da tubulação. "
                "A proximidade da rede e dos ativos não comprova vínculo hidráulico. "
