@@ -226,7 +226,7 @@ def atualizar_usuario(ator,alvo,perfil,status):
     auditar(ator, "alterar_conta", alvo, f"Perfil={perfil}; Status={status}",
             modulo="gestao", tipo="ALTERACAO")
 
-def salvar_permissoes(ator,alvo,matriz):
+def salvar_permissoes(ator,alvo,matriz,*,origem_id=None):
     if str(ator)==str(alvo):raise ErroPRISMA("Permissões administrativas próprias não podem ser alteradas aqui.")
     perfil=perfil_de_usuario(alvo)
     if not perfil:raise ErroPRISMA("Usuário não encontrado")
@@ -236,5 +236,31 @@ def salvar_permissoes(ator,alvo,matriz):
             and (m,a)!=("9","visualizar")]  # Leitura do módulo 9 é universal.
     _tabela("prisma_permissoes",method="POST",params={"on_conflict":"usuario_id,modulo,acao"},
             payload=itens,prefer="resolution=merge-duplicates,return=minimal")
-    auditar(ator, "alterar_permissoes", alvo, f"{len(itens)} permissões atualizadas",
+    detalhes=(f"Espelhamento das permissões de {origem_id}; {len(itens)} permissões atualizadas"
+              if origem_id else f"{len(itens)} permissões atualizadas")
+    auditar(ator, "alterar_permissoes", alvo, detalhes,
             modulo="gestao", tipo="ALTERACAO")
+
+
+def espelhar_permissoes(ator,origem_id,destino_id):
+    """Replica TODAS as permissões efetivas, não apenas as personalizações.
+
+    Mantém perfil, situação e a exclusividade da Gestão de Acessos.
+    Pode configurar uma conta pendente, mas nunca usa uma conta inativa como modelo.
+    """
+    administrador=perfil_de_usuario(ator)
+    if not administrador or administrador.get("perfil")!="admin" or administrador.get("status")!="ativo":
+        raise ErroPRISMA("Somente um administrador ativo pode espelhar permissões.")
+    if str(origem_id)==str(destino_id):
+        raise ErroPRISMA("Selecione contas diferentes para origem e destino.")
+    origem=perfil_de_usuario(origem_id)
+    destino=perfil_de_usuario(destino_id)
+    if not origem or not destino:
+        raise ErroPRISMA("Usuário de origem ou destino não encontrado.")
+    if origem.get("status")!="ativo":
+        raise ErroPRISMA("O usuário modelo precisa estar ativo.")
+    if destino.get("perfil")=="admin":
+        raise ErroPRISMA("Permissões de administradores são determinadas pelo perfil.")
+    matriz=permissoes_efetivas(origem["perfil"],permissoes_usuario(origem_id))
+    salvar_permissoes(ator,destino_id,matriz,origem_id=origem_id)
+
