@@ -3,7 +3,7 @@ import streamlit as st
 from auth import exigir_acesso_modulo, verificar_autenticacao
 from prisma_backend import (ACOES, MODULOS, ErroPRISMA, listar_perfis, atualizar_usuario,
     perfil_de_usuario, permissoes_usuario, permissoes_efetivas, salvar_permissoes,
-    espelhar_permissoes)
+    espelhar_permissoes, consultar_confirmacao_email_admin, confirmar_email_manualmente)
 
 st.set_page_config(page_title="PRISMA | Gestão de Acessos",page_icon="🔐",layout="wide")
 exigir_acesso_modulo("gestao")
@@ -12,7 +12,7 @@ if st.session_state.get("perfil")!="admin":
     st.stop()
 
 st.title("🔐 PRISMA — Gestão de Acessos")
-st.caption("Aprovação de cadastros, bloqueio de contas e permissões individuais por módulo e ação.")
+st.caption("Aprovação de contas, confirmação administrativa de e-mail e permissões individuais por módulo e ação.")
 if st.button("← Voltar ao Hub"):
     st.switch_page("app.py")
 
@@ -57,6 +57,65 @@ if salvar:
         st.success("Perfil atualizado.")
         st.rerun()
     except ErroPRISMA as erro:st.error(str(erro))
+
+st.subheader("Confirmação de e-mail no Supabase")
+st.caption(
+    "Esta ação é independente da aprovação de acesso ao PRISMA e não altera "
+    "perfil, situação ou permissões da conta."
+)
+atualizar_email = st.button(
+    "Atualizar situação do e-mail", key="ga_atualizar_email_" + str(u["id"])
+)
+chave_estado = "ga_confirmacao_email_estado"
+estado_salvo = st.session_state.get(chave_estado)
+if (atualizar_email or not isinstance(estado_salvo, dict)
+        or estado_salvo.get("id") != u["id"]):
+    try:
+        with st.spinner("Verificando confirmação no Supabase Auth..."):
+            estado = consultar_confirmacao_email_admin(ator, u["id"])
+        estado_salvo = {"id": u["id"], "dados": estado, "erro": None}
+    except ErroPRISMA as erro:
+        estado_salvo = {"id": u["id"], "dados": None, "erro": str(erro)}
+    st.session_state[chave_estado] = estado_salvo
+
+if st.session_state.pop("ga_email_confirmacao_sucesso", None) == u["id"]:
+    st.success("E-mail confirmado no Supabase. O acesso ainda depende da aprovação da conta.")
+
+if estado_salvo.get("erro"):
+    st.error("Não foi possível consultar a confirmação: " + estado_salvo["erro"])
+else:
+    estado_email = estado_salvo["dados"]
+    if estado_email["confirmado"]:
+        st.success("E-mail confirmado no Supabase.")
+    else:
+        st.warning("Este e-mail ainda não foi confirmado no Supabase.")
+        st.caption(
+            "Antes de confirmar manualmente, valide a identidade do usuário e a "
+            "titularidade do endereço por um canal corporativo independente."
+        )
+        with st.form("ga_confirmar_email_" + str(u["id"])):
+            email_para_confirmar = st.text_input(
+                "Digite exatamente o e-mail cadastrado para confirmar a operação",
+                placeholder=str(u["email"]),
+            )
+            identidade_validada = st.checkbox(
+                "Confirmei por outro canal confiável que o e-mail pertence a este usuário.",
+            )
+            executar_confirmacao = st.form_submit_button(
+                "Confirmar e-mail manualmente", type="primary", use_container_width=True
+            )
+        if executar_confirmacao:
+            try:
+                confirmado_agora = confirmar_email_manualmente(
+                    ator, u["id"], email_para_confirmar,
+                    identidade_verificada=identidade_validada,
+                )
+                st.session_state.pop(chave_estado, None)
+                if confirmado_agora:
+                    st.session_state["ga_email_confirmacao_sucesso"] = u["id"]
+                st.rerun()
+            except ErroPRISMA as erro:
+                st.error(str(erro))
 
 st.subheader("Espelhar permissões de outro usuário")
 st.caption(
