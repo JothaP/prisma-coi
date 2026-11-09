@@ -30,11 +30,18 @@ RAIZ = Path(__file__).resolve().parent.parent
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 from auth import verificar_autenticacao, registrar_atividade
+from farol_acomp_supabase_backend import fonte_supabase
 
 st.set_page_config(page_title="Migração Acompanhamento | PRISMA", page_icon="🗃️", layout="wide")
 if not verificar_autenticacao() or st.session_state.get("perfil") != "admin":
     st.error("Acesso exclusivo ao administrador autenticado do PRISMA.")
     st.stop()
+
+MODO_SUPABASE_ATIVO = fonte_supabase()
+if MODO_SUPABASE_ATIVO:
+    st.warning("A fonte do Acompanhamento está no Supabase. A cópia inicial do Google Sheets foi desabilitada para evitar sobrescritas. Não reverta ao Google Sheets sem antes reconciliar as novas gravações.")
+else:
+    st.info("Fonte atual do acompanhamento: Google Sheets. A ativação no Supabase ainda não ocorreu.")
 
 COLUNAS_FICHAS = [
     "id", "titulo", "qtd_reclamacoes", "status", "ultima_atualizacao", "unidade",
@@ -307,7 +314,7 @@ if snapshot:
             st.error(f"Não foi possível conferir o destino: {erro}")
     confirmado = st.checkbox("Baixei o backup e autorizo somente a CÓPIA dos registros "
                             "para as novas tabelas do Supabase.", key="farol_acomp_confirmar")
-    if st.button("3. Importar e verificar cópia", disabled=not confirmado):
+    if st.button("3. Importar e verificar cópia", disabled=(not confirmado or MODO_SUPABASE_ATIVO)):
         try:
             with st.spinner("Copiando dados e verificando integridade dos registros..."):
                 inseridos, repetidos = _importar(snapshot)
@@ -527,3 +534,24 @@ if st.button("7. Testar adaptador Supabase do Módulo 3",
             )
     except Exception as erro:
         st.error(f"Teste do adaptador não concluído: {erro}")
+
+st.divider()
+st.subheader("Etapa 6 — Ativação controlada da fonte")
+if MODO_SUPABASE_ATIVO:
+    st.success("O PRISMA está configurado para utilizar o Supabase no Acompanhamento Operacional.")
+else:
+    st.caption(
+        "Após aprovar a paridade completa, executar o SQL 04 de atualização "
+        "das sequências e congelar novas gravações no Google Sheets, "
+        "o administrador pode mudar a fonte nos Secrets do Streamlit Cloud."
+    )
+    st.code(
+        'FAROL_ACOMP_FONTE = "supabase"\n'
+        'FAROL_ACOMP_SUPABASE_LIBERADO = true',
+        language="toml",
+    )
+    st.warning(
+        "Não ative antes da atualização das sequências e da última conferência "
+        "de paridade. Após a primeira gravação no Supabase, voltar ao Google Sheets "
+        "exige uma sincronização reversa controlada para não perder registros."
+    )
