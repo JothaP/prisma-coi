@@ -18,6 +18,11 @@ from integracao_acompanhamento_producao import (
     registrar_vinculo as registrar_vinculo_producao,
     invalidar_cache_acompanhamento,
 )
+from farol_acomp_supabase_backend import (
+    fonte_supabase, listar as sb_listar, buscar_ficha as sb_ficha,
+    buscar_por_evento as sb_evento, criar as sb_criar,
+    editar as sb_editar, dados_ficha as sb_dados_ficha,
+)
 
 
 STATUS = ["Pendente", "Em Andamento", "Concluído"]
@@ -69,7 +74,9 @@ def aba_google(nome):
 
 @st.cache_data(ttl=20, show_spinner=False)
 def ler_registros(nome):
-    """Evita leituras repetidas no mesmo rerun e faz retentativas apenas em falhas transitórias."""
+    """Consulta a fonte selecionada. Google permanece o padrão."""
+    if fonte_supabase():
+        return sb_listar("fichas" if nome == "eventos" else "movimentacoes")
     aba = aba_google(nome)
     colunas = CAMPOS_EVENTOS if nome == "eventos" else CAMPOS_MOVIMENTACOES
     for tentativa in range(4):
@@ -118,7 +125,8 @@ def exigir_permissao_acompanhamento():
 
 
 def cadastrar(titulo, qtd, status, unidade, regional, municipio, data_ident, descricao,
-              arcgis, sia, loggers, retorno, finalizado, data_fim, causa_identificada="Não"):
+              arcgis, sia, loggers, retorno, finalizado, data_fim, causa_identificada="Não",
+              *, contexto=None):
     exigir_permissao_acompanhamento()
     if status not in STATUS:
         raise ValueError("Status inválido para o novo acompanhamento.")
@@ -133,6 +141,16 @@ def cadastrar(titulo, qtd, status, unidade, regional, municipio, data_ident, des
         data_fim = data_fim or momento
     else:
         finalizado, data_fim = "Não", ""
+    if fonte_supabase():
+        dados = sb_dados_ficha(
+            titulo=titulo.strip(), qtd_reclamacoes=int(qtd), status=status,
+            ultima_atualizacao=momento, unidade=unidade, regional=regional,
+            municipio=municipio.strip(), data_identificacao=data_ident or momento,
+            descricao=descricao, arcgis=arcgis, sia=sia, loggers=loggers,
+            retorno_operacao=retorno, finalizado=finalizado,
+            data_finalizacao=data_fim, causa_identificada=causa_identificada,
+        )
+        return sb_criar(dados, contexto)
     with _GRAVACAO_LOCK:
         ev_aba = aba_google("eventos")
         mov_aba = aba_google("movimentacoes")
@@ -148,7 +166,8 @@ def cadastrar(titulo, qtd, status, unidade, regional, municipio, data_ident, des
     return eid
 
 def listar(status="Todos", municipio="", regional="Todas", unidade="Todas", finalizado="Todos"):
-    df = pd.DataFrame(ler_registros("eventos"), columns=CAMPOS_EVENTOS)
+    registros = sb_listar("fichas") if fonte_supabase() else ler_registros("eventos")
+    df = pd.DataFrame(registros, columns=CAMPOS_EVENTOS)
     colunas = ["id", "titulo", "status", "municipio", "regional", "unidade", "qtd_reclamacoes", "ultima_atualizacao", "finalizado"]
     if df.empty:
         return pd.DataFrame(columns=colunas)
@@ -163,10 +182,13 @@ def listar(status="Todos", municipio="", regional="Todas", unidade="Todas", fina
     return df.sort_values("id", ascending=False)[colunas].reset_index(drop=True)
 
 def obter_evento(eid):
+    if fonte_supabase():
+        return sb_ficha(eid)
     return next((r for r in ler_registros("eventos") if str(r["id"]) == str(eid)), None)
 
 def obter_movimentacoes(eid):
-    rows = [r for r in ler_registros("movimentacoes") if str(r["evento_id"]) == str(eid)]
+    rows = (sb_evento("movimentacoes", eid) if fonte_supabase()
+            else [r for r in ler_registros("movimentacoes") if str(r["evento_id"]) == str(eid)])
     rows.sort(key=lambda r: int(r["id"]) if str(r["id"]).isdigit() else 0)
     return [(r["data_hora"], r["descricao"], r["status_momento"]) for r in rows]
 
@@ -178,8 +200,10 @@ def esta_concluido(evento):
 
 def editar_ficha(eid, titulo, qtd, unidade, regional, municipio, data_ident,
                  descricao, arcgis, sia, loggers, retorno):
-    """Edita a ficha (inclusive concluída) mantendo o ID e as movimentações."""
+    """Editor legado; no Supabase, usar exclusivamente o popup com versão."""
     exigir_permissao_acompanhamento()
+    if fonte_supabase():
+        raise RuntimeError("Use o popup do Farol para editar com controle de versão.")
     if not str(titulo).strip() or not str(municipio).strip():
         raise ValueError("Título e município são obrigatórios.")
     with _GRAVACAO_LOCK:
@@ -213,6 +237,8 @@ def editar_ficha(eid, titulo, qtd, unidade, regional, municipio, data_ident,
 
 def atualizar(eid, status, observacao, finalizado, data_fim):
     exigir_permissao_acompanhamento()
+    if fonte_supabase():
+        raise RuntimeError("Use o popup do Farol para alterar com controle de versão.")
     momento = agora()
     if status not in STATUS:
         raise ValueError("Status inválido.")
@@ -245,13 +271,55 @@ def atualizar(eid, status, observacao, finalizado, data_fim):
         invalidar_cache_acompanhamento()
 
 def salvar_popup(eid, titulo, qtd, status, causa, unidade, regional, municipio,
-                 descricao, arcgis, sia, loggers, retorno, movimentacao="", concluir=False):
+                 descricao, arcgis, sia, loggers, retorno, movimentacao="", concluir=False,
+                 *, versao_esperada=None):
     """Edição autorizada, inclusive após conclusão, com registro de histórico."""
     exigir_permissao_acompanhamento()
     if not str(titulo).strip() or not str(municipio).strip():
         raise ValueError("Título e município são obrigatórios.")
     if status not in STATUS or causa not in SIM_NAO:
         raise ValueError("Status ou identificação da causa inválidos.")
+    if fonte_supabase():
+        anterior = sb_ficha(eid)
+        if anterior is None:
+            raise ValueError("Ficha de acompanhamento não encontrada.")
+        momento = agora()
+        ja_concluido = esta_concluido(anterior)
+        if status == "Concluído" and not concluir and not ja_concluido:
+            raise ValueError("Para concluir, use o botão Acompanhamento Concluído.")
+        status_final = "Concluído" if concluir else status
+        finalizado = "Sim" if status_final == "Concluído" else "Não"
+        data_fim = ((anterior.get("data_finalizacao", "") or momento)
+                    if ja_concluido else momento) if finalizado == "Sim" else ""
+        dados = sb_dados_ficha(
+            titulo=str(titulo).strip(), qtd_reclamacoes=int(qtd),
+            status=status_final, ultima_atualizacao=momento, unidade=unidade,
+            regional=regional, municipio=str(municipio).strip(),
+            data_identificacao=anterior.get("data_identificacao", "") or momento,
+            descricao=str(descricao).strip(), arcgis=arcgis, sia=sia,
+            loggers=loggers, retorno_operacao=retorno,
+            finalizado=finalizado, data_finalizacao=data_fim,
+            causa_identificada=causa,
+        )
+        descr = str(movimentacao or "").strip()
+        if not descr:
+            if concluir:
+                descr = "Acompanhamento concluído."
+            else:
+                rotulos = {"status": "status", "causa_identificada": "causa identificada",
+                           "descricao": "relato", "arcgis": "ArcGIS", "sia": "SIA",
+                           "loggers": "loggers", "retorno_operacao": "retorno operacional",
+                           "titulo": "título", "qtd_reclamacoes": "reclamações",
+                           "unidade": "unidade", "regional": "regional", "municipio": "município"}
+                alterados = [rotulo for campo, rotulo in rotulos.items()
+                            if str(anterior.get(campo, "")) != str(dados[campo])]
+                descr = ("Ficha atualizada: " + ", ".join(alterados) + "."
+                         if alterados else "Ficha revisada, sem alteração dos campos.")
+        if ja_concluido and status_final != "Concluído":
+            descr = "Acompanhamento reaberto. " + descr
+        elif concluir and not ja_concluido and "concluído" not in descr.casefold():
+            descr += " | Acompanhamento concluído."
+        return sb_editar(eid, versao_esperada, dados, descr)
     with _GRAVACAO_LOCK:
         aba = aba_google("eventos")
         # Releitura garante edição sobre o registro mais recente e preserva o histórico.
@@ -317,12 +385,14 @@ def salvar_popup(eid, titulo, qtd, status, causa, unidade, regional, municipio,
 @st.dialog("📋 Acompanhamento Operacional", width="large")
 def popup_acompanhamento_farol(contexto, pode_editar=True):
     """Abertura/edição imediata a partir do botão de uma concentração."""
-    if not SPREADSHEET_ID or SPREADSHEET_ID == str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip():
+    modo_supabase = fonte_supabase()
+    if not modo_supabase and (not SPREADSHEET_ID or SPREADSHEET_ID == str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip()):
         st.error("Configure uma planilha separada para o acompanhamento.")
         return
     try:
-        aba_google("eventos")
-        aba_google("movimentacoes")
+        if not modo_supabase:
+            aba_google("eventos")
+            aba_google("movimentacoes")
         eid = str(contexto.get("evento_id", "") or "").strip()
         evento = obter_evento(eid) if eid else None
         if eid and evento is None:
@@ -343,7 +413,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                    "A edição é exclusiva de admin e usuario.")
     else:
         st.caption(f"✏️ Edição habilitada para o perfil **{perfil}** · interface v3 (22/10/2026)")
-    st.caption("Ficha vinculada à concentração do Farol · histórico preservado no Google Sheets")
+    st.caption("Ficha vinculada à concentração do Farol · fonte: " + ("Supabase" if modo_supabase else "Google Sheets"))
     if concluido:
         st.success("Acompanhamento concluído.")
         if not somente_leitura:
@@ -354,6 +424,14 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
     else:
         st.info("Ao salvar, o acompanhamento será iniciado com status 'Em Andamento'.")
 
+    # A versão da ficha fica presa à primeira abertura do formulário.
+    # O submit nunca atualiza silenciosamente a versão de uma edição já aberta.
+    versao_chave = "farol_acomp_popup_versao"
+    id_chave = "farol_acomp_popup_id"
+    if modo_supabase and evento:
+        if st.session_state.get(id_chave) != str(eid):
+            st.session_state[id_chave] = str(eid)
+            st.session_state[versao_chave] = evento.get("versao")
     # Campos da ficha seguem a disposição aprovada pelo COI.
     with st.form(f"popup_acompanhamento_{eid or contexto.get('chave', 'novo')}"):
         topo_a, topo_b = st.columns([2.3, 1])
@@ -421,14 +499,23 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                 raise ValueError("Para concluir uma ficha em andamento, utilize 'Acompanhamento Concluído'.")
             if evento:
                 salvar_popup(eid, titulo, quantidade, status, causa, unidade, regional,
-                             municipio, descricao, arcgis, sia, loggers, retorno, movimentacao, concluir=encerrar)
+                             municipio, descricao, arcgis, sia, loggers, retorno,
+                             movimentacao, concluir=encerrar,
+                             versao_esperada=(st.session_state.get(versao_chave)
+                                             if modo_supabase else None))
             else:
                 status_criacao = "Concluído" if encerrar else status
                 novo = cadastrar(titulo, quantidade, status_criacao, unidade, regional,
                                  municipio, "", descricao, arcgis, sia, loggers, retorno,
-                                 "Sim" if encerrar else "Não", "", causa_identificada=causa)
-                # O vínculo nunca é criado antes da gravação da ficha.
-                registrar_vinculo_producao(contexto, novo)
+                                 "Sim" if encerrar else "Não", "",
+                                 causa_identificada=causa,
+                                 contexto=contexto if modo_supabase else None)
+                if not modo_supabase:
+                    # Google Sheets legado: criação em duas etapas.
+                    registrar_vinculo_producao(contexto, novo)
+            if modo_supabase:
+                st.session_state.pop(versao_chave, None)
+                st.session_state.pop(id_chave, None)
             st.rerun()
         except Exception as erro:
             st.error(f"Não foi possível salvar o acompanhamento: {erro}")
@@ -540,7 +627,10 @@ def gerar_pdf(eid):
 
 
 def renderizar_acompanhamento_farol(pode_editar=True):
-    """Ficha integrada ao Módulo 3, sem navegação para uma página separada."""
+    """Tela legada; no Supabase, apenas o popup transacional está autorizado."""
+    if fonte_supabase():
+        st.error("No modo Supabase, abra o acompanhamento pelo popup no mapa do Farol.")
+        return
     if not SPREADSHEET_ID or SPREADSHEET_ID == str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip():
         st.error("Configure a planilha de acompanhamento separadamente da planilha do Farol.")
         return
