@@ -94,6 +94,14 @@ class TesteReplica(unittest.TestCase):
         self.assertEqual(len(self.sheet.linhas), 1)
         self.assertEqual(len(self.sheet.append_calls), 1)
 
+    def test_simulacao_nao_grava_nem_confirma_eventos(self):
+        with patch.object(replica, "Supabase", return_value=self.banco), \
+             patch.object(replica, "cliente_google", return_value=(None, self.livro)):
+            replica.executar(full=True, simulacao=True)
+        self.assertEqual(self.sheet.linhas, [])
+        self.assertEqual(self.banco.ack, [])
+        self.assertEqual(self.banco.status, [])
+
     def test_atualiza_mesma_linha(self):
         self._rodar()
         self.ficha["status"] = "Concluído"
