@@ -749,6 +749,42 @@ def _linhas_de_geometria(geom):
             yield from _linhas_de_geometria(parte)
 
 
+# Campos do KML de rede: coletar apenas atributos operacionais necessários
+# e somente para trechos que cruzaram a área desenhada.
+REDE_ATRIBUTOS = (
+    "gid", "trecho_atual", "trecho_antigo", "diametro_nominal",
+    "material", "tipo_pavimento", "extensao", "profundidade",
+    "funcao", "situacao", "data_implantacao",
+)
+
+
+def _atributos_trecho_kml(placemark, titulo=""):
+    """Lê ExtendedData/SchemaData/SimpleData (e Data/value), sem importar toda a rede."""
+    dados = {}
+    for campo in placemark.iter():
+        etiqueta = _local_tag(campo.tag)
+        if etiqueta not in {"SimpleData", "Data"}:
+            continue
+        chave = str(campo.attrib.get("name") or "").strip().lower()
+        if chave not in REDE_ATRIBUTOS:
+            continue
+        if etiqueta == "SimpleData":
+            valor = campo.text
+        else:
+            valor = next((filho.text for filho in campo
+                          if _local_tag(filho.tag) == "value"), None)
+        if valor is not None:
+            # GeoJsonPopup monta HTML: escapar valores oriundos do KML.
+            dados[chave] = html_escape(str(valor).strip()[:180])
+
+    identificacao = (dados.get("gid") or dados.get("trecho_atual")
+                     or dados.get("trecho_antigo") or html_escape(str(titulo)[:110])
+                     or "Não informado")
+    resultado = {campo: dados.get(campo) or "Não informado" for campo in REDE_ATRIBUTOS}
+    resultado["identificacao"] = identificacao
+    return resultado
+
+
 @st.cache_data(show_spinner=False, max_entries=4)
 def _rede_recortada_kmz(assinatura: tuple[str, int, int], area_wkb: bytes,
                          limite_trechos: int = LIMITE_REDE_TRECHOS,
@@ -810,6 +846,8 @@ def _rede_recortada_kmz(assinatura: tuple[str, int, int], area_wkb: bytes,
                             if not selecionada.intersects(linha):
                                 continue
                             recorte = linha.intersection(area)
+                            # Só analisa atributos quando o segmento cruza a área.
+                            atributos = _atributos_trecho_kml(elemento, titulo)
                             for segmento in _linhas_de_geometria(recorte):
                                 # ~1 metro, apenas para renderização no navegador.
                                 simples = segmento.simplify(0.000009, preserve_topology=False)
@@ -819,7 +857,7 @@ def _rede_recortada_kmz(assinatura: tuple[str, int, int], area_wkb: bytes,
                                 if len(feicoes) >= limite_trechos or vertices + n > limite_vertices:
                                     atingiu_limite = True
                                     break
-                                feicoes.append({"type": "Feature", "properties": {"nome": titulo},
+                                feicoes.append({"type": "Feature", "properties": atributos,
                                                 "geometry": mapping(simples)})
                                 vertices += n
                                 total_trechos += 1
@@ -1120,11 +1158,27 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
                        style_function=lambda _: {"color":"#087d8c", "weight":3,
                                                   "fillColor":"#22b8b8", "fillOpacity":.09}).add_to(mapa)
     if rede and rede.get("trechos", 0):
-        folium.GeoJson(rede["geojson"], name="Rede de água — recorte", show=True,
-                       style_function=lambda _: {"color":"#0874bc", "weight":2.6,
-                                                  "opacity":.9},
-                       tooltip=folium.GeoJsonTooltip(fields=["nome"], aliases=["Trecho:"],
-                                                     sticky=True)).add_to(mapa)
+        folium.GeoJson(
+            rede["geojson"], name="Rede de água — recorte", show=True,
+            style_function=lambda _: {"color": "#0874bc", "weight": 2.6, "opacity": .9},
+            tooltip=folium.GeoJsonTooltip(
+                fields=["identificacao", "diametro_nominal", "material", "tipo_pavimento"],
+                aliases=["Trecho (GID):", "Diâmetro nominal:", "Material:", "Pavimento:"],
+                sticky=True, labels=True,
+            ),
+            popup=folium.GeoJsonPopup(
+                fields=["identificacao", "trecho_atual", "trecho_antigo",
+                        "diametro_nominal", "material", "tipo_pavimento",
+                        "extensao", "profundidade", "funcao", "situacao",
+                        "data_implantacao"],
+                aliases=["Trecho (GID):", "Trecho atual:", "Trecho antigo:",
+                         "Diâmetro nominal:", "Material:", "Tipo de pavimento:",
+                         "Extensão:", "Profundidade:", "Função:", "Situação:",
+                         "Data de implantação:"],
+                labels=True,
+                style="font-family:Segoe UI,Arial,sans-serif;font-size:12px;",
+            ),
+        ).add_to(mapa)
 
     # Os demais registros do polígono são apresentados apenas na tabela e no CSV.
     # Nunca criar marcadores ou rótulos para centenas de matrículas da área.
@@ -1407,6 +1461,38 @@ def exibir_consulta_operacional() -> None:
                 st.session_state["m8_integrado_area"] = novo_wkb
                 st.session_state.pop("m8_integrado_rede_id", None)
                 st.rerun()
+
+    if rede and rede.get("trechos", 0):
+        with st.expander("Atributos da rede dentro da área", expanded=False):
+            colunas_rede = {
+                "identificacao": "Trecho (GID)",
+                "trecho_atual": "Trecho atual",
+                "trecho_antigo": "Trecho antigo",
+                "diametro_nominal": "Diâmetro nominal",
+                "material": "Material",
+                "tipo_pavimento": "Tipo de pavimento",
+                "extensao": "Extensão",
+                "profundidade": "Profundidade",
+                "funcao": "Função",
+                "situacao": "Situação",
+                "data_implantacao": "Data de implantação",
+            }
+            tabela_rede = pd.DataFrame(
+                [feicao["properties"] for feicao in rede["geojson"]["features"]]
+            ).drop_duplicates(subset=["identificacao"])
+            tabela_rede = tabela_rede[list(colunas_rede)].rename(columns=colunas_rede)
+            st.caption(
+                f"{len(tabela_rede)} trecho(s) distinto(s) no recorte. "
+                "Os valores são os atributos originais do KML; "
+                "o desenho continua simplificado apenas para renderização."
+            )
+            st.dataframe(tabela_rede, hide_index=True, use_container_width=True, height=300)
+            st.download_button(
+                "Exportar atributos da rede (CSV)",
+                data=tabela_rede.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                file_name="rede_agua_atributos_PRISMA.csv",
+                mime="text/csv", key="m8_exportar_atributos_rede",
+            )
 
     if area is None:
         st.info("Desenhe uma área no mapa para listar todas as matrículas do perímetro e habilitar o recorte da rede, sem abrir outro mapa.")
