@@ -597,3 +597,78 @@ else:
         "de paridade. Após a primeira gravação no Supabase, voltar ao Google Sheets "
         "exige uma sincronização reversa controlada para não perder registros."
     )
+
+
+st.divider()
+st.subheader("📡 Monitoramento da réplica de segurança")
+st.caption(
+    "Fonte oficial: Supabase. A sincronização com o Google Sheets é executada "
+    "separadamente pelo GitHub Actions quando habilitada. "
+    "O monitor abaixo é somente leitura."
+)
+if st.button("Consultar sincronização e pendências", key="farol_replica_status"):
+    try:
+        url, chave = _chave_credencial()
+        headers = {"apikey": chave, "Accept": "application/json"}
+        if not chave.startswith("sb_secret_"):
+            headers["Authorization"] = "Bearer " + chave
+        resultado = requests.get(
+            url + "/rest/v1/farol_acomp_replica_status",
+            params={
+                "select": "id,ultima_execucao,ultimo_sucesso,situacao,"
+                          "pendentes,enviados,atualizados,ultimo_erro",
+                "id": "eq.1",
+            }, headers=headers, timeout=20,
+        )
+        resultado.raise_for_status()
+        status = resultado.json()
+        if not isinstance(status, list) or len(status) != 1:
+            raise ValueError("Tabela de monitoramento não encontrada ou não preparada.")
+        dado = status[0]
+        fila = requests.get(
+            url + "/rest/v1/farol_acomp_replica_fila",
+            params={"select": "id", "processado_em": "is.null", "limit": "1"},
+            headers={**headers, "Prefer": "count=exact"}, timeout=20,
+        )
+        fila.raise_for_status()
+        cr = fila.headers.get("Content-Range", "")
+        if "/" not in cr or cr.endswith("/*"):
+            raise ValueError("Contagem de pendências indisponível.")
+        pendentes = int(cr.rsplit("/", 1)[1])
+        st.metric("Eventos aguardando sincronização", pendentes)
+        st.dataframe([{
+            "Situação": dado.get("situacao") or "",
+            "Última execução (UTC)": dado.get("ultima_execucao") or "Nunca",
+            "Último sucesso (UTC)": dado.get("ultimo_sucesso") or "Nunca",
+            "Linhas inseridas no último ciclo": dado.get("enviados", 0),
+            "Linhas atualizadas no último ciclo": dado.get("atualizados", 0),
+        }], hide_index=True, use_container_width=True)
+        if dado.get("situacao") == "FALHA":
+            st.error("Última sincronização falhou. Verifique o fluxo no GitHub Actions.")
+            if dado.get("ultimo_erro"):
+                st.caption("Tipo de falha: " + str(dado["ultimo_erro"]))
+        elif not dado.get("ultimo_sucesso"):
+            st.warning("Nenhuma sincronização bem-sucedida foi registrada.")
+        else:
+            try:
+                instante = datetime.fromisoformat(
+                    str(dado["ultimo_sucesso"]).replace("Z", "+00:00"))
+                idade = (datetime.now(ZoneInfo("UTC")) - instante).total_seconds()
+                if idade > 20 * 60:
+                    st.warning("A última sincronização ocorreu há mais de 20 minutos.")
+                elif pendentes == 0 and dado.get("situacao") == "SUCESSO":
+                    st.success("Sincronização sem pendências no último monitoramento.")
+                else:
+                    st.info("Há eventos novos aguardando o próximo ciclo.")
+            except (TypeError, ValueError):
+                st.info("Confira o horário da última sincronização informado acima.")
+    except Exception:
+        st.error(
+            "Não foi possível ler o monitor da réplica. "
+            "Confirme a execução de sql/07_replica_farol_supabase_google.sql "
+            "e as permissões no Supabase."
+        )
+st.markdown(
+    "[Abrir sincronizações no GitHub Actions]"
+    "(https://github.com/JothaP/prisma-coi/actions/workflows/replicar-farol-supabase-google.yml)"
+)
