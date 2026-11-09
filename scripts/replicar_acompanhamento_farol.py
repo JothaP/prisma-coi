@@ -304,10 +304,11 @@ def executar(full=False, simulacao=False):
               .format(totais["criados"], totais["atualizados"], sb.pendentes()))
     except Exception as exc:
         # Nunca publicar textos de registros nos logs do CI.
-        try:
-            sb.salvar_status(False, erro=type(exc).__name__)
-        except Exception:
-            pass
+        if not simulacao:
+            try:
+                sb.salvar_status(False, erro=type(exc).__name__)
+            except Exception:
+                pass
         raise RuntimeError("Replica nao concluida. Consulte o status administrativo e os logs protegidos do job.") from exc
 
 
