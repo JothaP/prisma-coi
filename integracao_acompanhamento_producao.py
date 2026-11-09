@@ -5,6 +5,7 @@ import gspread
 import random
 import time
 import streamlit as st
+from farol_acomp_supabase_backend import fonte_supabase, listar as sb_listar, buscar_por_evento as sb_por_evento
 from google.oauth2.service_account import Credentials
 
 CAMPOS_VINCULO = ["chave", "evento_id", "municipio", "bairros", "latitude", "longitude", "os_origem", "criado_em"]
@@ -122,6 +123,8 @@ def chave_concentracao(municipio, latitude, longitude, numeros_os):
     return hashlib.sha256(base.encode()).hexdigest()[:32]
 
 def listar_vinculos():
+    if fonte_supabase():
+        return sb_listar("vinculos")
     return _todas_tabelas(planilha_id())["vinculos_farol_producao"]
 
 def localizar_vinculo(chave, municipio, latitude, longitude, numeros_os):
@@ -133,6 +136,8 @@ def localizar_vinculo(chave, municipio, latitude, longitude, numeros_os):
     return None
 
 def registrar_vinculo(contexto, evento_id):
+    if fonte_supabase():
+        raise RuntimeError("No Supabase, vínculo e ficha são criados juntos; use a criação transacional.")
     aba = _aba("vinculos_farol_producao", CAMPOS_VINCULO, criar=True)
     existentes = listar_vinculos()
     chave = contexto["chave"]
@@ -146,10 +151,14 @@ def registrar_vinculo(contexto, evento_id):
     invalidar_cache_acompanhamento()
 
 def dados_acompanhamento():
+    if fonte_supabase():
+        return {str(r["id"]): r for r in sb_listar("fichas")}
     return {str(r["id"]): r for r in _todas_tabelas(planilha_id())["eventos"]}
 
 
 def historico_evento(evento_id):
+    if fonte_supabase():
+        return sb_por_evento("movimentacoes", evento_id)
     return [r for r in _todas_tabelas(planilha_id())["movimentacoes"]
             if str(r.get("evento_id", "")) == str(evento_id)]
 
