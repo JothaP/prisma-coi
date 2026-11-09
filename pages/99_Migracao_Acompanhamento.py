@@ -430,3 +430,38 @@ if st.button("5. Testar leitura individual no Supabase", key="farol_teste_leitur
             )
     except Exception as erro:
         st.error(f"Teste de leitura não concluído: {erro}")
+
+
+st.divider()
+st.subheader("Etapa 4 — Preparação da gravação transacional")
+st.caption(
+    "Após executar o SQL da Etapa 4, confira se as fichas possuem a coluna "
+    "de controle de versão. Esta consulta NÃO grava nem altera acompanhamentos. "
+    "A fonte oficial continua sendo o Google Sheets."
+)
+if st.button("6. Verificar coluna de controle de versão",
+             key="farol_acomp_validar_coluna_versao"):
+    try:
+        dados = _solicitar(
+            "GET", "farol_acomp_fichas",
+            params={"select": "id,versao", "order": "id.asc", "limit": 1},
+        )
+        if not isinstance(dados, list):
+            raise ValueError("Formato de retorno inesperado.")
+        if dados and (not isinstance(dados[0].get("versao"), int)
+                      or dados[0]["versao"] < 1):
+            raise ValueError("Controle de versão inválido na tabela de fichas.")
+        st.success(
+            "Coluna 'versao' disponível no Supabase. "
+            "A gravação do Módulo 3 permanece no Google Sheets."
+        )
+        if dados:
+            st.caption(
+                f"Exemplo verificado: acompanhamento {dados[0]['id']} "
+                f"· versão {dados[0]['versao']}."
+            )
+    except Exception as erro:
+        st.error(
+            "A coluna de versão ainda não está disponível ou a consulta falhou: "
+            + str(erro)
+        )
