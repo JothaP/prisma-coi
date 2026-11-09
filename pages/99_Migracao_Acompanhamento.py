@@ -465,3 +465,65 @@ if st.button("6. Verificar coluna de controle de versão",
             "A coluna de versão ainda não está disponível ou a consulta falhou: "
             + str(erro)
         )
+
+
+st.divider()
+st.subheader("Etapa 5 — Teste do adaptador do Módulo 3")
+st.caption(
+    "Executa a mesma leitura que será usada pelo Farol quando a fonte Supabase "
+    "for ativada. Não altera nenhum registro ou Secret."
+)
+if st.button("7. Testar adaptador Supabase do Módulo 3",
+             key="farol_supabase_teste_adaptador"):
+    try:
+        from farol_acomp_supabase_backend import listar as sb_listar
+        nomes = {
+            "farol_acomp_fichas": "fichas",
+            "farol_acomp_vinculos": "vinculos",
+            "farol_acomp_movimentacoes": "movimentacoes",
+        }
+        with st.spinner("Consultando o adaptador e comparando os três conjuntos..."):
+            origem = _carregar_origem()
+            resultado = []
+            for tabela, tipo in nomes.items():
+                pk = FONTES[tabela][2]
+                campos = FONTES[tabela][1]
+                linhas_origem = origem[tabela]
+                linhas_destino = sb_listar(tipo)
+                originais = {str(r[pk]): _hash_linha(r) for r in linhas_origem}
+                destino = {
+                    str(r[pk]): _hash_linha({
+                        campo: str(r.get(campo, "") if r.get(campo, "") is not None else "")
+                        for campo in campos
+                    })
+                    for r in linhas_destino
+                }
+                versoes_validas = (
+                    all(isinstance(r.get("versao"), int) and r["versao"] >= 1
+                        for r in linhas_destino)
+                    if tipo == "fichas" else True
+                )
+                iguais = (
+                    len(originais) == len(linhas_origem)
+                    and len(destino) == len(linhas_destino)
+                    and originais == destino and versoes_validas
+                )
+                resultado.append({
+                    "Tabela": tabela,
+                    "Google Sheets": len(linhas_origem),
+                    "Adaptador Supabase": len(linhas_destino),
+                    "Validado": "Sim" if iguais else "Não",
+                })
+        st.dataframe(resultado, hide_index=True, use_container_width=True)
+        if all(item["Validado"] == "Sim" for item in resultado):
+            st.success(
+                "Adaptador de leitura aprovado nas três tabelas. "
+                "O Google Sheets permanece como fonte oficial."
+            )
+        else:
+            st.warning(
+                "Há diferenças na leitura ou no controle de versão. "
+                "Não libere a gravação no Supabase até corrigir."
+            )
+    except Exception as erro:
+        st.error(f"Teste do adaptador não concluído: {erro}")
