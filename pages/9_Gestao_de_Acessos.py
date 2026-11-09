@@ -2,7 +2,8 @@
 import streamlit as st
 from auth import exigir_acesso_modulo, verificar_autenticacao
 from prisma_backend import (ACOES, MODULOS, ErroPRISMA, listar_perfis, atualizar_usuario,
-    perfil_de_usuario, permissoes_usuario, permissoes_efetivas, salvar_permissoes)
+    perfil_de_usuario, permissoes_usuario, permissoes_efetivas, salvar_permissoes,
+    espelhar_permissoes)
 
 st.set_page_config(page_title="PRISMA | Gestão de Acessos",page_icon="🔐",layout="wide")
 exigir_acesso_modulo("gestao")
@@ -56,6 +57,69 @@ if salvar:
         st.success("Perfil atualizado.")
         st.rerun()
     except ErroPRISMA as erro:st.error(str(erro))
+
+st.subheader("Espelhar permissões de outro usuário")
+st.caption(
+    "Selecione um usuário modelo para substituir, de uma vez, as permissões individuais "
+    "da conta escolhida. O perfil e a situação do cadastro não serão alterados."
+)
+if u["perfil"]=="admin":
+    st.info("Administradores possuem permissões definidas pelo perfil e não podem receber espelhamento.")
+else:
+    modelos = {
+        outro["id"]: outro for outro in usuarios
+        if outro["id"] != u["id"] and outro["status"] == "ativo"
+    }
+    if not modelos:
+        st.info("Não há outro usuário ativo disponível para usar como modelo.")
+    else:
+        with st.form("espelhar_permissoes_" + str(u["id"])):
+            origem_id = st.selectbox(
+                "Copiar permissões de",
+                options=list(modelos),
+                format_func=lambda identificador: (
+                    f"{modelos[identificador]['nome']} — "
+                    f"{modelos[identificador]['email']} "
+                    f"({modelos[identificador]['perfil']})"
+                ),
+            )
+            st.caption(
+                "Copia inclusive as permissões padrão e as personalizações do modelo. "
+                "Não concede o perfil de administrador nem acesso à Gestão de Acessos. "
+                "A visualização do Módulo 9 permanece liberada a todas as contas ativas."
+            )
+            confirmar_espelho = st.checkbox(
+                f"Confirmo a substituição de todas as permissões individuais de {u['nome'] or u['email']}.",
+                key="confirmar_espelho_" + str(u["id"]),
+            )
+            executar_espelho = st.form_submit_button(
+                "Aplicar permissões do usuário modelo",
+                type="primary", use_container_width=True,
+            )
+        if executar_espelho:
+            if not confirmar_espelho:
+                st.warning("Confirme a substituição das permissões antes de aplicar.")
+            else:
+                try:
+                    espelhar_permissoes(ator, origem_id, u["id"])
+                    # As caixas da edição manual já existem em session_state;
+                    # apagá-las garante que exibam as permissões recém-copiadas.
+                    prefixo = f"perm_{u['id']}_"
+                    for chave in list(st.session_state):
+                        if chave.startswith(prefixo):
+                            st.session_state.pop(chave, None)
+                    st.session_state.pop("confirmar_espelho_" + str(u["id"]), None)
+                    st.session_state["msg_espelhamento_sucesso"] = (
+                        f"Permissões de {modelos[origem_id]['nome'] or modelos[origem_id]['email']} "
+                        f"aplicadas a {u['nome'] or u['email']}."
+                    )
+                    st.rerun()
+                except ErroPRISMA as erro:
+                    st.error(str(erro))
+
+mensagem_espelho = st.session_state.pop("msg_espelhamento_sucesso", None)
+if mensagem_espelho:
+    st.success(mensagem_espelho)
 
 st.subheader("Permissões por ferramenta")
 st.caption("As opções abaixo substituem as permissões padrão do perfil. A visualização do Módulo 9 — Gestão de Ativos é liberada para todas as contas ativas; as demais ações continuam individuais.")
