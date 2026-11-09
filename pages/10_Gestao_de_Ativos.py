@@ -424,6 +424,8 @@ if not HISTORICO_DISPONIVEL:
 
 if mensagem := st.session_state.pop("ga_mensagem", None):
     st.success(mensagem)
+if erro_status := st.session_state.pop("ga_erro_status", None):
+    st.error(erro_status)
 if aviso := st.session_state.pop("ga_aviso_auditoria", None):
     st.warning(aviso)
 
@@ -456,8 +458,8 @@ if modo_cadastro:
     st.info("Clique em um local livre do mapa para abrir o formulário de um novo poço.")
 else:
     st.caption(
-        "Passe o mouse para informações rápidas. Ao clicar no marcador, "
-        "use o seletor de status e a ficha completa abaixo do mapa."
+        "Clique no marcador para atualizar o status no próprio mapa. "
+        "A ficha completa continua no painel abaixo."
     )
 
 try:
@@ -498,6 +500,12 @@ else:
 
 Fullscreen(position="topright", title="Expandir mapa para tela cheia",
            title_cancel="Sair da tela cheia", force_separate_button=True).add_to(mapa)
+mapa.get_root().header.add_child(Element(ESTILO_STATUS_NO_MAPA))
+mapa.add_child(PonteStatusFolium())
+
+pode_editar_status = pode_executar_acao("9", "editar") and HISTORICO_DISPONIVEL
+painel_mapa = st.session_state.get("ga_painel") or {}
+id_selecionado = str(painel_mapa.get("id") or "") if painel_mapa.get("tipo") == "ficha" else ""
 
 for registro in ativos:
     if registro.get("latitude") is None or registro.get("longitude") is None:
@@ -518,6 +526,10 @@ for registro in ativos:
     )
     folium.Marker(
         [lat, lon], tooltip=folium.Tooltip(tooltip, sticky=True),
+        popup=folium.Popup(
+            _status_popup_html(registro, pode_editar_status), max_width=390,
+            show=str(registro["id"]) == id_selecionado,
+        ),
         icon=folium.Icon(color="blue", icon="tint", prefix="fa"),
         z_index_offset=300,
     ).add_to(mapa)
@@ -582,7 +594,6 @@ if painel.get("tipo") == "ficha" and painel.get("id"):
         st.error(str(exc))
         registro_selecionado = None
     if registro_selecionado:
-        _seletor_status_rapido(registro_selecionado)
         _painel_ativo(painel["id"], registro=registro_selecionado)
     else:
         st.warning("O ativo selecionado não está disponível. Selecione outro marcador.")
