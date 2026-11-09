@@ -296,8 +296,17 @@ with f4:
     mapa_base = st.selectbox("Mapa-base", ["Padrão", "Satélite", "Terreno"])
 
 pode_criar = pode_executar_acao("9", "criar") and HISTORICO_DISPONIVEL
-modo_cadastro = st.toggle("Cadastrar clicando no mapa", value=False,
-                           disabled=not pode_criar, key="ga_modo_cadastro")
+col_rotulos, col_cadastro, _ = st.columns([1.25, 1.7, 3])
+with col_rotulos:
+    mostrar_rotulos = st.toggle(
+        "Exibir rótulos", value=False, key="ga_exibir_rotulos",
+        help="Desligado por padrão para reduzir a quantidade de elementos renderizados no mapa.",
+    )
+with col_cadastro:
+    modo_cadastro = st.toggle(
+        "Cadastrar clicando no mapa", value=False,
+        disabled=not pode_criar, key="ga_modo_cadastro",
+    )
 if modo_cadastro:
     st.info("Clique em um local livre do mapa para abrir o formulário de um novo poço.")
 else:
@@ -364,19 +373,22 @@ for registro in ativos:
         icon=folium.Icon(color="blue", icon="tint", prefix="fa"),
         z_index_offset=300,
     ).add_to(mapa)
-    rotulo = escape(planta) + (f" · {escape(nome)}" if nome else "")
-    folium.Marker(
-        [lat, lon], interactive=False, keyboard=False,
-        icon=folium.DivIcon(
-            html=("<div style='pointer-events:none;white-space:nowrap;"
-                  "font:600 11px Segoe UI,Arial,sans-serif;color:#153257;"
-                  "background:rgba(255,255,255,.93);padding:3px 5px;"
-                  "border:1px solid #cfdae6;border-radius:4px;"
-                  "box-shadow:0 1px 3px #0002;width:max-content;'>"
-                  + rotulo + "</div>"),
-            icon_size=(0, 0), icon_anchor=(-13, 10),
-        ),
-    ).add_to(mapa)
+    # Nenhum marcador/rótulo extra é gerado quando a opção está desligada.
+    # Isso reduz o tamanho do HTML e o processamento no navegador.
+    if mostrar_rotulos:
+        rotulo = escape(planta) + (f" · {escape(nome)}" if nome else "")
+        folium.Marker(
+            [lat, lon], interactive=False, keyboard=False,
+            icon=folium.DivIcon(
+                html=("<div style='pointer-events:none;white-space:nowrap;"
+                      "font:600 11px Segoe UI,Arial,sans-serif;color:#153257;"
+                      "background:rgba(255,255,255,.93);padding:3px 5px;"
+                      "border:1px solid #cfdae6;border-radius:4px;"
+                      "box-shadow:0 1px 3px #0002;width:max-content;'>"
+                      + rotulo + "</div>"),
+                icon_size=(0, 0), icon_anchor=(-13, 10),
+            ),
+        ).add_to(mapa)
 
 if len(coordenadas) > 1:
     mapa.fit_bounds(coordenadas, padding=(30, 30), max_zoom=14)
