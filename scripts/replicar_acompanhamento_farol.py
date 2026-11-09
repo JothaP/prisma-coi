@@ -199,7 +199,7 @@ def conferir_aba(ws, nome, pk, colunas):
     return indice
 
 
-def atualizar_aba(ws, nome, pk, colunas, registros):
+def atualizar_aba(ws, nome, pk, colunas, registros, *, simulacao=False):
     """Reconcilia por PK, conservando linhas preexistentes; reexecucao idempotente."""
     indice = conferir_aba(ws, nome, pk, colunas)
     vistos = set()
@@ -220,6 +220,8 @@ def atualizar_aba(ws, nome, pk, colunas, registros):
                 "range": f"A{antigo[0]}:{coluna_fim}{antigo[0]}",
                 "values": [valores],
             })
+    if simulacao:
+        return len(insercoes), len(mudancas)
     # Mais de 500 ranges por batch pode exceder o tamanho da requisicao.
     for i in range(0, len(mudancas), 100):
         ws.batch_update(mudancas[i:i + 100], value_input_option="RAW")
@@ -249,7 +251,7 @@ def registrar_exclusoes(planilha, exclusoes):
         ws.append_rows(novos, value_input_option="RAW")
 
 
-def executar(full=False):
+def executar(full=False, simulacao=False):
     sb = Supabase()
     try:
         google, planilha = cliente_google()
@@ -279,7 +281,8 @@ def executar(full=False):
                 if not set(estado).issubset(referencias):
                     raise RuntimeError("Consulta retornou chave nao solicitada.")
             ws = planilha.worksheet(aba_nome)
-            novos, alterados = atualizar_aba(ws, aba_nome, pk, colunas, registros)
+            novos, alterados = atualizar_aba(
+                ws, aba_nome, pk, colunas, registros, simulacao=simulacao)
             totais["criados"] += novos
             totais["atualizados"] += alterados
             for chave, evento in por_tabela[tabela].items():
@@ -288,6 +291,11 @@ def executar(full=False):
                 elif chave not in estado:
                     raise RuntimeError(
                         "Fila indica insercao/edicao mas registro nao existe; revise a origem.")
+        if simulacao:
+            print("SIMULACAO (nenhum dado alterado): seriam inseridas {} "
+                  "e atualizadas {} linhas. Exclusoes identificadas: {}."
+                  .format(totais["criados"], totais["atualizados"], len(exclusoes)))
+            return
         registrar_exclusoes(planilha, exclusoes)
         # Acks apenas depois de atualizar as tres planilhas e registrar exclusoes.
         sb.confirmar([v["id"] for v in pendentes])
@@ -346,12 +354,14 @@ def main():
                         help="Reconciliacao inicial/total dos dados do Supabase")
     parser.add_argument("--backup-only", action="store_true",
                         help="Exporta snapshot no Google Drive privado configurado")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Simula reconciliacao sem gravar na replica")
     args = parser.parse_args()
     try:
         if args.backup_only:
             backup_drive()
         else:
-            executar(full=args.full)
+            executar(full=args.full, simulacao=args.dry_run)
     except Exception:
         print("ERRO: rotina de replica/backup nao concluida. Verifique as configuracoes e o monitor.",
               file=sys.stderr)
