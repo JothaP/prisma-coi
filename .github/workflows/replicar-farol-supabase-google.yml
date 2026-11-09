@@ -1,0 +1,67 @@
+name: Replica Acompanhamento Farol - Supabase para Google Sheets
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      full:
+        description: 'Reconciliar todas as fichas, vinculos e movimentacoes'
+        type: boolean
+        default: false
+      backup:
+        description: 'Criar backup historico na pasta privada do Google Drive'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: farol-acomp-replica-unica
+  cancel-in-progress: false
+
+jobs:
+  replicar:
+    if: ${{ vars.FAROL_REPLICA_ATIVA == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRISMA_SUPABASE_URL: ${{ secrets.PRISMA_SUPABASE_URL }}
+      PRISMA_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PRISMA_SUPABASE_SERVICE_ROLE_KEY }}
+      FAROL_GCP_JSON: ${{ secrets.FAROL_GCP_JSON }}
+      FAROL_ACOMP_SPREADSHEET_ID: ${{ secrets.FAROL_ACOMP_SPREADSHEET_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias da replica
+        run: python -m pip install 'requests>=2.32,<3' 'gspread>=6,<7' 'google-auth>=2.35,<3'
+      - name: Sincronizar eventos pendentes
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.full != true }}
+        run: python scripts/replicar_acompanhamento_farol.py
+      - name: Reconciliacao integral (primeira execucao)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.full == true }}
+        run: python scripts/replicar_acompanhamento_farol.py --full
+
+  backup-historico:
+    if: ${{ vars.FAROL_REPLICA_ATIVA == 'true' && (github.event.schedule == '17 3 * * *' || (github.event_name == 'workflow_dispatch' && inputs.backup == true)) }}
+    needs: replicar
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PRISMA_SUPABASE_URL: ${{ secrets.PRISMA_SUPABASE_URL }}
+      PRISMA_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.PRISMA_SUPABASE_SERVICE_ROLE_KEY }}
+      FAROL_GCP_JSON: ${{ secrets.FAROL_GCP_JSON }}
+      FAROL_BACKUP_DRIVE_FOLDER_ID: ${{ secrets.FAROL_BACKUP_DRIVE_FOLDER_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias do backup privado
+        run: python -m pip install 'requests>=2.32,<3' 'gspread>=6,<7' 'google-auth>=2.35,<3' 'google-api-python-client>=2.150,<3'
+      - name: Snapshot historico fora do GitHub
+        run: python scripts/replicar_acompanhamento_farol.py --backup-only
