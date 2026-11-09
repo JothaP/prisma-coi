@@ -161,6 +161,10 @@ def permissoes_efetivas(perfil,linhas):
     for r in linhas:
         m,a=r.get("modulo"),r.get("acao")
         if (m,a) in base and m!="gestao":base[(m,a)]=bool(r.get("permitido"))
+    # Gestão de Ativos: visualização universal para contas ativas.
+    # A autenticação já bloqueia cadastros pendentes ou bloqueados.
+    # Preserva todas as demais permissões individuais de criação/edição.
+    base[("9","visualizar")]=True
     # Somente perfil admin pode acessar o gerenciamento de permissões.
     for a in ACOES:base[("gestao",a)]=(perfil=="admin")
     return base
@@ -228,7 +232,8 @@ def salvar_permissoes(ator,alvo,matriz):
     if not perfil:raise ErroPRISMA("Usuário não encontrado")
     if perfil["perfil"]=="admin":raise ErroPRISMA("As permissões de administradores são gerenciadas pelo perfil.")
     itens=[{"usuario_id":str(alvo),"modulo":m,"acao":a,"permitido":bool(v)} for (m,a),v in matriz.items()
-            if m in MODULOS and m!="gestao" and a in ACOES]
+            if m in MODULOS and m!="gestao" and a in ACOES
+            and (m,a)!=("9","visualizar")]  # Leitura do módulo 9 é universal.
     _tabela("prisma_permissoes",method="POST",params={"on_conflict":"usuario_id,modulo,acao"},
             payload=itens,prefer="resolution=merge-duplicates,return=minimal")
     auditar(ator, "alterar_permissoes", alvo, f"{len(itens)} permissões atualizadas",
