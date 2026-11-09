@@ -7,7 +7,7 @@ Permissões e autenticação centralizadas em auth.py e prisma_backend.py.
 from html import escape
 import streamlit as st
 
-from prisma_backend import ErroPRISMA, entrar, cadastrar, confirmar, pedir_recuperacao, mudar_senha_token, configuracao
+from prisma_backend import ErroPRISMA, entrar, cadastrar, confirmar, reenviar_confirmacao, pedir_recuperacao, mudar_senha_token, configuracao
 from auth import (
     iniciar_sessao,
     verificar_autenticacao,
@@ -513,6 +513,9 @@ if not verificar_autenticacao():
                     with col_recuperar:
                         st.button("Esqueci minha senha", key="prisma_link_recuperar", use_container_width=True,
                                   on_click=definir_etapa_login, args=("Recuperar senha",))
+                    st.button("Confirmar e-mail / Reenviar código", key="prisma_link_confirmar",
+                              use_container_width=True, on_click=definir_etapa_login,
+                              args=("Confirmar e-mail",))
 
                 elif etapa == "Criar conta":
                     st.markdown('<div class="prisma-login-heading">Criar conta</div>'
@@ -555,6 +558,22 @@ if not verificar_autenticacao():
                         try:
                             confirmar(email, codigo)
                             st.success("E-mail confirmado. Aguarde a aprovação do administrador.")
+                        except ErroPRISMA as erro:
+                            st.error(str(erro))
+                    st.caption("Não recebeu o código? Confira a caixa de spam ou solicite um novo envio.")
+                    with st.form("prisma_reenviar_confirmacao"):
+                        email_reenvio = st.text_input("E-mail cadastrado para reenvio",
+                                                       key="prisma_reenvio_email")
+                        reenviar = st.form_submit_button(
+                            "Reenviar código de confirmação",
+                            use_container_width=True, disabled=not login_configurado)
+                    if reenviar:
+                        try:
+                            reenviar_confirmacao(email_reenvio)
+                            st.success(
+                                "Se houver um cadastro aguardando confirmação, um novo código "
+                                "será enviado. Confira também o spam e o lixo eletrônico."
+                            )
                         except ErroPRISMA as erro:
                             st.error(str(erro))
                     st.button("Voltar ao login", key="prisma_voltar_confirmacao",
