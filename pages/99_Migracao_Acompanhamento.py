@@ -358,3 +358,75 @@ if st.button("4. Verificar se a cópia continua atualizada", key="farol_acomp_pa
             )
     except Exception as erro:
         st.error(f"Não foi possível comparar as fontes: {erro}")
+
+
+st.divider()
+st.subheader("Etapa 3 — Validação da leitura individual pelo Supabase")
+st.caption(
+    "Teste somente leitura. Permite conferir uma ficha e seus registros vinculados "
+    "sem modificar o Farol, suas tabelas ou a fonte de produção."
+)
+evento_teste = st.text_input(
+    "ID do acompanhamento para conferir", placeholder="Ex.: 124",
+    key="farol_supabase_id_teste",
+)
+if st.button("5. Testar leitura individual no Supabase", key="farol_teste_leitura_supabase"):
+    try:
+        if not evento_teste.strip():
+            raise ValueError("Informe o ID de uma ficha existente no acompanhamento.")
+        from farol_acomp_supabase_leitura import (
+            ler_ficha, ler_movimentacoes, ler_vinculos
+        )
+        # A origem é relida diretamente do Google Sheets, não do backup em sessão.
+        atual = _carregar_origem()
+        ficha_origem = next(
+            (r for r in atual["farol_acomp_fichas"] if r["id"] == evento_teste.strip()), None
+        )
+        if ficha_origem is None:
+            raise ValueError("A ficha não foi encontrada no Google Sheets atual.")
+        ficha_destino = ler_ficha(evento_teste)
+        vinculos_destino = ler_vinculos(evento_teste)
+        movimentos_destino = ler_movimentacoes(evento_teste)
+        conjuntos = [
+            ("Ficha", "farol_acomp_fichas", [ficha_destino] if ficha_destino else []),
+            ("Vínculos", "farol_acomp_vinculos", vinculos_destino),
+            ("Movimentações", "farol_acomp_movimentacoes", movimentos_destino),
+        ]
+        resumo_ficha = []
+        for nome, tabela, encontrados in conjuntos:
+            pk = FONTES[tabela][2]
+            colunas = FONTES[tabela][1]
+            origem_id = {
+                str(r[pk]): r for r in atual[tabela]
+                if tabela == "farol_acomp_fichas" and str(r["id"]) == evento_teste.strip()
+                or tabela != "farol_acomp_fichas" and str(r.get("evento_id")) == evento_teste.strip()
+            }
+            destino_id = {str(r[pk]): r for r in encontrados}
+            # Confere o conteúdo, não apenas o hash da importação.
+            iguais = (
+                origem_id.keys() == destino_id.keys()
+                and all(
+                    _hash_linha(origem_id[k]) ==
+                    _hash_linha({col: str(destino_id[k].get(col, "")) for col in colunas})
+                    for k in origem_id
+                )
+            )
+            resumo_ficha.append({
+                "Conjunto": nome,
+                "Google Sheets": len(origem_id),
+                "Supabase": len(destino_id),
+                "Conteúdo equivalente": "Sim" if iguais else "Não",
+            })
+        st.dataframe(resumo_ficha, hide_index=True, use_container_width=True)
+        if all(linha["Conteúdo equivalente"] == "Sim" for linha in resumo_ficha):
+            st.success(
+                "Leitura individual aprovada. Ficha, vínculos e movimentações "
+                "correspondem aos dados atuais do Google Sheets."
+            )
+        else:
+            st.warning(
+                "Foi encontrada uma diferença no acompanhamento. "
+                "Não altere a fonte de produção até reconciliar os registros."
+            )
+    except Exception as erro:
+        st.error(f"Teste de leitura não concluído: {erro}")
