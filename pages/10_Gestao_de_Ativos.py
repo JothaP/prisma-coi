@@ -42,6 +42,16 @@ STATUS = {
     "parado": "Parado",
     "em_manutencao": "Em manutenção",
     "inativo": "Inativo",
+    "validar": "Validar",
+}
+# Uma única paleta para os marcadores, o popup e a legenda.
+CORES_STATUS = {
+    "operando": "#2563EB",       # Azul
+    "parado": "#EF4444",         # Vermelho
+    "em_manutencao": "#FACC15",  # Amarelo
+    "inativo": "#64748B",        # Cinza
+    "validar": "#9333EA",        # Roxo
+    "": "#94A3B8",               # Sem status: cinza claro
 }
 ROTULOS = {
     "planta": "Planta", "nome": "Nome", "municipio": "Município",
@@ -210,18 +220,37 @@ def _fechar_painel():
 
 
 
+def _icone_marcador_status(status):
+    """Pin SVG colorido com gota branca, inclusive amarelo real."""
+    cor = CORES_STATUS.get(_texto(status), CORES_STATUS[""])
+    desenho = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="34" height="45" '
+        'viewBox="0 0 34 45" role="img" aria-label="Ativo">'
+        '<path d="M17 1C7.8 1 1.5 7.9 1.5 17.1C1.5 29.3 17 43 17 43'
+        'S32.5 29.3 32.5 17.1C32.5 7.9 26.2 1 17 1Z" '
+        f'fill="{cor}" stroke="#FFFFFF" stroke-width="1.6"/>'
+        '<path d="M17 11C14.8 14.6 12.7 17.1 12.7 20.1'
+        'a4.3 4.3 0 0 0 8.6 0C21.3 17.1 19.2 14.6 17 11Z" '
+        'fill="#FFFFFF"/></svg>'
+    )
+    return folium.DivIcon(
+        html=f'<div class="ga-pin-cor">{desenho}</div>',
+        icon_size=(34, 45),
+        icon_anchor=(17, 43),
+        class_name="ga-icone-status",
+    )
+
+
 def _status_popup_html(registro, permitido):
     """Apresentação do formulário do Leaflet; gravação continua no Python."""
     planta = escape(_texto(registro.get("planta")) or "Ativo")
     nome = escape(_texto(registro.get("nome")))
     municipio = escape(_texto(registro.get("municipio")))
     atual = _texto(registro.get("status"))
-    cores = {
-        "operando": "#16a34a", "parado": "#ef4444",
-        "em_manutencao": "#f59e0b", "inativo": "#64748b",
-    }
     opcoes = []
-    for codigo, cor in cores.items():
+    for codigo, cor in CORES_STATUS.items():
+        if not codigo:
+            continue
         selecionado = " checked" if atual == codigo else ""
         desabilitado = " disabled" if not permitido else ""
         opcoes.append(
@@ -252,6 +281,13 @@ def _status_popup_html(registro, permitido):
 
 ESTILO_STATUS_NO_MAPA = """
 <style>
+.leaflet-marker-icon.ga-icone-status {
+    background: transparent !important;
+    border: 0 !important;
+    overflow: visible !important;
+}
+.ga-pin-cor {width:34px;height:45px;filter:drop-shadow(0 2px 2px rgba(0,0,0,.28));}
+.ga-pin-cor svg {display:block;overflow:visible;}
 .ga-status-popup {min-width:255px;max-width:340px;color:#1d2c43;
     font-family:Segoe UI,Arial,sans-serif;font-size:13px;}
 .ga-status-titulo {font-weight:800;font-size:17px;}
@@ -307,7 +343,7 @@ class PonteStatusFolium(MacroElement):
                 msg.textContent = "O status selecionado já é o atual.";
                 return;
             }
-            if (["operando","parado","em_manutencao","inativo"].indexOf(radio.value) < 0) return;
+            if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) return;
             // Capturado pelo last_object_clicked_tooltip do streamlit-folium.
             // Sem chamada REST e sem segredos no navegador.
             var tooltip = marcador.getTooltip().getContent();
@@ -462,6 +498,20 @@ else:
         "A ficha completa continua no painel abaixo."
     )
 
+# Mesma legenda usada no pin e no formulário de atualização rápida.
+legenda_status = "".join(
+    '<span style="display:inline-flex;align-items:center;gap:5px;margin-right:16px;'
+    'white-space:nowrap">'
+    f'<span style="display:inline-block;width:11px;height:11px;border-radius:50%;'
+    f'background:{CORES_STATUS[codigo]};border:1px solid #94a3b8"></span>'
+    f'{escape(nome)}</span>'
+    for codigo, nome in STATUS.items() if codigo
+)
+st.markdown(
+    '<div style="font-size:12px;margin:0 0 8px 0">' + legenda_status + '</div>',
+    unsafe_allow_html=True,
+)
+
 try:
     registros = _listar(municipio, pesquisa, status)
 except ErroPRISMA as exc:
@@ -530,7 +580,7 @@ for registro in ativos:
             _status_popup_html(registro, pode_editar_status), max_width=390,
             show=str(registro["id"]) == id_selecionado,
         ),
-        icon=folium.Icon(color="blue", icon="tint", prefix="fa"),
+        icon=_icone_marcador_status(registro.get("status")),
         z_index_offset=300,
     ).add_to(mapa)
     # Nenhum marcador/rótulo extra é gerado quando a opção está desligada.
@@ -563,7 +613,7 @@ if resultado:
     tooltip = str(resultado.get("last_object_clicked_tooltip") or "")
     evento_marcador = (clicks, tooltip)
     sinal_status = re.fullmatch(
-        r"PRISMA_STATUS=([0-9a-fA-F-]{36})\|(operando|parado|em_manutencao|inativo)"
+        r"PRISMA_STATUS=([0-9a-fA-F-]{36})\|(operando|parado|em_manutencao|inativo|validar)"
         r"\|([0-9]{10,16}_[a-z0-9]{4,12})",
         tooltip,
     )
