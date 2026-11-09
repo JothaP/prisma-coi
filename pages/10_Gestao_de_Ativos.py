@@ -165,6 +165,9 @@ def _historico(registro):
     if not eventos:
         st.info("Nenhuma edição registrada desde a ativação do histórico.")
         return
+
+    # A ficha agora fica em um expander: não aninhar expanders no histórico.
+    titulos = []
     for evento in eventos:
         data = str(evento.get("registrado_em") or "")
         try:
@@ -176,83 +179,103 @@ def _historico(registro):
         operacao = {
             "criacao": "Criação", "edicao": "Edição", "exclusao": "Exclusão",
         }.get(evento.get("operacao"), "Alteração")
-        with st.expander(f"{data} · {operacao} · {autor}"):
-            st.caption(evento.get("usuario_email") or "")
-            diferencas = evento.get("campos_alterados") or {}
-            if diferencas:
-                for campo, mudanca in diferencas.items():
-                    if campo in ("atualizado_em", "atualizado_por"):
-                        continue
-                    anterior = (mudanca or {}).get("antes")
-                    novo = (mudanca or {}).get("depois")
-                    st.write(f"**{ROTULOS.get(campo, campo)}:** "
-                             f"{_texto(anterior) or '—'} → {_texto(novo) or '—'}")
-            else:
-                st.write("Registro de criação ou alteração sem campos detalhados.")
+        titulos.append(f"{data} · {operacao} · {autor}")
+
+    indice = st.selectbox(
+        "Selecione a movimentação", range(len(eventos)),
+        format_func=lambda i: titulos[i],
+        key="ga_historico_evento_" + str(registro["id"]),
+    )
+    evento = eventos[indice]
+    with st.container(border=True):
+        st.markdown(f"**{titulos[indice]}**")
+        st.caption(evento.get("usuario_email") or "")
+        diferencas = evento.get("campos_alterados") or {}
+        if diferencas:
+            for campo, mudanca in diferencas.items():
+                if campo in ("atualizado_em", "atualizado_por"):
+                    continue
+                anterior = (mudanca or {}).get("antes")
+                novo = (mudanca or {}).get("depois")
+                st.write(f"**{ROTULOS.get(campo, campo)}:** "
+                         f"{_texto(anterior) or '—'} → {_texto(novo) or '—'}")
+        else:
+            st.write("Registro de criação ou alteração sem campos detalhados.")
 
 
-@st.dialog("Ficha do ativo", width="large")
-def abrir_ficha(ativo_id):
+def _fechar_painel():
+    st.session_state.pop("ga_painel", None)
+
+
+def _painel_ativo(ativo_id):
     try:
         registro = obter_ativo(ativo_id)
     except ErroPRISMA as exc:
         st.error(str(exc))
         return
     if not registro:
-        st.error("Ativo não encontrado.")
+        st.warning("Ativo não encontrado. Selecione outro marcador no mapa.")
+        st.session_state.pop("ga_painel", None)
         return
-    st.subheader(_texto(registro.get("planta")))
-    st.caption(
-        f"{_texto(registro.get('municipio'))} · "
-        f"{float(registro['latitude']):.6f}, {float(registro['longitude']):.6f}"
-    )
-    aba_dados, aba_historico = st.tabs(["Cadastro", "Histórico de alterações"])
-    with aba_dados:
+
+    planta = _texto(registro.get("planta")) or "Sem identificação"
+    nome = _texto(registro.get("nome"))
+    titulo = f"Ficha do ativo — {planta}" + (f" · {nome}" if nome else "")
+    with st.expander(titulo, expanded=True):
+        st.caption(
+            f"{_texto(registro.get('municipio'))} · "
+            f"{float(registro['latitude']):.6f}, {float(registro['longitude']):.6f}"
+        )
+        st.button("Fechar ficha", key="ga_fechar_ficha", on_click=_fechar_painel)
+        aba_dados, aba_historico = st.tabs(["Cadastro", "Histórico de alterações"])
+        with aba_dados:
+            if not HISTORICO_DISPONIVEL:
+                st.warning("Execute primeiro o SQL 03 (histórico) para liberar a edição.")
+            enviar, campos, _, _ = _campos_formulario(
+                registro, "ga_form_edicao_" + str(registro["id"]))
+            if enviar:
+                if not HISTORICO_DISPONIVEL:
+                    st.error("Histórico de alterações não instalado.")
+                    return
+                campos_atuais = {k: registro.get(k) for k in campos}
+                normalizar = lambda v: v if v not in ("", None) else None
+                if all(normalizar(campos[k]) == normalizar(campos_atuais[k]) for k in campos):
+                    st.info("Nenhuma informação foi alterada.")
+                else:
+                    try:
+                        salvo = editar_ativo(registro["id"], campos, registro.get("atualizado_em"))
+                        _auditar("editar", salvo)
+                        _limpar_cache()
+                        st.session_state["ga_mensagem"] = "Alterações salvas com histórico."
+                        st.rerun()
+                    except ErroPRISMA as exc:
+                        st.error(str(exc))
+        with aba_historico:
+            _historico(registro)
+
+
+def _painel_novo(coordenadas=None, municipio_padrao=""):
+    with st.expander("Cadastrar novo poço", expanded=True):
+        st.caption("O poço será cadastrado apenas no Supabase, sem alterar o Farol.")
+        st.button("Fechar cadastro", key="ga_fechar_cadastro", on_click=_fechar_painel)
         if not HISTORICO_DISPONIVEL:
-            st.warning("Execute primeiro o SQL 03 (histórico) para liberar a edição.")
-        enviar, campos, _, _ = _campos_formulario(
-            registro, "ga_form_edicao_" + str(registro["id"]))
+            st.warning("Execute primeiro o SQL 03 (histórico) para liberar cadastros.")
+        enviar, campos, lat, lon = _campos_formulario(
+            {}, "ga_form_novo", novo=True, coords=coordenadas,
+            municipio_padrao=municipio_padrao)
         if enviar:
             if not HISTORICO_DISPONIVEL:
                 st.error("Histórico de alterações não instalado.")
                 return
-            campos_atuais = {k: registro.get(k) for k in campos}
-            normalizar = lambda v: v if v not in ("", None) else None
-            if all(normalizar(campos[k]) == normalizar(campos_atuais[k]) for k in campos):
-                st.info("Nenhuma informação foi alterada.")
-            else:
-                try:
-                    salvo = editar_ativo(registro["id"], campos, registro.get("atualizado_em"))
-                    _auditar("editar", salvo)
-                    _limpar_cache()
-                    st.session_state["ga_mensagem"] = "Alterações salvas com histórico."
-                    st.rerun()
-                except ErroPRISMA as exc:
-                    st.error(str(exc))
-    with aba_historico:
-        _historico(registro)
-
-
-@st.dialog("Cadastrar novo poço", width="large")
-def novo_poco(coordenadas=None, municipio_padrao=""):
-    st.caption("O poço será cadastrado apenas no Supabase, sem alterar o Farol.")
-    if not HISTORICO_DISPONIVEL:
-        st.warning("Execute primeiro o SQL 03 (histórico) para liberar cadastros.")
-    enviar, campos, lat, lon = _campos_formulario(
-        {}, "ga_form_novo", novo=True, coords=coordenadas,
-        municipio_padrao=municipio_padrao)
-    if enviar:
-        if not HISTORICO_DISPONIVEL:
-            st.error("Histórico de alterações não instalado.")
-            return
-        try:
-            salvo = criar_ativo(campos, lat, lon)
-            _auditar("criar", salvo)
-            _limpar_cache()
-            st.session_state["ga_mensagem"] = "Ativo cadastrado com histórico."
-            st.rerun()
-        except (ErroPRISMA, ValueError) as exc:
-            st.error(str(exc))
+            try:
+                salvo = criar_ativo(campos, lat, lon)
+                _auditar("criar", salvo)
+                _limpar_cache()
+                st.session_state["ga_painel"] = {"tipo": "ficha", "id": salvo["id"]}
+                st.session_state["ga_mensagem"] = "Ativo cadastrado com histórico."
+                st.rerun()
+            except (ErroPRISMA, ValueError) as exc:
+                st.error(str(exc))
 
 
 st.title("Gestão de Ativos")
@@ -272,7 +295,9 @@ except ErroPRISMA as exc:
 with col_novo:
     if st.button("＋ Novo poço", use_container_width=True,
                  disabled=not pode_executar_acao("9", "criar") or not HISTORICO_DISPONIVEL):
-        novo_poco(municipio_padrao="TERESINA")
+        st.session_state["ga_painel"] = {
+            "tipo": "novo", "coordenadas": None, "municipio_padrao": "TERESINA",
+        }
 
 if not HISTORICO_DISPONIVEL:
     st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
@@ -310,7 +335,7 @@ with col_cadastro:
 if modo_cadastro:
     st.info("Clique em um local livre do mapa para abrir o formulário de um novo poço.")
 else:
-    st.caption("Passe o mouse para visualizar informações. Clique no marcador para abrir a ficha.")
+    st.caption("Passe o mouse para informações rápidas. Clique no marcador para abrir a ficha abaixo do mapa.")
 
 try:
     registros = _listar(municipio, pesquisa, status)
@@ -400,19 +425,39 @@ resultado = st_folium(
 )
 if resultado:
     clicks = int(resultado.get("last_object_clicked_count") or 0)
-    if clicks > int(st.session_state.get("ga_click_processado", 0)):
-        st.session_state["ga_click_processado"] = clicks
-        texto = str(resultado.get("last_object_clicked_tooltip") or "")
-        achado = re.search(r"PRISMA_ID=([0-9a-fA-F-]{36})", texto)
-        if achado:
-            abrir_ficha(achado.group(1))
+    tooltip = str(resultado.get("last_object_clicked_tooltip") or "")
+    evento_marcador = (clicks, tooltip)
+    achado = re.search(r"PRISMA_ID=([0-9a-fA-F-]{36})", tooltip)
+    selecionou_ativo = bool(
+        clicks > 0 and achado
+        and evento_marcador != st.session_state.get("ga_evento_marcador_processado")
+    )
+    if selecionou_ativo:
+        st.session_state["ga_evento_marcador_processado"] = evento_marcador
+        st.session_state["ga_painel"] = {"tipo": "ficha", "id": achado.group(1)}
     elif modo_cadastro and (ponto := resultado.get("last_clicked")):
         lat, lon = ponto.get("lat"), ponto.get("lng")
         if lat is not None and lon is not None:
             chave = (round(float(lat), 7), round(float(lon), 7))
             if chave != st.session_state.get("ga_terreno_processado"):
                 st.session_state["ga_terreno_processado"] = chave
-                novo_poco(coordenadas=(lat, lon),
-                          municipio_padrao=municipio if municipio != "Todos" else "")
+                st.session_state["ga_painel"] = {
+                    "tipo": "novo", "coordenadas": (lat, lon),
+                    "municipio_padrao": municipio if municipio != "Todos" else "",
+                }
+
 if not modo_cadastro:
     st.session_state.pop("ga_terreno_processado", None)
+
+# O painel fica abaixo do mapa; navegação, formulários e histórico permanecem
+# integrados, sem abrir caixas de diálogo e sem enviar todas as fichas ao navegador.
+painel = st.session_state.get("ga_painel") or {}
+if painel.get("tipo") == "ficha" and painel.get("id"):
+    _painel_ativo(painel["id"])
+elif painel.get("tipo") == "novo":
+    _painel_novo(
+        coordenadas=painel.get("coordenadas"),
+        municipio_padrao=painel.get("municipio_padrao", ""),
+    )
+else:
+    st.caption("Selecione um marcador de poço para consultar ou editar sua ficha abaixo do mapa.")
