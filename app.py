@@ -778,11 +778,15 @@ for indice_linha in range((len(MODULOS) + 2) // 3):
             with colunas[indice_coluna]:
                 exibir_cartao(modulo)
 
-if tem_acesso_modulo("gestao"):
+if tem_acesso_modulo("gestao") or perfil_interno == "admin":
     st.divider()
     st.subheader("🔐 Administração")
-    if st.button("Gestão de Acessos — Usuários e permissões",type="primary",use_container_width=True):
-        st.switch_page("pages/9_Gestao_de_Acessos.py")
+    if tem_acesso_modulo("gestao"):
+        if st.button("Gestão de Acessos — Usuários e permissões", type="primary", use_container_width=True):
+            st.switch_page("pages/9_Gestao_de_Acessos.py")
+    if perfil_interno == "admin":
+        if st.button("Migração do Farol para Supabase — Etapa 1", key="abrir_migracao_farol_supabase", use_container_width=True):
+            st.switch_page("pages/99_Migracao_Acompanhamento.py")
 
 st.markdown(
     '<div class="sai-footer">PRISMA — Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises'
