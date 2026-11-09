@@ -4245,6 +4245,12 @@ if not df_mapa.empty:
 map_style_html = """
 <style>
 
+    /* Visão intermunicipal: sem etiquetas flutuantes, mas mantendo os pins
+       clicáveis e as medições disponíveis em seus popups. */
+    .bp-zoom-aberto .bp-label-card {
+        display: none !important;
+    }
+
     .leaflet-marker-icon.pressao-bairro-marker,
     .leaflet-marker-icon.pressao-individual-marker {
 
@@ -4460,6 +4466,34 @@ m.get_root().html.add_child(
 )
 
 
+class VisibilidadeRotulosPorZoom(MacroElement):
+    """Oculta só os cartões de pressão no panorama; mantém os pinos visíveis."""
+    def __init__(self):
+        super().__init__()
+        self._name = "VisibilidadeRotulosPorZoom"
+        self._template = Template(r"""
+{% macro script(this, kwargs) %}
+(function() {
+    var mapa = {{this._parent.get_name()}};
+    var zoomMinimoRotulos = 12;
+
+    function atualizarVisibilidade() {
+        var container = mapa.getContainer();
+        if (!container) return;
+        container.classList.toggle("bp-zoom-aberto", mapa.getZoom() < zoomMinimoRotulos);
+    }
+
+    mapa.whenReady(atualizarVisibilidade);
+    mapa.on("zoom zoomend", atualizarVisibilidade);
+})();
+{% endmacro %}
+""")
+
+
+if mostrar_rotulos:
+    m.add_child(VisibilidadeRotulosPorZoom())
+
+
 # ============================================================
 # RÓTULOS INDIVIDUAIS — ANCORADOS, SEM OCULTAÇÃO POR COLISÃO
 # ============================================================
@@ -4587,6 +4621,8 @@ class ReorganizarRotulosIndividuais(MacroElement):
     }
 
     function reorganizar() {
+        // Zoom aberto: não executar a rotina custosa de colisões invisíveis.
+        if (mapa.getZoom() < 12) return;
         var container = mapa.getContainer();
         if (!container) return;
         var limites = container.getBoundingClientRect();
