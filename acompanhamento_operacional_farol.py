@@ -398,7 +398,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
         if eid and evento is None:
             st.error("A ficha vinculada não foi encontrada na planilha de acompanhamento.")
             return
-    except (gspread.exceptions.GSpreadException, ValueError, KeyError) as erro:
+    except Exception as erro:
         st.error(f"Não foi possível consultar o acompanhamento: {erro}")
         return
 
@@ -432,6 +432,10 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
         if st.session_state.get(id_chave) != str(eid):
             st.session_state[id_chave] = str(eid)
             st.session_state[versao_chave] = evento.get("versao")
+        if st.button("↻ Recarregar ficha do Supabase", key=f"sb_reabrir_ficha_{eid}"):
+            st.session_state.pop(id_chave, None)
+            st.session_state.pop(versao_chave, None)
+            st.rerun()
     # Campos da ficha seguem a disposição aprovada pelo COI.
     with st.form(f"popup_acompanhamento_{eid or contexto.get('chave', 'novo')}"):
         topo_a, topo_b = st.columns([2.3, 1])
