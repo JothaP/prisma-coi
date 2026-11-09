@@ -636,7 +636,7 @@ st.markdown(
 )
 
 # Autorização original: todas as permissões continuam sendo lidas de auth.py.
-acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 9)}
+acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 10)}
 acesso_teste = tem_acesso_modulo("teste")
 
 # A posição e os destinos são os mesmos do Hub anterior.
@@ -705,6 +705,13 @@ MODULOS = [
         "pagina": "pages/Ambiente_de_Teste.py", "autorizado": acesso_teste,
         "visivel": True,
     },
+    {
+        "numero": "9", "titulo": "Gestão de Ativos", "icone": "🏭",
+        "descricao": "Cadastro e histórico de ativos georreferenciados no Supabase.",
+        "botao": "Acessar Gestão de Ativos", "chave": "acessar_gestao_ativos",
+        "pagina": "pages/10_Gestao_de_Ativos.py", "autorizado": acessos["9"],
+        "visivel": True,
+    },
 ]
 
 
@@ -740,11 +747,14 @@ def exibir_cartao(modulo):
             st.switch_page(modulo["pagina"])
 
 
-# Três linhas / três colunas — sem deslocar módulos ausentes.
-for indice_linha in range(3):
+# Cartões existentes preservados; a Gestão de Ativos ocupa a quarta linha.
+for indice_linha in range((len(MODULOS) + 2) // 3):
     colunas = st.columns(3, gap="large")
     for indice_coluna in range(3):
-        modulo = MODULOS[indice_linha * 3 + indice_coluna]
+        posicao = indice_linha * 3 + indice_coluna
+        if posicao >= len(MODULOS):
+            continue
+        modulo = MODULOS[posicao]
         if modulo["visivel"]:
             with colunas[indice_coluna]:
                 exibir_cartao(modulo)
