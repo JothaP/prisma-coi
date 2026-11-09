@@ -699,17 +699,17 @@ MODULOS = [
         "visivel": True,
     },
     {
-        "numero": "teste", "titulo": "Ambiente de Teste", "icone": "🧪",
-        "descricao": "Validação de funcionalidades antes da publicação.",
-        "botao": "Acessar Ambiente de Teste", "chave": "acessar_ambiente_teste",
-        "pagina": "pages/Ambiente_de_Teste.py", "autorizado": acesso_teste,
-        "visivel": True,
-    },
-    {
         "numero": "9", "titulo": "Gestão de Ativos", "icone": "🏭",
         "descricao": "Cadastro e histórico de ativos georreferenciados no Supabase.",
         "botao": "Acessar Gestão de Ativos", "chave": "acessar_gestao_ativos",
         "pagina": "pages/10_Gestao_de_Ativos.py", "autorizado": acessos["9"],
+        "visivel": True,
+    },
+    {
+        "numero": "teste", "titulo": "Ambiente de Teste", "icone": "🧪",
+        "descricao": "Validação de funcionalidades antes da publicação.",
+        "botao": "Acessar Ambiente de Teste", "chave": "acessar_ambiente_teste",
+        "pagina": "pages/Ambiente_de_Teste.py", "autorizado": acesso_teste,
         "visivel": True,
     },
 ]
@@ -747,7 +747,7 @@ def exibir_cartao(modulo):
             st.switch_page(modulo["pagina"])
 
 
-# Cartões existentes preservados; a Gestão de Ativos ocupa a quarta linha.
+# Módulos 8 e 9 encerram a terceira linha; Ambiente de Teste inicia a quarta.
 for indice_linha in range((len(MODULOS) + 2) // 3):
     colunas = st.columns(3, gap="large")
     for indice_coluna in range(3):
