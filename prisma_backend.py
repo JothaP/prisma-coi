@@ -13,7 +13,7 @@ import streamlit as st
 MODULOS = {"1":"Baixa Pressão", "2":"Mapeamento de Pressão", "3":"Farol Operacional",
            "4":"Ferramentas Operacionais", "5":"Cadastros e Consultas",
            "6":"Ferramentas Adicionais", "7":"Relatórios Integrados",
-           "8":"Consulta Operacional", "teste":"Ambiente de Teste",
+           "8":"Consulta Operacional", "9":"Gestão de Ativos", "teste":"Ambiente de Teste",
            "gestao":"Gestão de Acessos"}
 ACOES = ("visualizar", "criar", "importar", "editar", "excluir", "exportar", "relatorios")
 
