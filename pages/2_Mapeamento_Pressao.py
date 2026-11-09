@@ -2113,12 +2113,6 @@ if not df_filtrado.empty:
 map_style_html = """
 <style>
 
-    /* Visão intermunicipal: sem etiquetas flutuantes, mas mantendo os pins
-       clicáveis e as medições disponíveis em seus popups. */
-    .bp-zoom-aberto .bp-label-card {
-        display: none !important;
-    }
-
     .leaflet-marker-icon.pressao-bairro-marker,
     .leaflet-marker-icon.pressao-individual-marker {
 
@@ -2325,6 +2319,48 @@ map_style_html = """
         display: none !important;
     }
 
+    /* Escala em relação ao zoom do Leaflet, sem alterar o tamanho da área
+       clicável do marcador ou os dados de pressão. */
+    .leaflet-container .bp-pin-svg {
+        transform: translateX(-50%) scale(var(--bp-pin-scale, 1)) !important;
+        transform-origin: 50% 100% !important;
+    }
+    .leaflet-container .bp-label-card {
+        padding: var(--bp-card-padding, 5px 8px);
+    }
+    .leaflet-container .bp-label-card-individual {
+        width: max-content;
+        min-width: var(--bp-card-min-width, 66px);
+        max-width: var(--bp-card-max-width, 165px);
+        padding: var(--bp-card-individual-padding, 4px 6px 4px 8px);
+    }
+    .leaflet-container .bp-label-card-individual .bp-label-data {
+        font-size: var(--bp-label-font, 10px);
+        gap: var(--bp-label-gap, 6px);
+    }
+    .leaflet-container .bp-label-elevation {
+        font-size: var(--bp-elevation-font, 9px);
+        padding: var(--bp-elevation-padding, 2px 5px);
+    }
+    .leaflet-container .bp-label-card-bairro {
+        width: var(--bp-bairro-width, 158px);
+    }
+    .leaflet-container .bp-label-title {
+        font-size: var(--bp-bairro-title-font, 11px);
+    }
+    .leaflet-container .bp-label-card-bairro .bp-label-data {
+        font-size: var(--bp-bairro-data-font, 9px);
+        gap: var(--bp-label-gap, 6px);
+    }
+    /* Na visão urbana ampla, priorizar a pressão sobre os detalhes da cota.
+       Em escala regional extrema, só os pinos permanecem visíveis. */
+    .leaflet-container.bp-zoom-urbano .bp-label-elevation {
+        display: none !important;
+    }
+    .leaflet-container.bp-zoom-regional .bp-label-card {
+        display: none !important;
+    }
+
 </style>
 """
 
@@ -2333,32 +2369,53 @@ m.get_root().html.add_child(
 )
 
 
-class VisibilidadeRotulosPorZoom(MacroElement):
-    """Oculta só os cartões de pressão no panorama; mantém os pinos visíveis."""
+class EscalaMarcadoresRotulosPorZoom(MacroElement):
+    """Redimensiona pinos e cartões na escala urbana; regional oculta só cartões."""
     def __init__(self):
         super().__init__()
-        self._name = "VisibilidadeRotulosPorZoom"
+        self._name = "EscalaMarcadoresRotulosPorZoom"
         self._template = Template(r"""
 {% macro script(this, kwargs) %}
 (function() {
     var mapa = {{this._parent.get_name()}};
-    var zoomMinimoRotulos = 12;
 
-    function atualizarVisibilidade() {
+    function atualizarEscala() {
         var container = mapa.getContainer();
         if (!container) return;
-        container.classList.toggle("bp-zoom-aberto", mapa.getZoom() < zoomMinimoRotulos);
+        var zoom = mapa.getZoom();
+        // Zoom 10: pinos ~55%; cartões ~75%. Zoom 13+: tamanho normal.
+        var pino = Math.max(0.40, Math.min(1, 0.55 + (zoom - 10) * 0.15));
+        var rotulo = Math.max(0.63, Math.min(1, 0.75 + (zoom - 10) * 0.085));
+        var px = function(valor) { return valor.toFixed(2) + "px"; };
+        container.style.setProperty("--bp-pin-scale", pino.toFixed(3));
+        container.style.setProperty("--bp-label-font", px(10 * rotulo));
+        container.style.setProperty("--bp-label-gap", px(6 * rotulo));
+        container.style.setProperty("--bp-card-min-width", px(66 * rotulo));
+        container.style.setProperty("--bp-card-max-width", px(165 * rotulo));
+        container.style.setProperty("--bp-bairro-width", px(158 * rotulo));
+        container.style.setProperty("--bp-bairro-title-font", px(11 * rotulo));
+        container.style.setProperty("--bp-bairro-data-font", px(9 * rotulo));
+        container.style.setProperty("--bp-elevation-font", px(9 * rotulo));
+        container.style.setProperty("--bp-card-padding",
+            px(5 * rotulo) + " " + px(8 * rotulo));
+        container.style.setProperty("--bp-card-individual-padding",
+            px(4 * rotulo) + " " + px(6 * rotulo) + " " +
+            px(4 * rotulo) + " " + px(8 * rotulo));
+        container.style.setProperty("--bp-elevation-padding",
+            px(2 * rotulo) + " " + px(5 * rotulo));
+        container.classList.toggle("bp-zoom-urbano", zoom < 11);
+        container.classList.toggle("bp-zoom-regional", zoom < 8);
     }
 
-    mapa.whenReady(atualizarVisibilidade);
-    mapa.on("zoom zoomend", atualizarVisibilidade);
+    mapa.whenReady(atualizarEscala);
+    mapa.on("zoom zoomend", atualizarEscala);
 })();
 {% endmacro %}
 """)
 
 
-if mostrar_rotulos:
-    m.add_child(VisibilidadeRotulosPorZoom())
+# Mesmo sem etiquetas, os pinos diminuem ao afastar o zoom.
+m.add_child(EscalaMarcadoresRotulosPorZoom())
 
 
 class ReorganizarRotulosIndividuais(MacroElement):
@@ -2479,8 +2536,9 @@ class ReorganizarRotulosIndividuais(MacroElement):
     }
 
     function reorganizar() {
-        // Zoom aberto: não executar a rotina custosa de colisões invisíveis.
-        if (mapa.getZoom() < 12) return;
+        // A escala de pressão urbana permanece visível; o panorama extremo
+        // não exige cálculo de colisão de rótulos que estão ocultos.
+        if (mapa.getZoom() < 8) return;
         var container = mapa.getContainer();
         if (!container) return;
         var limites = container.getBoundingClientRect();
