@@ -23,7 +23,7 @@ if str(RAIZ) not in sys.path:
 
 from auth import exigir_acesso_modulo, pode_executar_acao, registrar_atividade
 from gestao_ativos_backend import (
-    MAX_MARCADORES, criar_ativo, editar_ativo, historico_ativo,
+    CAMPOS_EDITAVEIS, MAX_MARCADORES, criar_ativo, editar_ativo, historico_ativo,
     listar_ativos, municipios, obter_ativo, validar_historico,
 )
 from prisma_backend import ErroPRISMA
@@ -207,12 +207,71 @@ def _fechar_painel():
     st.session_state.pop("ga_painel", None)
 
 
-def _painel_ativo(ativo_id):
-    try:
-        registro = obter_ativo(ativo_id)
-    except ErroPRISMA as exc:
-        st.error(str(exc))
-        return
+def _seletor_status_rapido(registro):
+    """Seleção rápida do status, com as mesmas permissões e auditoria da ficha."""
+    ativo_id = str(registro["id"])
+    planta = _texto(registro.get("planta")) or "Sem identificação"
+    nome = _texto(registro.get("nome"))
+    atual = _texto(registro.get("status"))
+    opcoes = [codigo for codigo in STATUS if codigo]
+    if atual not in opcoes:
+        opcoes.insert(0, "")  # Cadastros antigos ainda sem status.
+
+    cores = {
+        "": "⚪", "operando": "🟢", "parado": "🔴",
+        "em_manutencao": "🟡", "inativo": "⚫",
+    }
+    permitido = pode_executar_acao("9", "editar") and HISTORICO_DISPONIVEL
+
+    with st.container(border=True):
+        st.markdown("#### Atualização rápida de status")
+        st.markdown(f"**{planta}**" + (f" · {nome}" if nome else ""))
+        st.caption(_texto(registro.get("municipio")) + " · Selecione uma situação")
+        with st.form("ga_form_status_" + ativo_id):
+            selecao = st.radio(
+                "Status da atividade",
+                options=opcoes,
+                index=opcoes.index(atual) if atual in opcoes else 0,
+                format_func=lambda codigo: f"{cores[codigo]}  {STATUS[codigo]}",
+                disabled=not permitido,
+                key="ga_status_rapido_" + ativo_id + "_" + str(registro.get("atualizado_em") or ""),
+            )
+            atualizar = st.form_submit_button(
+                "Atualizar status", type="primary",
+                use_container_width=True, disabled=not permitido,
+            )
+        if not permitido:
+            st.caption(
+                "Somente usuários com permissão de edição podem atualizar o status."
+            )
+        if atualizar:
+            novo_status = selecao or None
+            if novo_status == (registro.get("status") or None):
+                st.info("O status selecionado já é o atual.")
+            else:
+                campos = {campo: registro.get(campo) for campo in CAMPOS_EDITAVEIS}
+                campos["status"] = novo_status
+                try:
+                    salvo = editar_ativo(ativo_id, campos, registro.get("atualizado_em"))
+                    _auditar("editar", salvo)
+                    _limpar_cache()
+                    st.session_state["ga_mensagem"] = (
+                        f"Status de {planta} atualizado para "
+                        f"{STATUS.get(_texto(salvo.get('status')), 'Não informado')}. "
+                        "Alteração registrada no histórico."
+                    )
+                    st.rerun()
+                except ErroPRISMA as exc:
+                    st.error(str(exc))
+
+
+def _painel_ativo(ativo_id, registro=None):
+    if registro is None:
+        try:
+            registro = obter_ativo(ativo_id)
+        except ErroPRISMA as exc:
+            st.error(str(exc))
+            return
     if not registro:
         st.warning("Ativo não encontrado. Selecione outro marcador no mapa.")
         st.session_state.pop("ga_painel", None)
@@ -302,8 +361,8 @@ with col_novo:
 if not HISTORICO_DISPONIVEL:
     st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
 
-if st.session_state.pop("ga_mensagem", None):
-    st.success("Operação concluída e registrada no histórico de alterações.")
+if mensagem := st.session_state.pop("ga_mensagem", None):
+    st.success(mensagem)
 if aviso := st.session_state.pop("ga_aviso_auditoria", None):
     st.warning(aviso)
 
@@ -335,7 +394,10 @@ with col_cadastro:
 if modo_cadastro:
     st.info("Clique em um local livre do mapa para abrir o formulário de um novo poço.")
 else:
-    st.caption("Passe o mouse para informações rápidas. Clique no marcador para abrir a ficha abaixo do mapa.")
+    st.caption(
+        "Passe o mouse para informações rápidas. Ao clicar no marcador, "
+        "use o seletor de status e a ficha completa abaixo do mapa."
+    )
 
 try:
     registros = _listar(municipio, pesquisa, status)
@@ -453,7 +515,16 @@ if not modo_cadastro:
 # integrados, sem abrir caixas de diálogo e sem enviar todas as fichas ao navegador.
 painel = st.session_state.get("ga_painel") or {}
 if painel.get("tipo") == "ficha" and painel.get("id"):
-    _painel_ativo(painel["id"])
+    try:
+        registro_selecionado = obter_ativo(painel["id"])
+    except ErroPRISMA as exc:
+        st.error(str(exc))
+        registro_selecionado = None
+    if registro_selecionado:
+        _seletor_status_rapido(registro_selecionado)
+        _painel_ativo(painel["id"], registro=registro_selecionado)
+    else:
+        st.warning("O ativo selecionado não está disponível. Selecione outro marcador.")
 elif painel.get("tipo") == "novo":
     _painel_novo(
         coordenadas=painel.get("coordenadas"),
