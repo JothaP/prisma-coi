@@ -59,7 +59,10 @@ BEGIN
   END IF;
   INSERT INTO public.farol_acomp_replica_fila(tabela,chave,operacao)
   VALUES (TG_TABLE_NAME,pk,TG_OP);
-  RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+  IF TG_OP = 'DELETE' THEN
+    RETURN OLD;
+  END IF;
+  RETURN NEW;
 END;
 $func$;
 
