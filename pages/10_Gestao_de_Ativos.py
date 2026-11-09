@@ -562,24 +562,60 @@ if resultado:
     clicks = int(resultado.get("last_object_clicked_count") or 0)
     tooltip = str(resultado.get("last_object_clicked_tooltip") or "")
     evento_marcador = (clicks, tooltip)
-    achado = re.search(r"PRISMA_ID=([0-9a-fA-F-]{36})", tooltip)
-    selecionou_ativo = bool(
-        clicks > 0 and achado
-        and evento_marcador != st.session_state.get("ga_evento_marcador_processado")
+    sinal_status = re.fullmatch(
+        r"PRISMA_STATUS=([0-9a-fA-F-]{36})\|(operando|parado|em_manutencao|inativo)"
+        r"\|([0-9]{10,16}_[a-z0-9]{4,12})",
+        tooltip,
     )
-    if selecionou_ativo:
-        st.session_state["ga_evento_marcador_processado"] = evento_marcador
-        st.session_state["ga_painel"] = {"tipo": "ficha", "id": achado.group(1)}
-    elif modo_cadastro and (ponto := resultado.get("last_clicked")):
-        lat, lon = ponto.get("lat"), ponto.get("lng")
-        if lat is not None and lon is not None:
-            chave = (round(float(lat), 7), round(float(lon), 7))
-            if chave != st.session_state.get("ga_terreno_processado"):
-                st.session_state["ga_terreno_processado"] = chave
-                st.session_state["ga_painel"] = {
-                    "tipo": "novo", "coordenadas": (lat, lon),
-                    "municipio_padrao": municipio if municipio != "Todos" else "",
-                }
+    if sinal_status:
+        if tooltip != st.session_state.get("ga_ultimo_status_processado"):
+            # Impede executar novamente o mesmo evento em reruns do Streamlit.
+            st.session_state["ga_ultimo_status_processado"] = tooltip
+            ativo_id, novo_status, _ = sinal_status.groups()
+            visiveis = {str(item.get("id")) for item in ativos}
+            try:
+                if not pode_editar_status:
+                    raise ErroPRISMA("Você não tem permissão para atualizar o status.")
+                if ativo_id not in visiveis:
+                    raise ErroPRISMA("O ativo não está no mapa atual. Atualize a consulta.")
+                atual = obter_ativo(ativo_id)
+                if not atual:
+                    raise ErroPRISMA("O ativo não foi encontrado.")
+                st.session_state["ga_painel"] = {"tipo": "ficha", "id": ativo_id}
+                if (atual.get("status") or None) != novo_status:
+                    campos = {campo: atual.get(campo) for campo in CAMPOS_EDITAVEIS}
+                    campos["status"] = novo_status
+                    salvo = editar_ativo(ativo_id, campos, atual.get("atualizado_em"))
+                    _auditar("editar", salvo)
+                    _limpar_cache()
+                    st.session_state["ga_mensagem"] = (
+                        "Status atualizado para " + STATUS[novo_status] +
+                        ". Alteração registrada no histórico."
+                    )
+                else:
+                    st.session_state["ga_mensagem"] = "Este status já estava atualizado."
+            except ErroPRISMA as exc:
+                st.session_state["ga_erro_status"] = str(exc)
+            st.rerun()
+    else:
+        achado = re.search(r"PRISMA_ID=([0-9a-fA-F-]{36})", tooltip)
+        selecionou_ativo = bool(
+            clicks > 0 and achado
+            and evento_marcador != st.session_state.get("ga_evento_marcador_processado")
+        )
+        if selecionou_ativo:
+            st.session_state["ga_evento_marcador_processado"] = evento_marcador
+            st.session_state["ga_painel"] = {"tipo": "ficha", "id": achado.group(1)}
+        elif modo_cadastro and (ponto := resultado.get("last_clicked")):
+            lat, lon = ponto.get("lat"), ponto.get("lng")
+            if lat is not None and lon is not None:
+                chave = (round(float(lat), 7), round(float(lon), 7))
+                if chave != st.session_state.get("ga_terreno_processado"):
+                    st.session_state["ga_terreno_processado"] = chave
+                    st.session_state["ga_painel"] = {
+                        "tipo": "novo", "coordenadas": (lat, lon),
+                        "municipio_padrao": municipio if municipio != "Todos" else "",
+                    }
 
 if not modo_cadastro:
     st.session_state.pop("ga_terreno_processado", None)
