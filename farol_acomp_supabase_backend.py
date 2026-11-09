@@ -105,6 +105,8 @@ def _filtros(tipo: str, filtros=None):
 def _buscar(tipo: str, filtros=None, *, limite=None):
     tabela, campos, parametros = _filtros(tipo, filtros)
     parametros["select"] = ",".join(campos)
+    # Paginação ordenada por PK para não repetir/omitir registros entre páginas.
+    parametros["order"] = "chave.asc" if tipo == "vinculos" else "id.asc"
     if limite is not None:
         parametros["limit"] = int(limite)
         retorno = _request("GET", "/rest/v1/" + tabela, params=parametros)
