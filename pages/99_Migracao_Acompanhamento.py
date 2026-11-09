@@ -539,6 +539,48 @@ st.divider()
 st.subheader("Etapa 6 — Ativação controlada da fonte")
 if MODO_SUPABASE_ATIVO:
     st.success("O PRISMA está configurado para utilizar o Supabase no Acompanhamento Operacional.")
+    st.caption(
+        "Após a ativação, mantenha um backup periódico das fichas, vínculos e "
+        "movimentações. Voltar ao Google Sheets exige reconciliar as gravações "
+        "realizadas no Supabase."
+    )
+    if st.button("8. Preparar backup do Supabase", key="farol_sb_backup_atual"):
+        try:
+            from farol_acomp_supabase_backend import listar as sb_listar
+            with st.spinner("Consultando as três tabelas para exportação..."):
+                todos = {
+                    "farol_acomp_fichas": sb_listar("fichas"),
+                    "farol_acomp_vinculos": sb_listar("vinculos"),
+                    "farol_acomp_movimentacoes": sb_listar("movimentacoes"),
+                }
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zipado:
+                    for nome, registros in todos.items():
+                        zipado.writestr(
+                            nome + ".json",
+                            json.dumps(registros, ensure_ascii=False, indent=2),
+                        )
+                    zipado.writestr(
+                        "manifesto.json",
+                        json.dumps({
+                            "origem": "Supabase do PRISMA — Acompanhamento Operacional",
+                            "gerado_em": datetime.now(FUSO).isoformat(),
+                            "contagens": {k: len(v) for k, v in todos.items()},
+                            "observacao": "Backup somente leitura; inclui metadados de versão.",
+                        }, ensure_ascii=False, indent=2),
+                    )
+                st.session_state["farol_sb_backup_zip"] = buf.getvalue()
+            st.success("Backup pronto para ser baixado. Não o armazene no GitHub.")
+        except Exception as erro:
+            st.error("Não foi possível gerar backup Supabase: " + str(erro))
+    if st.session_state.get("farol_sb_backup_zip"):
+        st.download_button(
+            "⬇️ Baixar backup atual do Supabase (ZIP)",
+            data=st.session_state["farol_sb_backup_zip"],
+            file_name="backup_farol_supabase_atual.zip",
+            mime="application/zip",
+            key="farol_sb_baixar_backup",
+        )
 else:
     st.caption(
         "Após aprovar a paridade completa, executar o SQL 04 de atualização "
