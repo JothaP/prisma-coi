@@ -20,7 +20,7 @@ CAMPOS_EDITAVEIS = (
     "ultima_os_eletromecanica", "data_ultima_os_eletromecanica",
     "observacao", "municipio",
 )
-STATUS = {"operando", "parado", "em_manutencao", "inativo"}
+STATUS = {"operando", "parado", "em_manutencao", "inativo", "validar"}
 MAX_MARCADORES = 450
 
 
