@@ -238,6 +238,38 @@ def _importar(snapshot):
     return inseridos, repetidos
 
 
+
+def _conferir_paridade_ao_vivo():
+    """Compara fontes atuais por PK/hash sem alterar Google Sheets nem Supabase."""
+    origem = _carregar_origem()
+    resumo = []
+    detalhes = {}
+    for tabela, registros in origem.items():
+        pk = FONTES[tabela][2]
+        hashes_origem = {str(linha[pk]): _hash_linha(linha) for linha in registros}
+        hashes_destino = _ids_destino(tabela)
+        faltantes = sorted(set(hashes_origem) - set(hashes_destino))
+        excedentes = sorted(set(hashes_destino) - set(hashes_origem))
+        divergentes = sorted(
+            identificador for identificador in set(hashes_origem) & set(hashes_destino)
+            if hashes_origem[identificador] != hashes_destino[identificador]
+        )
+        detalhes[tabela] = {
+            "Sem cópia no Supabase": faltantes,
+            "Alterados após a cópia": divergentes,
+            "Somente no Supabase": excedentes,
+        }
+        resumo.append({
+            "Tabela": tabela,
+            "Google Sheets (atual)": len(hashes_origem),
+            "Supabase": len(hashes_destino),
+            "Sem cópia": len(faltantes),
+            "Divergentes": len(divergentes),
+            "Somente no Supabase": len(excedentes),
+        })
+    return resumo, detalhes
+
+
 st.title("🗃️ Migração do Acompanhamento Operacional")
 st.caption("Etapa 1 — cópia controlada Google Sheets → Supabase · sem mudar o Módulo 3")
 st.warning("Execute primeiro o SQL de criação das três tabelas no projeto Supabase do PRISMA. "
@@ -294,3 +326,35 @@ if snapshot:
             st.error("Cópia não concluída: " + str(erro))
             st.info("Não repita manualmente os registros. Após resolver o problema, "
                     "execute novamente esta ferramenta; ela ignora registros idênticos.")
+
+
+st.divider()
+st.subheader("Etapa 2 — Conferência de paridade atual")
+st.caption(
+    "Compara os registros atuais do Google Sheets com os já copiados para o Supabase "
+    "usando IDs e hashes. Somente leitura: nenhuma ficha será modificada."
+)
+if st.button("4. Verificar se a cópia continua atualizada", key="farol_acomp_paridade_ao_vivo"):
+    try:
+        with st.spinner("Comparando as três fontes de dados em tempo real..."):
+            resumo, detalhes = _conferir_paridade_ao_vivo()
+        st.dataframe(resumo, hide_index=True, use_container_width=True)
+        if any(any(ids for ids in ocorrencias.values()) for ocorrencias in detalhes.values()):
+            st.warning(
+                "As fontes não estão mais idênticas. Não altere o Farol para Supabase "
+                "antes de reconciliar os registros. A importação inicial não sobrescreve IDs divergentes."
+            )
+            for tabela, grupos in detalhes.items():
+                if any(grupos.values()):
+                    with st.expander(f"Divergências — {tabela}"):
+                        for nome, ids in grupos.items():
+                            if ids:
+                                st.write(f"{nome} ({len(ids)}): " + ", ".join(ids[:20])
+                                         + (" ..." if len(ids) > 20 else ""))
+        else:
+            st.success(
+                "As três tabelas estão idênticas ao Google Sheets neste instante. "
+                "A fonte de produção continua sendo o Google Sheets."
+            )
+    except Exception as erro:
+        st.error(f"Não foi possível comparar as fontes: {erro}")
