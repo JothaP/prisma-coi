@@ -6,6 +6,7 @@ O campo password e os tokens jamais são armazenados em tabelas operacionais.
 from __future__ import annotations
 from datetime import datetime, timezone
 from urllib.parse import quote
+from uuid import UUID
 import re
 import requests
 import streamlit as st
@@ -180,6 +181,96 @@ def permissoes_efetivas(perfil,linhas):
 
 def listar_perfis():
     return _tabela("prisma_perfis",params={"select":"id,email,nome,perfil,status,criado_em","order":"criado_em.desc","limit":"500"})
+
+
+def _verificar_admin_email(ator, alvo):
+    """Garante autorização por perfil ativo e identidade de destino válida."""
+    administrador = perfil_de_usuario(ator)
+    if (not administrador or administrador.get("perfil") != "admin"
+            or administrador.get("status") != "ativo"):
+        raise ErroPRISMA("A confirmação manual de e-mail é exclusiva de administradores ativos.")
+    try:
+        alvo_id = str(UUID(str(alvo)))
+    except (ValueError, TypeError, AttributeError):
+        raise ErroPRISMA("Identificador de usuário inválido.") from None
+    perfil = perfil_de_usuario(alvo_id)
+    if not perfil:
+        raise ErroPRISMA("Usuário não encontrado na Gestão de Acessos.")
+    return alvo_id, perfil
+
+
+def _usuario_auth_para_confirmacao(alvo_id, perfil):
+    """Consulta o Auth com chave administrativa, exclusivamente no servidor."""
+    resposta = _request("GET", "/auth/v1/admin/users/" + quote(alvo_id, safe=""), admin=True)
+    usuario = resposta.get("user", resposta) if isinstance(resposta, dict) else None
+    if not isinstance(usuario, dict) or str(usuario.get("id")) != alvo_id:
+        raise ErroPRISMA("Não foi possível validar a conta no Supabase Auth.")
+    email_auth = str(usuario.get("email") or "").strip().lower()
+    email_perfil = str(perfil.get("email") or "").strip().lower()
+    if not email_auth or email_auth != email_perfil or not dominio_permitido(email_auth):
+        raise ErroPRISMA(
+            "E-mail divergente ou não autorizado entre Supabase Auth e PRISMA. "
+            "A confirmação foi bloqueada."
+        )
+    return usuario
+
+
+def consultar_confirmacao_email_admin(ator, alvo):
+    """Status da verificação real do Supabase, não da aprovação do PRISMA."""
+    alvo_id, perfil = _verificar_admin_email(ator, alvo)
+    usuario = _usuario_auth_para_confirmacao(alvo_id, perfil)
+    return {
+        "email": str(usuario["email"]).strip().lower(),
+        "confirmado": bool(usuario.get("email_confirmed_at")),
+    }
+
+
+def confirmar_email_manualmente(ator, alvo, email_digitado, *, identidade_verificada=False):
+    """Confirma apenas o e-mail no Auth; não muda perfil, status ou permissões.
+
+    O usuário deve ter sido validado por um administrador por canal independente.
+    O token de serviço nunca sai do servidor Streamlit.
+    """
+    alvo_id, perfil = _verificar_admin_email(ator, alvo)
+    email_perfil = str(perfil.get("email") or "").strip().lower()
+    if not identidade_verificada:
+        raise ErroPRISMA("Confirme a verificação prévia da identidade por canal confiável.")
+    if str(email_digitado or "").strip().lower() != email_perfil:
+        raise ErroPRISMA("Digite exatamente o e-mail do usuário selecionado para confirmar.")
+    usuario = _usuario_auth_para_confirmacao(alvo_id, perfil)
+    if usuario.get("email_confirmed_at"):
+        return False
+
+    # Equivalente ao supabase.auth.admin.updateUserById(id, {email_confirm: true}).
+    resposta = _request(
+        "PUT", "/auth/v1/admin/users/" + quote(alvo_id, safe=""),
+        admin=True, payload={"email_confirm": True},
+    )
+    usuario_atualizado = (
+        resposta.get("user", resposta) if isinstance(resposta, dict) else None
+    )
+    if (not isinstance(usuario_atualizado, dict)
+            or str(usuario_atualizado.get("id")) != alvo_id
+            or not usuario_atualizado.get("email_confirmed_at")):
+        # Alguns gateways não retornam o usuário atualizado: consulta novamente.
+        usuario_atualizado = _usuario_auth_para_confirmacao(alvo_id, perfil)
+        if not usuario_atualizado.get("email_confirmed_at"):
+            raise ErroPRISMA("O Supabase não confirmou a alteração do e-mail.")
+
+    try:
+        auditar(
+            ator, "confirmar_email_admin", alvo_id,
+            "Confirmação manual de e-mail após validação independente de identidade; "
+            "aprovação e permissões mantidas",
+            modulo="gestao", tipo="ALTERACAO",
+        )
+    except ErroPRISMA as erro:
+        raise ErroPRISMA(
+            "O e-mail foi confirmado, mas a auditoria falhou. "
+            "Comunique o incidente à administração para regularizar o registro."
+        ) from erro
+    return True
+
 
 def auditar(ator, acao, alvo=None, detalhes="", *, modulo=None, tipo=None,
             resultado="SUCESSO", registro_id=None):
