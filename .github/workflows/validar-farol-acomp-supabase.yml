@@ -1,0 +1,28 @@
+name: Validar integração Farol Supabase
+
+on:
+  push:
+    paths:
+      - 'farol_acomp_supabase_backend.py'
+      - 'acompanhamento_operacional_farol.py'
+      - 'integracao_acompanhamento_producao.py'
+      - '.github/workflows/validar-farol-acomp-supabase.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sintaxe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validar sintaxe sem carregar dados de produção
+        run: |
+          python -m py_compile farol_acomp_supabase_backend.py
+          python -m py_compile acompanhamento_operacional_farol.py
+          python -m py_compile integracao_acompanhamento_producao.py
+          python -m py_compile pages/3_Farol_Operacional.py
