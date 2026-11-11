@@ -84,7 +84,8 @@ def contagem_no_poligono(poligono, concentracao, grupo_os):
     dentro = 0
     for _, osr in grupo_os.iterrows():
         try:
-            lat, lon = float(osr["Latitude"]), float(osr["Longitude"])
+            lat = float(osr.get("_lat", osr.get("Latitude")))
+            lon = float(osr.get("_lon", osr.get("Longitude")))
             if math.isfinite(lat) and math.isfinite(lon) and area.covers(Point(lon, lat)):
                 dentro += 1
         except (ValueError, TypeError, KeyError):
@@ -184,8 +185,8 @@ def aplicar_mesclas(concentracoes, grupos, mesclas):
         # um ponto de referência visual, sem raio operacional fictício.
         def num(s):
             return pd.to_numeric(s, errors="coerce").mean()
-        lat = num(bloco["Latitude"])
-        lon = num(bloco["Longitude"])
+        lat = num(bloco["_lat"] if "_lat" in bloco else bloco["Latitude"])
+        lon = num(bloco["_lon"] if "_lon" in bloco else bloco["Longitude"])
         nomes = {str(x).strip() for x in bloco.get("Bairro", []) if str(x).strip()}
         gid = "MESCLA_" + mescla["evento_chave"]
         pontos.loc[pontos["_grupo"].isin(grupos_atuais), "_grupo"] = gid
