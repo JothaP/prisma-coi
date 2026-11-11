@@ -2724,6 +2724,26 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
 
 
 
+# Laboratório independente do Módulo 3: o piloto usa somente leituras
+# existentes e persiste seus registros em st.session_state. NÃO utiliza as
+# funções de escrita do acompanhamento operacional de produção.
+st.title("🧪 Ambiente de Teste — COI")
+modo_teste = st.radio(
+    "Ferramenta experimental",
+    ["Mesclagem de concentrações por evento", "Relatórios integrados (original)"],
+    horizontal=True,
+    key="ambiente_teste_ferramenta",
+)
+if modo_teste == "Mesclagem de concentrações por evento":
+    from farol_mesclagem_teste import renderizar_mesclagem_teste
+    if st.button("← Voltar ao Hub Central", key="retornar_hub_mesclagem"):
+        st.switch_page("app.py")
+    renderizar_mesclagem_teste(
+        ler_base=ler_base, preparar_os=preparar_os,
+        concentracoes_farol=concentracoes_farol, id_farol=ID_FAROL,
+    )
+    st.stop()
+
 st.title("📊 Relatórios Integrados — Farol + Baixa Pressão")
 st.caption("Integração analítica entre concentrações de O.S. e registros de pressão · fontes somente leitura")
 if st.button("← Voltar ao Hub Central",key="retornar_hub_ri"):
