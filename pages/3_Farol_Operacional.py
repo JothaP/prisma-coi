@@ -317,9 +317,16 @@ def endereco_contem_localidade(endereco, localidade):
     padrao = r"(?<![A-Z0-9])" + re.escape(area) + r"(?![A-Z0-9])"
     for achado in re.finditer(padrao, texto):
         anteriores = texto[:achado.start()].split()
+        posteriores = texto[achado.end():].split()
         if anteriores and anteriores[-1] in {
             "RUA", "R", "AV", "AVENIDA", "TRAVESSA", "TV",
             "ESTRADA", "RODOVIA", "ALAMEDA", "PRACA", "PCA",
+        }:
+            continue
+        # Não confundir um conjunto com sua extensão explicitamente nomeada.
+        if posteriores and posteriores[0] in {
+            "I", "II", "III", "IV", "V", "1", "2", "3", "4", "5",
+            "NOVO", "NOVA",
         }:
             continue
         return True
@@ -1851,65 +1858,84 @@ def pontos_proximos_concentracoes(concentracoes, df_pocos, df_loggers, raio=RAIO
 
 
 def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
+    """Contabiliza cada O.S. uma vez por evento, respeitando polígonos sobrepostos.
+
+    Primeiro usa geometria da área informada; se ela NÃO tiver polígono,
+    tenta bairro cadastrado e nome completo da localidade no Endereço.
+    Esta tela conserva a contagem territorial (sem filtro temporal), como antes.
+    """
     if df_eventos.empty or df_pontos.empty:
         return pd.DataFrame()
 
     pontos = df_pontos.copy()
-    pontos["_bairro_base"] = pontos["Bairro"].map(limpar_nome_bairro)
-
-    # Quando o bairro textual da O.S. não for confiável, usa a geometria do KMZ.
-    if bairros:
-        pontos["_bairro_poligono"] = pontos.apply(
-            lambda r: identificar_bairro_por_ponto(parse_float(r["Latitude"]), parse_float(r["Longitude"]), bairros),
-            axis=1,
-        )
-        pontos["_bairro_cruzamento"] = pontos["_bairro_poligono"].where(
-            pontos["_bairro_poligono"].astype(bool), pontos["_bairro_base"]
-        )
-    else:
-        pontos["_bairro_cruzamento"] = pontos["_bairro_base"]
-
+    pontos["_cidade_cruzamento"] = pontos["Cidade"].map(normalizar_municipio)
     registros = []
     for indice_evento, evento in df_eventos.reset_index(drop=True).iterrows():
-        municipal = evento_abrange_municipio(evento.get("Áreas Impactadas", ""))
-        if municipal:
-            cidade = normalizar_municipio(evento.get("Cidade", ""))
-            bloco = pontos[pontos["Cidade"].map(normalizar_municipio) == cidade]
-            if not bloco.empty:
-                registros.append({
-                    "_indice_evento": indice_evento,
-                    "Cidade": evento.get("Cidade", ""),
-                    "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
-                    "Protocolo": evento.get("Protocolo", ""),
-                    "Status": evento.get("Status", ""),
-                    "Bairro": "Todo o município", "Parcial": "Não",
-                    "O.S. encontradas": len(bloco),
-                    "Matrículas": bloco["Matrícula"].replace("", pd.NA).dropna().nunique(),
-                    "Data": evento.get("Data", ""),
-                })
+        cidade = normalizar_municipio(evento.get("Cidade", ""))
+        if not cidade:
             continue
-        areas = extrair_bairros_evento(evento.get("Áreas Impactadas", ""), evento.get("Cidade", ""), bairros)
-        for area in areas:
-            bloco = pontos[
-                (pontos["_bairro_cruzamento"] == area["bairro"])
-                & (pontos["Cidade"].map(normalizar_municipio) == normalizar_municipio(evento.get("Cidade", "")))
-            ].copy()
-            if bloco.empty:
-                continue
+        bloco = pontos.loc[pontos["_cidade_cruzamento"] == cidade]
+        if bloco.empty:
+            continue
+        areas_texto = evento.get("Áreas Impactadas", "")
+        municipal = evento_abrange_municipio(areas_texto)
+        comum = {
+            "_indice_evento": indice_evento,
+            "Cidade": evento.get("Cidade", ""),
+            "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
+            "Protocolo": evento.get("Protocolo", ""),
+            "Status": evento.get("Status", ""),
+            "Data": evento.get("Data", ""),
+        }
+        if municipal:
             registros.append({
-                "_indice_evento": indice_evento,
-                "Cidade": evento.get("Cidade", ""),
-                "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
-                "Protocolo": evento.get("Protocolo", ""),
-                "Status": evento.get("Status", ""),
-                "Bairro": area["bairro"],
-                "Parcial": "Sim" if area["parcial"] else "Não",
+                **comum, "Bairro": "Todo o município", "Parcial": "Não",
                 "O.S. encontradas": len(bloco),
                 "Matrículas": bloco["Matrícula"].replace("", pd.NA).dropna().nunique(),
-                "Data": evento.get("Data", ""),
+                "Critérios de associação": f"Município: {len(bloco)}",
+            })
+            continue
+
+        areas = extrair_bairros_evento(areas_texto, evento.get("Cidade", ""), bairros)
+        if not areas:
+            continue
+        indice_geometrias = indexar_geometrias_evento(bairros, cidade, areas)
+        por_area = {}
+        # Avaliação por O.S., não por polígono, para evitar dupla contagem de
+        # uma mesma ordem nas áreas oficiais e subáreas que se sobrepõem.
+        for _, os_reg in bloco.iterrows():
+            area, metodo = identificar_correspondencia_territorial_evento_os(
+                os_reg, cidade, areas, indice_geometrias=indice_geometrias
+            )
+            if area is None:
+                continue
+            resumo = por_area.setdefault(
+                area, {"total": 0, "matriculas": set(), "metodos": {}}
+            )
+            resumo["total"] += 1
+            matricula = limpar_valor(os_reg.get("Matrícula", ""))
+            if matricula:
+                resumo["matriculas"].add(matricula)
+            resumo["metodos"][metodo] = resumo["metodos"].get(metodo, 0) + 1
+
+        for area in areas:
+            dados = por_area.get(area["bairro"])
+            if not dados:
+                continue
+            ordem_metodos = ("Polígono", "Bairro cadastrado", "Endereço")
+            criterios = ", ".join(
+                f"{nome}: {dados['metodos'][nome]}"
+                for nome in ordem_metodos if dados["metodos"].get(nome)
+            )
+            registros.append({
+                **comum,
+                "Bairro": area["bairro"],
+                "Parcial": "Sim" if area["parcial"] else "Não",
+                "O.S. encontradas": dados["total"],
+                "Matrículas": len(dados["matriculas"]),
+                "Critérios de associação": criterios,
             })
     return pd.DataFrame(registros)
-
 
 # ============================================================
 # EVENTOS GEORREFERENCIADOS — SOMENTE ONDE HÁ POLÍGONOS
@@ -2491,39 +2517,76 @@ def evento_pertinente_data_analise(evento):
     return True
 
 
-def correspondencia_territorial_evento_os(os_reg, cidade_evento, areas_evento,
-                                          bairros_geograficos=None, municipal=False):
-    """Cruza por cidade e bairro exato OU posição dentro da área do evento.
+def indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento):
+    """Relaciona somente polígonos das áreas deste evento e deste município."""
+    nomes = {area["bairro"] for area in areas_evento}
+    indice = {nome: [] for nome in nomes}
+    for bairro in (bairros_geograficos or []):
+        if normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
+            continue
+        nome = limpar_nome_bairro(bairro.get("nome_normalizado") or bairro.get("nome", ""))
+        if nome in indice:
+            indice[nome].append(bairro)
+    return indice
 
-    A geometria só serve como critério de associação se a O.S. estiver DENTRO
-    do polígono cadastrado para o bairro explicitamente afetado, no MESMO município.
-    Proximidade de equipamentos, centro da concentração e nomes parecidos
-    não estabelecem vínculo por si só.
 
-    Retorna o rótulo territorial correspondente ou None.
+def identificar_correspondencia_territorial_evento_os(
+        os_reg, cidade_evento, areas_evento, bairros_geograficos=None,
+        municipal=False, indice_geometrias=None):
+    """Retorna (área, critério), sem aproximar localidades distintas.
+
+    Se a área afetada tem polígono e a O.S. possui coordenadas, a geometria
+    é decisiva: estar FORA impede vínculo pelo texto do bairro/endereço.
+    Sem polígono cadastrado, usa bairro exato ou, em última instância,
+    localidade completa no Endereço. Nunca cruza municípios diferentes.
     """
     if normalizar_municipio(os_reg.get("Cidade", "")) != cidade_evento:
-        return None
+        return None, None
     if municipal:
-        return "Todo o município"
+        return "Todo o município", "Município"
+    if not areas_evento:
+        return None, None
 
-    bairro_textual = limpar_nome_bairro(os_reg.get("Bairro", ""))
-    chaves_areas = {area["bairro"] for area in areas_evento}
-    if bairro_textual and bairro_textual in chaves_areas:
-        return bairro_textual
-
+    indice = (
+        indice_geometrias if indice_geometrias is not None
+        else indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento)
+    )
     lat = normalizar_coordenada(os_reg.get("Latitude", ""), "lat")
     lon = normalizar_coordenada(os_reg.get("Longitude", ""), "lon")
-    if lat is None or lon is None or not bairros_geograficos:
-        return None
-    for bairro_geo in bairros_geograficos:
-        if (normalizar_municipio(bairro_geo.get("municipio", "")) != cidade_evento
-                or bairro_geo.get("nome_normalizado", "") not in chaves_areas):
-            continue
-        if ponto_em_bairro(lat, lon, bairro_geo):
-            return bairro_geo["nome_normalizado"]
-    return None
+    tem_coordenadas = lat is not None and lon is not None
 
+    # Prioridade global: todas as áreas deste evento com polígonos,
+    # inclusive subáreas sobrepostas a bairros maiores.
+    if tem_coordenadas:
+        for area in areas_evento:
+            nome = area["bairro"]
+            if any(ponto_em_bairro(lat, lon, poligono) for poligono in indice.get(nome, [])):
+                return nome, "Polígono"
+
+    bairro_textual = limpar_nome_bairro(os_reg.get("Bairro", ""))
+    if bairro_textual:
+        for area in areas_evento:
+            nome = area["bairro"]
+            # Não usar texto para contrariar o polígono quando a posição
+            # geográfica permite verificar que a O.S. está fora da área.
+            if bairro_textual == nome and (not indice.get(nome) or not tem_coordenadas):
+                return nome, "Bairro cadastrado"
+
+    endereco = os_reg.get("Endereço", "")
+    for area in areas_evento:
+        nome = area["bairro"]
+        if not indice.get(nome) and endereco_contem_localidade(endereco, nome):
+            return nome, "Endereço"
+    return None, None
+
+
+def correspondencia_territorial_evento_os(os_reg, cidade_evento, areas_evento,
+                                          bairros_geograficos=None, municipal=False):
+    """Compatibilidade: retorna apenas o nome da área territorialmente reconhecida."""
+    nome, _ = identificar_correspondencia_territorial_evento_os(
+        os_reg, cidade_evento, areas_evento, bairros_geograficos, municipal
+    )
+    return nome
 
 def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos=None):
     """Associa eventos às O.S. individualmente, por município, território e data.
