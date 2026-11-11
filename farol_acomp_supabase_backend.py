@@ -252,3 +252,45 @@ def recuperar_vinculo(chave_anterior: str, evento_id: str, contexto: dict) -> di
         raise FalhaAcompanhamentoSupabase("Recuperação sem confirmação de vínculo.")
     limpar_cache()
     return resposta
+
+
+
+def continuar_vinculo_automaticamente(chave_anterior: str, evento_id: str,
+                                     contexto: dict) -> dict:
+    """Persiste continuidade por acréscimo de O.S., sem criar outra ficha.
+
+    Só é chamado quando o Módulo 3 constatou uma correspondência única;
+    a transação do banco REVALIDA inclusão de O.S., distância, prazo,
+    município, ficha em andamento e autorização do usuário.
+    """
+    autor = _autor("editar")
+    if not isinstance(contexto, dict) or not isinstance(contexto.get("os"), (list, tuple, set)):
+        raise ValueError("Contexto de concentração inválido.")
+    nova_chave = str(contexto.get("chave", "")).strip()
+    if nova_chave == str(chave_anterior).strip():
+        raise ValueError("A concentração já utiliza a chave anterior.")
+    dados_contexto = {
+        "chave": nova_chave,
+        "municipio": str(contexto.get("municipio", "")).strip(),
+        "bairros": str(contexto.get("bairros", "")).strip(),
+        "latitude": str(contexto.get("latitude", "")),
+        "longitude": str(contexto.get("longitude", "")),
+        "os_origem": ";".join(sorted({
+            str(item).strip() for item in contexto["os"] if str(item).strip()
+        })),
+    }
+    resposta = _request(
+        "POST", "/rest/v1/rpc/farol_acomp_continuar_auto_tx",
+        dados={
+            "p_chave_anterior": str(chave_anterior).strip(),
+            "p_evento_id": str(evento_id).strip(),
+            "p_contexto": dados_contexto,
+            "p_autor": autor,
+        },
+    )
+    if (not isinstance(resposta, dict)
+            or str(resposta.get("id")) != str(evento_id)
+            or str(resposta.get("chave")) != nova_chave):
+        raise FalhaAcompanhamentoSupabase("Continuidade não confirmada pelo banco.")
+    limpar_cache()
+    return resposta
