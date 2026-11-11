@@ -53,7 +53,8 @@ from farol_graficos_temporarios import (
     data_hoje as dia_graficos, indice_do_dia, salvar_grafico, excluir_grafico,
     chave_logger, rotulo_logger, filtrar_loggers,
 )
-from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf)
+from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado)
+from farol_acomp_supabase_backend import fonte_supabase
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 
 
@@ -5021,14 +5022,75 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             # Uma consulta compartilhada para todas as concentrações, em vez de
             # repetir uma leitura para cada cartão na tela.
             try:
-                vinculos_acomp_visiveis = {v["chave"]: v for v in listar_vinculos()}
+                todos_vinculos_acomp = listar_vinculos()
+                vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
+                recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
+                todos_vinculos_acomp = []
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
+                recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
+
+            # Concentrações mudam após cada importação. Indexar suas chaves
+            # atuais permite identificar fichas cujo vínculo antigo ficou órfão,
+            # sem associar automaticamente uma ficha a outra concentração.
+            contextos_ativos_acomp = {}
+            for _, c_atual in concentracoes.iterrows():
+                os_atuais = grupos_os.get(c_atual["GRUPO"], pontos_cluster.iloc[0:0])
+                cidades_atuais = sorted({
+                    str(v).strip() for v in os_atuais.get("Cidade", []) if str(v).strip()
+                })
+                cidade_atual = cidades_atuais[0] if cidades_atuais else ""
+                numeros_atuais = [
+                    str(x).strip() for x in os_atuais.get("Nº da O.S", []) if str(x).strip()
+                ]
+                chave_atual = chave_concentracao(
+                    cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
+                    numeros_atuais,
+                )
+                contextos_ativos_acomp[str(c_atual["ID_CONCENTRACAO"])] = {
+                    "chave": chave_atual,
+                    "municipio": cidade_atual,
+                    "os": numeros_atuais,
+                    "multiplos_municipios": len(cidades_atuais) != 1,
+                    "latitude": float(c_atual["LATITUDE"]),
+                    "longitude": float(c_atual["LONGITUDE"]),
+                }
+
+            chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
+            ids_fichas_ativas = {
+                str(vinculos_acomp_visiveis[chave]["evento_id"])
+                for chave in chaves_ativas if chave in vinculos_acomp_visiveis
+            }
+            candidatos_acomp_por_codigo = {}
+            if recuperar_supabase_ativo and not erro_acomp_visivel:
+                for codigo_atual, ctx in contextos_ativos_acomp.items():
+                    if (ctx["chave"] in vinculos_acomp_visiveis
+                            or ctx["multiplos_municipios"]):
+                        continue
+                    opcoes = sugerir_recuperacoes(
+                        todos_vinculos_acomp, ctx["municipio"],
+                        ctx["latitude"], ctx["longitude"], ctx["os"],
+                        chaves_ativas=chaves_ativas,
+                    )
+                    opcoes = [
+                        op for op in opcoes
+                        if op["evento_id"] in fichas_acomp_visiveis
+                        and op["evento_id"] not in ids_fichas_ativas
+                    ]
+                    if opcoes:
+                        candidatos_acomp_por_codigo[codigo_atual] = opcoes
+            # Uma ficha que combina com duas concentrações atuais pode
+            # indicar divisão/fusão: bloquear a recuperação até revisão.
+            uso_candidato = {}
+            for opcoes in candidatos_acomp_por_codigo.values():
+                for opcao in opcoes:
+                    eid = opcao["evento_id"]
+                    uso_candidato[eid] = uso_candidato.get(eid, 0) + 1
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
@@ -5059,7 +5121,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         municipio_nota = cidades_grupo[0] if cidades_grupo else ""
                         numeros_os = [str(x).strip() for x in os_grupo.get("Nº da O.S", []) if str(x).strip()]
                         municipio_acomp = cidades_grupo[0] if cidades_grupo else municipio_nota
-                        chave_acomp = chave_concentracao(municipio_acomp, concentracao["LATITUDE"], concentracao["LONGITUDE"], numeros_os)
+                        contexto_atual = contextos_ativos_acomp[str(codigo)]
+                        chave_acomp = contexto_atual["chave"]
+                        opcoes_recuperar = candidatos_acomp_por_codigo.get(str(codigo), [])
                         concentracoes.loc[concentracoes["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         vinculo_acomp = vinculos_acomp_visiveis.get(chave_acomp)
@@ -5068,8 +5132,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         if ficha_acomp and (str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
                                              or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
                             indicador_nota = "✅ Acompanhamento concluído"
-                        elif vinculo_acomp:
+                        elif vinculo_acomp and ficha_acomp:
                             indicador_nota = "🔄 Acompanhamento em andamento"
+                        elif vinculo_acomp:
+                            indicador_nota = "Acompanhamento vinculado — ficha indisponível"
+                        elif opcoes_recuperar:
+                            indicador_nota = "🔎 Possível acompanhamento existente — revisar vínculo"
                         else:
                             indicador_nota = "Acompanhamento não iniciado" if not erro_acomp_visivel else "Acompanhamento indisponível"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
@@ -5094,25 +5162,94 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
                                 st.success(indicador_nota)
+                            elif opcoes_recuperar:
+                                st.warning(
+                                    "Há acompanhamento(s) anterior(es) com O.S. em comum. "
+                                    "Nenhuma ficha foi movida; confirme o vínculo antes de criar outra."
+                                )
                             else:
                                 st.caption("Nenhuma ficha operacional iniciada para este conjunto de O.S.")
-                            rotulo_acomp = (
-                                ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                                if vinculo_acomp
-                                else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                            )
-                            if st.button(rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
-                                         disabled=bool(erro_acomp_visivel)):
-                                contexto_popup = {
-                                    "chave": chave_acomp, "codigo": str(codigo),
-                                    "municipio": municipio_acomp, "bairros": bairros_grupo,
-                                    "latitude": float(concentracao["LATITUDE"]),
-                                    "longitude": float(concentracao["LONGITUDE"]),
-                                    "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
-                                    "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
-                                    "origem": "producao",
-                                }
-                                popup_acompanhamento_farol(contexto_popup, pode_editar=PODE_EDITAR_FAROL)
+
+                            contexto_popup = {
+                                "chave": chave_acomp, "codigo": str(codigo),
+                                "municipio": municipio_acomp, "bairros": bairros_grupo,
+                                "latitude": float(concentracao["LATITUDE"]),
+                                "longitude": float(concentracao["LONGITUDE"]),
+                                "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
+                                "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
+                                "origem": "producao",
+                            }
+                            if opcoes_recuperar and not vinculo_acomp:
+                                if st.button(
+                                    "🔗 Revisar acompanhamento existente",
+                                    key=f"farol_revisar_vinculo_{abrangencia}_{codigo}",
+                                    disabled=not PODE_EDITAR_FAROL,
+                                ):
+                                    st.session_state["farol_codigo_recuperacao"] = str(codigo)
+                                    st.session_state["farol_v2_detalhe_aberto"] = str(codigo)
+                                    st.rerun()
+                                if st.session_state.get("farol_codigo_recuperacao") == str(codigo):
+                                    with st.form(f"farol_form_recuperar_{abrangencia}_{codigo}"):
+                                        escolha = st.selectbox(
+                                            "Ficha anterior para esta concentração",
+                                            list(range(len(opcoes_recuperar))),
+                                            format_func=lambda i: (
+                                                f"Ficha #{opcoes_recuperar[i]['evento_id']} — "
+                                                f"{str(fichas_acomp_visiveis[opcoes_recuperar[i]['evento_id']].get('titulo', ''))[:75]} "
+                                                f"— {opcoes_recuperar[i]['os_em_comum']} O.S. em comum "
+                                                f"— {opcoes_recuperar[i]['distancia_m']} m"
+                                            ),
+                                            key=f"farol_escolha_recuperacao_{abrangencia}_{codigo}",
+                                        )
+                                        candidato = opcoes_recuperar[escolha]
+                                        ficha_candidata = fichas_acomp_visiveis[candidato["evento_id"]]
+                                        st.caption(
+                                            f"Registro de {candidato['criado_em']} · "
+                                            f"Status: {ficha_candidata.get('status', '')} · "
+                                            f"{candidato['os_em_comum']} de {candidato['os_anteriores']} O.S. "
+                                            f"anteriores e {candidato['os_atuais']} O.S. atuais · "
+                                            f"Distância entre centros: {candidato['distancia_m']} m"
+                                        )
+                                        ambiguo = uso_candidato.get(candidato["evento_id"], 0) > 1
+                                        if ambiguo:
+                                            st.error(
+                                                "Esta ficha também corresponde a outra concentração atual "
+                                                "(possível divisão/fusão). Recuperação bloqueada para evitar associação incorreta."
+                                            )
+                                        confirmado = st.checkbox(
+                                            "Confirmei que a concentração atual corresponde à ficha selecionada. "
+                                            "O vínculo antigo e todo o histórico serão preservados.",
+                                            key=f"farol_confirmar_recuperacao_{abrangencia}_{codigo}",
+                                        )
+                                        recuperar = st.form_submit_button(
+                                            "Confirmar recuperação do vínculo",
+                                            type="primary",
+                                            disabled=ambiguo or not confirmado or not PODE_EDITAR_FAROL,
+                                        )
+                                    if recuperar:
+                                        try:
+                                            recuperar_vinculo_confirmado(
+                                                contexto_popup, candidato["chave_anterior"],
+                                                candidato["evento_id"],
+                                            )
+                                            st.session_state.pop("farol_codigo_recuperacao", None)
+                                            st.toast("Vínculo recuperado; ficha e histórico preservados.")
+                                            st.rerun()
+                                        except Exception as erro_recuperar:
+                                            st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
+                            else:
+                                rotulo_acomp = (
+                                    ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                                    if vinculo_acomp
+                                    else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                                )
+                                if st.button(
+                                    rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
+                                    disabled=bool(erro_acomp_visivel),
+                                ):
+                                    popup_acompanhamento_farol(
+                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                    )
                             if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
                                          key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
                                 st.session_state["farol_v2_concentracao"] = codigo_texto
