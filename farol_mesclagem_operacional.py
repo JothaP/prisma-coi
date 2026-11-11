@@ -46,6 +46,23 @@ def chave_acompanhamento_mesclado(evento_chave):
     return md5(("FAROL_MESCLA|" + str(evento_chave)).encode()).hexdigest()
 
 
+def nome_concentracao_mesclada(mescla):
+    """Exibe os IDs originais juntos; a chave técnica continua independente.
+
+    Os códigos são os da seleção confirmada no momento da mesclagem. Por
+    isso, o nome não muda quando o Farol renumera os grupos em novas cargas.
+    """
+    originais = mescla.get("codigos_origem") or []
+    if not isinstance(originais, (list, tuple)):
+        originais = []
+    codigos = list(dict.fromkeys(
+        str(c).strip() for c in originais if c is not None and str(c).strip()
+    ))
+    if len(codigos) >= 2:
+        return ", ".join(codigos)
+    return str(mescla.get("codigo_mescla") or "Concentração mesclada")
+
+
 def validar_poligono(geometria):
     """Somente Polygon simples, área plausível e WGS84; sem aceitar desenhos livres."""
     if not isinstance(geometria, dict) or geometria.get("type") != "Polygon":
@@ -209,7 +226,10 @@ def aplicar_mesclas(concentracoes, grupos, mesclas):
         gid = "MESCLA_" + mescla["evento_chave"]
         pontos.loc[pontos["_grupo"].isin(grupos_atuais), "_grupo"] = gid
         novos.append({
-            "ID_CONCENTRACAO": mescla["codigo_mescla"],
+            # Rótulo operacional: THE C001, THE C002 (em vez de THE M...).
+            # A chave de acompanhamento permanece estável no Supabase.
+            "ID_CONCENTRACAO": nome_concentracao_mesclada(mescla),
+            "CODIGO_MESCLA_INTERNO": mescla["codigo_mescla"],
             "GRUPO": gid, "LATITUDE": float(lat), "LONGITUDE": float(lon),
             "QTD_OS": len(bloco),
             "QTD_MATRICULAS": bloco["Matrícula"].replace("", pd.NA).dropna().nunique(),
