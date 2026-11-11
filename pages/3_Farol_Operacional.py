@@ -339,7 +339,7 @@ def indice_nomes_bairros(bairros_geograficos, municipio):
     cidade = normalizar_municipio(municipio)
     nomes = set()
     for item in (bairros_geograficos or []):
-        if normalizar_municipio(item.get("municipio", "")) == cidade:
+        if normalizar_municipio(item.get("municipio", "")) == cidade and not item.get("sem_nome"):
             nome = limpar_nome_bairro(item.get("nome_normalizado") or item.get("nome"))
             if nome:
                 nomes.add(nome)
@@ -1397,10 +1397,11 @@ def unidade_da_cidade_farol(valor):
 
 
 def carregar_gpkg(caminho):
-    """Lê os polígonos do GeoPackage sem geopandas/GDAL.
+    """Lê TODAS as geometrias poligonais do GPKG, sem exigir nome de bairro.
 
-    Identifica bairro e município pelos atributos do QGIS; converte o SRC
-    original para WGS84 antes de entregar coordenadas ao Folium.
+    As coordenadas são a fonte de verdade. Os atributos são opcionais e
+    servem para nomear a feição e relacioná-la a eventos quando disponíveis.
+    Preserva anéis internos (furos) e converte o SRC original para WGS84.
     """
     registros = []
     with sqlite3.connect(f"file:{caminho}?mode=ro", uri=True) as conexao:
@@ -1415,26 +1416,27 @@ def carregar_gpkg(caminho):
             if not info:
                 continue
             campo_geometria, srs_geom = info
-            nomes = [r[1] for r in conexao.execute(f'PRAGMA table_info("{tabela.replace(chr(34), chr(34)*2)}")')]
+            quoted = lambda x: '"' + x.replace('"', '""') + '"'
+            nomes = [
+                r[1] for r in conexao.execute(f"PRAGMA table_info({quoted(tabela)})")
+            ]
             campos = {normalizar_cabecalho(c): c for c in nomes}
-            # Compatibilidade automática com as duas origens de bairros:
-            # IBGE: NM_BAIRRO + NM_RGI/NM_MUN
-            # Municípios (ArcGIS): NOME + MUNICIPIO
             campo_bairro = next(
-                (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME") if k in campos),
-                None,
+                (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME")
+                 if k in campos), None,
+            )
+            campo_nome_aux = next(
+                (campos[k] for k in ("NAME", "LOCALIDADE", "NOMELOCALIDADE")
+                 if k in campos and campos[k] != campo_bairro), None,
             )
             campo_mun = next(
-                (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI") if k in campos),
-                None,
+                (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI")
+                 if k in campos), None,
             )
-            if not campo_bairro:
-                continue
-            # GeoPackage usa WKB com cabeçalho GP de 8+ bytes, definido pelos flags.
             src_id = srs_geom or srs_id
             linha_srs = conexao.execute(
-                "SELECT organization, organization_coordsys_id, definition FROM gpkg_spatial_ref_sys WHERE srs_id=?",
-                (src_id,),
+                "SELECT organization, organization_coordsys_id, definition "
+                "FROM gpkg_spatial_ref_sys WHERE srs_id=?", (src_id,),
             ).fetchone()
             if not linha_srs:
                 continue
@@ -1443,46 +1445,81 @@ def carregar_gpkg(caminho):
                 origem = CRS.from_user_input(f"{org}:{cod}") if org and cod else CRS.from_wkt(definicao)
             except Exception:
                 origem = CRS.from_wkt(definicao)
-            conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(origem, 4326, always_xy=True)
-            quoted = lambda x: '"' + x.replace('"', '""') + '"'
-            colunas = [campo_geometria, campo_bairro] + ([campo_mun] if campo_mun else [])
-            consulta = f'SELECT {", ".join(quoted(c) for c in colunas)} FROM {quoted(tabela)}'
-            for row in conexao.execute(consulta):
-                bruto, nome, *municipio_atributo = row
-                if not bruto or not nome:
+            conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(
+                origem, 4326, always_xy=True
+            )
+            # Não descartar a camada quando não há campo de nome:
+            # a geometria pode ser desenhada normalmente.
+            colunas = [campo_geometria]
+            colunas += [c for c in (campo_bairro, campo_nome_aux, campo_mun) if c]
+            consulta = f"SELECT {', '.join(quoted(c) for c in colunas)} FROM {quoted(tabela)}"
+            for numero_feicao, row in enumerate(conexao.execute(consulta), start=1):
+                atributos = dict(zip(colunas, row))
+                bruto = atributos.get(campo_geometria)
+                if not bruto:
                     continue
-                bruto = bytes(bruto)
-                if len(bruto) < 8 or bruto[:2] != b"GP":
+                try:
+                    bruto = bytes(bruto)
+                    if len(bruto) < 8 or bruto[:2] != b"GP":
+                        continue
+                    envelope = (bruto[3] >> 1) & 7
+                    tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+                    if envelope not in tamanhos:
+                        continue
+                    geometria = wkb.loads(bruto[8 + tamanhos[envelope]:])
+                    if conversor:
+                        geometria = transformar_geometria(conversor.transform, geometria)
+                    if geometria.is_empty:
+                        continue
+                    if geometria.geom_type == "Polygon":
+                        partes = [geometria]
+                    elif geometria.geom_type == "MultiPolygon":
+                        partes = list(geometria.geoms)
+                    else:
+                        continue
+                    poligonos, aneis_por_poligono = [], []
+                    for parte in partes:
+                        exterior = [(float(y), float(x)) for x, y in parte.exterior.coords]
+                        if len(exterior) < 4 or not all(
+                            math.isfinite(lat) and math.isfinite(lon)
+                            and -90 <= lat <= 90 and -180 <= lon <= 180
+                            for lat, lon in exterior
+                        ):
+                            continue
+                        aneis = [exterior]
+                        for interno in parte.interiors:
+                            furo = [(float(y), float(x)) for x, y in interno.coords]
+                            if len(furo) >= 4:
+                                aneis.append(furo)
+                        poligonos.append(exterior)
+                        aneis_por_poligono.append(aneis)
+                except (ValueError, TypeError, OverflowError, AttributeError):
+                    # Uma feição malformada não impede a leitura das demais.
                     continue
-                flags = bruto[3]
-                envelope = (flags >> 1) & 7
-                tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
-                if envelope not in tamanhos:
+                if not poligonos:
                     continue
-                geometria = wkb.loads(bruto[8 + tamanhos[envelope]:])
-                if conversor:
-                    geometria = transformar_geometria(conversor.transform, geometria)
-                if geometria.geom_type == "Polygon":
-                    partes = [geometria]
-                elif geometria.geom_type == "MultiPolygon":
-                    partes = list(geometria.geoms)
-                else:
-                    continue
-                poligonos = []
-                for parte in partes:
-                    coords = [(float(y), float(x)) for x, y in parte.exterior.coords]
-                    if len(coords) >= 4 and all(-90 <= lat <= 90 and -180 <= lon <= 180 for lat, lon in coords):
-                        poligonos.append(coords)
-                if poligonos:
-                    municipio = (municipio_atributo[0] if municipio_atributo else "") or nome_municipio_arquivo(caminho)
-                    registros.append({
-                        "nome": str(nome).strip(),
-                        "nome_normalizado": limpar_nome_bairro(nome),
-                        "municipio": normalizar_municipio(municipio),
-                        "poligonos": poligonos,
-                    })
-    return registros
 
+                def nome_valido(valor):
+                    texto = str(valor or "").strip()
+                    return "" if texto.upper() in {
+                        "", "NAN", "NONE", "NULL", "NOVO ELEMENTO", "NEW FEATURE"
+                    } else texto
+
+                nome_real = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
+                if not nome_real and campo_nome_aux:
+                    nome_real = nome_valido(atributos.get(campo_nome_aux))
+                rotulo = nome_real or f"Área sem nome ({tabela} #{numero_feicao})"
+                municipio_atributo = atributos.get(campo_mun) if campo_mun else ""
+                municipio = municipio_atributo or nome_municipio_arquivo(caminho)
+                registros.append({
+                    "nome": rotulo,
+                    "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
+                    "sem_nome": not bool(nome_real),
+                    "municipio": normalizar_municipio(municipio),
+                    "poligonos": poligonos,
+                    "aneis_por_poligono": aneis_por_poligono,
+                })
+    return registros
 
 def nome_municipio_arquivo(caminho):
     nome = os.path.splitext(os.path.basename(caminho))[0]
@@ -1490,32 +1527,49 @@ def nome_municipio_arquivo(caminho):
 
 
 def preparar_poligonos_para_mapa(registros, tolerancia=0.00007):
-    """Reduz vértices SOMENTE no desenho. Preserva 'poligonos' originais para análise.
+    """Simplifica as geometrias apenas para desenhar, preservando todos os anéis.
 
-    0.00007 grau corresponde aproximadamente a alguns metros na região de operação.
-    A geometria simplificada é calculada apenas quando os arquivos mudam (cache).
+    Os polígonos e furos ORIGINAIS permanecem disponíveis para os cruzamentos
+    espaciais. A geometria não depende da presença de atributos cadastrais.
     """
     from shapely.geometry import Polygon
-    for bairro in registros:
-        visuais = []
-        for coords in bairro.get("poligonos", []):
-            if len(coords) < 25:
-                visuais.append(coords)
-                continue
-            try:
-                # shapely usa longitude,latitude; Folium usa latitude,longitude.
-                geom = Polygon([(lon, lat) for lat, lon in coords])
-                simplificado = geom.simplify(tolerancia, preserve_topology=True)
-                if simplificado.is_empty or simplificado.geom_type != "Polygon":
-                    visuais.append(coords)
-                else:
-                    novo = [(float(lat), float(lon)) for lon, lat in simplificado.exterior.coords]
-                    visuais.append(novo if len(novo) >= 4 else coords)
-            except (ValueError, TypeError):
-                visuais.append(coords)
-        bairro["poligonos_mapa"] = visuais
-    return registros
 
+    for bairro in registros:
+        visuais, aneis_visuais = [], []
+        origem = bairro.get("aneis_por_poligono") or [
+            [coords] for coords in bairro.get("poligonos", [])
+        ]
+        for aneis in origem:
+            if not aneis or len(aneis[0]) < 4:
+                continue
+            atual = aneis
+            if len(aneis[0]) >= 25:
+                try:
+                    geom = Polygon(
+                        [(lon, lat) for lat, lon in aneis[0]],
+                        holes=[
+                            [(lon, lat) for lat, lon in furo]
+                            for furo in aneis[1:]
+                        ],
+                    )
+                    simplificado = geom.simplify(tolerancia, preserve_topology=True)
+                    if not simplificado.is_empty and simplificado.geom_type == "Polygon":
+                        novos = [
+                            [(float(lat), float(lon)) for lon, lat in simplificado.exterior.coords]
+                        ]
+                        novos.extend(
+                            [(float(lat), float(lon)) for lon, lat in ring.coords]
+                            for ring in simplificado.interiors
+                        )
+                        if len(novos[0]) >= 4:
+                            atual = novos
+                except (ValueError, TypeError):
+                    pass
+            visuais.append(atual[0])
+            aneis_visuais.append(atual)
+        bairro["poligonos_mapa"] = visuais
+        bairro["aneis_mapa"] = aneis_visuais
+    return registros
 
 @st.cache_data(show_spinner=False, ttl=300)
 def carregar_geometrias_municipais(arquivos_assinados):
@@ -1597,8 +1651,12 @@ def ponto_em_poligono(lat, lon, poligono):
 
 
 def ponto_em_bairro(lat, lon, bairro):
-    for poligono in bairro["poligonos"]:
-        if ponto_em_poligono(lat, lon, poligono):
+    aneis_por_poligono = bairro.get("aneis_por_poligono") or [
+        [p] for p in bairro["poligonos"]
+    ]
+    for aneis in aneis_por_poligono:
+        if (ponto_em_poligono(lat, lon, aneis[0])
+                and not any(ponto_em_poligono(lat, lon, furo) for furo in aneis[1:])):
             return True
     return False
 
@@ -1607,7 +1665,7 @@ def identificar_bairro_por_ponto(lat, lon, bairros):
     if lat is None or lon is None:
         return ""
     for bairro in bairros:
-        if ponto_em_bairro(lat, lon, bairro):
+        if not bairro.get("sem_nome") and ponto_em_bairro(lat, lon, bairro):
             return bairro["nome_normalizado"]
     return ""
 
@@ -2048,9 +2106,12 @@ def adicionar_camada_eventos(mapa, eventos_mapeados):
             f"<b>Abrangência:</b> {html_escape(abrangencia)}"
             f"</div>"
         )
-        for poligono in bairro.get("poligonos_mapa", bairro["poligonos"]):
+        geometrias = bairro.get("aneis_mapa") or [
+            [pol] for pol in bairro.get("poligonos_mapa", bairro["poligonos"])
+        ]
+        for aneis in geometrias:
             folium.Polygon(
-                locations=poligono,
+                locations=aneis[0] if len(aneis) == 1 else aneis,
                 color=item["cor"], weight=2.5, opacity=0.9,
                 fill=True, fill_color=item["cor"], fill_opacity=0.23,
                 tooltip=f"Evento: {bairro['nome']} — {categoria}",
@@ -2139,13 +2200,22 @@ def adicionar_limites_bairros(mapa, bairros):
     """Camada única GeoJSON: mais leve que criar um Polygon Leaflet por bairro."""
     features = []
     for b in bairros:
-        for pol in b.get("poligonos_mapa", b["poligonos"]):
-            if len(pol) < 4:
+        geometrias = b.get("aneis_mapa") or [
+            [pol] for pol in b.get("poligonos_mapa", b["poligonos"])
+        ]
+        for aneis in geometrias:
+            if not aneis or len(aneis[0]) < 4:
                 continue
             features.append({
                 "type": "Feature",
                 "properties": {"bairro": str(b.get("nome", "")), "municipio": str(b.get("municipio", ""))},
-                "geometry": {"type": "Polygon", "coordinates": [[[float(lon), float(lat)] for lat, lon in pol]]},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[float(lon), float(lat)] for lat, lon in ring]
+                        for ring in aneis
+                    ],
+                },
             })
     if not features:
         return
@@ -2539,7 +2609,7 @@ def indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento):
     nomes = {area["bairro"] for area in areas_evento}
     indice = {nome: [] for nome in nomes}
     for bairro in (bairros_geograficos or []):
-        if normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
+        if bairro.get("sem_nome") or normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
             continue
         nome = limpar_nome_bairro(bairro.get("nome_normalizado") or bairro.get("nome", ""))
         if nome in indice:
