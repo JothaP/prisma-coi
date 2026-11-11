@@ -340,6 +340,9 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             f"— {evento.get('Cidade', '')} — "
             f"{len(indice[chave]['grupos'])} concentrações"
         )
+    if (CHAVE_EVENTO in st.session_state
+            and st.session_state[CHAVE_EVENTO] not in chaves):
+        del st.session_state[CHAVE_EVENTO]
     event_key = st.selectbox(
         "Evento", chaves, format_func=rotulo,
         key=CHAVE_EVENTO,
