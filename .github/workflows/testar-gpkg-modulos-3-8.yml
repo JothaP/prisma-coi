@@ -1,0 +1,36 @@
+name: Validar GeoPackage M3 e M8
+
+on:
+  push:
+    paths:
+      - 'pages/3_Farol_Operacional.py'
+      - 'pages/8_Consulta_Operacional.py'
+      - 'geodados/municipios/*.gpkg'
+      - 'tests/test_gpkg_modulos_3_8.py'
+      - '.github/workflows/testar-gpkg-modulos-3-8.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias isoladas
+        run: python -m pip install 'shapely>=2,<3' 'pyproj>=3,<4' 'folium>=0.16,<1' 'pandas>=2.2,<3'
+      - name: Verificar sintaxe dos modulos
+        run: |
+          python -m py_compile pages/3_Farol_Operacional.py
+          python -m py_compile pages/8_Consulta_Operacional.py
+      - name: Testar leitura e renderizacao do GPKG de Teresina
+        run: python -m unittest discover -s tests -p 'test_gpkg_modulos_3_8.py' -v
+      - name: Testar regressao territorial dos eventos
+        run: python -m unittest discover -s tests -p 'test_farol_territorial_hibrido.py' -v
+      - name: Testar rótulos e marcadores do Modulo 8
+        run: python -m unittest discover -s tests -p 'test_modulo8_rotulos_marcadores.py' -v
