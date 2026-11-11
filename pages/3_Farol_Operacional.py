@@ -5346,6 +5346,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     dados_relatorio_concentracao, classificar_os_por_evento,
                     contextos_originais_mescla, vinculos_acomp_visiveis,
                     fichas_acomp_visiveis, PODE_EDITAR_FAROL,
+                    conferir_data=evento_pertinente_data_analise,
                 )
                 st.divider()
             # Três unidades separadas, com ordenação THE / API / TIM.
