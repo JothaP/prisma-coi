@@ -1264,11 +1264,14 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     # Nunca criar marcadores ou rótulos para centenas de matrículas da área.
     # Assim, a leitura visual prioriza a matrícula pesquisada e os equipamentos.
 
-    # Os marcadores são permanentes. Rótulos fixos ficam em uma camada
-    # independente para nunca ocultar ícones ao desativar sua exibição.
-    grupo_clientes = folium.FeatureGroup(name="Matrículas consultadas", show=True)
-    grupo_rotulos = (
-        folium.FeatureGroup(name="Rótulos fixos", show=True, control=False)
+    # Marcadores sempre visíveis: não constam no controle de camadas.
+    # As opções "Matrículas consultadas", "Poço / Ativo(s)" e
+    # "Logger(s)" controlam SOMENTE os respectivos rótulos fixos.
+    grupo_clientes = folium.FeatureGroup(
+        name="Marcadores de matrículas", show=True, control=False,
+    )
+    rotulos_matriculas = (
+        folium.FeatureGroup(name="Matrículas consultadas", show=True)
         if exibir_rotulos else None
     )
     for _, linha in clientes.iterrows():
@@ -1292,14 +1295,24 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
         ).add_to(grupo_clientes)
         folium.Circle([lat, lon], radius=raio, color="#397cba", fill=False,
                       opacity=.32, weight=1, tooltip=f"Proximidade: {raio} m").add_to(grupo_clientes)
-        if grupo_rotulos is not None:
-            _m8_adicionar_rotulo(grupo_rotulos, lat, lon,
+        if rotulos_matriculas is not None:
+            _m8_adicionar_rotulo(rotulos_matriculas, lat, lon,
                                  f"{matricula} • {elevacao}" if elevacao else matricula,
                                  deslocamento=19)
     grupo_clientes.add_to(mapa)
+    if rotulos_matriculas is not None:
+        rotulos_matriculas.add_to(mapa)
 
     for tipo, cor, icone in (("Poço / Ativo", "blue", "tint"), ("Logger", "orange", "signal")):
-        grupo = folium.FeatureGroup(name=tipo + "(s)", show=True)
+        # Ícones e popups ficam nesta camada permanente (control=False).
+        grupo = folium.FeatureGroup(
+            name="Marcadores — " + tipo, show=True, control=False,
+        )
+        # Cada checkbox do Leaflet comanda apenas o texto da categoria.
+        rotulos_equipamento = (
+            folium.FeatureGroup(name=tipo + "(s)", show=True)
+            if exibir_rotulos else None
+        )
         filtrados = [ativo for ativo in ativos if ativo.get("_tipo") == tipo]
         for i, ativo in enumerate(filtrados[:LIMITE_EQUIPAMENTOS_MAPA]):
             lat, lon = float(ativo["_lat"]), float(ativo["_lon"])
@@ -1313,13 +1326,13 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
             folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=360),
                           tooltip=tooltip,
                           icon=folium.Icon(color=cor, icon=icone, prefix="fa")).add_to(grupo)
-            if grupo_rotulos is not None and i < 110 and nome:
+            if rotulos_equipamento is not None and i < 110 and nome:
                 texto_rotulo = f"{nome[:36]} • {elevacao}" if elevacao else nome[:36]
-                _m8_adicionar_rotulo(grupo_rotulos, lat, lon, texto_rotulo,
+                _m8_adicionar_rotulo(rotulos_equipamento, lat, lon, texto_rotulo,
                                      tipo="ativo", deslocamento=17)
         grupo.add_to(mapa)
-    if grupo_rotulos is not None:
-        grupo_rotulos.add_to(mapa)
+        if rotulos_equipamento is not None:
+            rotulos_equipamento.add_to(mapa)
 
     Draw(export=False, position="topleft",
          draw_options={"polygon": {"allowIntersection": False, "showArea": True},
