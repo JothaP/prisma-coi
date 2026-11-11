@@ -1,0 +1,31 @@
+name: Validar mesclagem de concentracoes no Ambiente de Teste
+
+on:
+  push:
+    paths:
+      - 'farol_mesclagem_teste.py'
+      - 'pages/Ambiente_de_Teste.py'
+      - 'tests/test_farol_mesclagem_teste.py'
+      - '.github/workflows/testar-farol-mesclagem-ambiente-teste.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Dependencias das funcoes espaciais
+        run: python -m pip install 'folium>=0.16,<1' 'pandas>=2.2,<3' 'shapely>=2,<3' 'pyproj>=3,<4'
+      - name: Validar sintaxe
+        run: |
+          python -m py_compile farol_mesclagem_teste.py
+          python -m py_compile pages/Ambiente_de_Teste.py
+      - name: Testar elegibilidade, uniao, mapa e isolamento
+        run: python -m unittest discover -s tests -p 'test_farol_mesclagem_teste.py' -v
