@@ -1,6 +1,11 @@
 """Integração Farol de produção / Acompanhamento Operacional."""
 import hashlib
 import json
+import math
+import re
+import unicodedata
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import gspread
 import random
 import time
@@ -134,6 +139,112 @@ def localizar_vinculo(chave, municipio, latitude, longitude, numeros_os):
         return exato
     # NÃO associa automaticamente por proximidade ou ID C001 mutável.
     return None
+
+
+def _normalizar_municipio_vinculo(valor):
+    texto = unicodedata.normalize("NFKD", str(valor or "").strip().upper())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[^A-Z0-9]", "", texto)
+
+
+def _distancia_centros_m(valor_a_lat, valor_a_lon, valor_b_lat, valor_b_lon):
+    """Haversine entre centros, sem aceitar coordenadas inválidas."""
+    try:
+        lat1, lon1, lat2, lon2 = map(float, (valor_a_lat, valor_a_lon,
+                                           valor_b_lat, valor_b_lon))
+        if not all(math.isfinite(v) for v in (lat1, lon1, lat2, lon2)):
+            return None
+        if not (-90 <= lat1 <= 90 and -90 <= lat2 <= 90
+                and -180 <= lon1 <= 180 and -180 <= lon2 <= 180):
+            return None
+        dlat, dlon = math.radians(lat2-lat1), math.radians(lon2-lon1)
+        a = (math.sin(dlat / 2)**2
+             + math.cos(math.radians(lat1))*math.cos(math.radians(lat2))
+             * math.sin(dlon / 2)**2)
+        return 6371000 * 2 * math.asin(min(1, math.sqrt(a)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def sugerir_recuperacoes(vinculos, municipio, latitude, longitude,
+                        numeros_os, chaves_ativas=(), agora=None):
+    """Somente SUGESTÕES; nunca transfere acompanhamento automaticamente.
+
+    Prioriza mesma cidade, proximidade de até 1,5 km, 2+ O.S. compartilhadas
+    e pelo menos 50% de cada conjunto. Ignora vínculos já ativos no painel
+    e os muito antigos (mais de oito dias), para não reutilizar históricos.
+    """
+    cidade = _normalizar_municipio_vinculo(municipio)
+    atuais = {str(n).strip() for n in numeros_os if str(n).strip()}
+    if not cidade or len(atuais) < 2:
+        return []
+    usadas = set(chaves_ativas)
+    agora = agora or datetime.now(ZoneInfo("America/Fortaleza")).replace(tzinfo=None)
+    candidatos = []
+    for vinculo in vinculos:
+        if str(vinculo.get("chave", "")) in usadas:
+            continue
+        if _normalizar_municipio_vinculo(vinculo.get("municipio", "")) != cidade:
+            continue
+        anteriores = {
+            valor.strip() for valor in str(vinculo.get("os_origem", "")).split(";")
+            if valor.strip()
+        }
+        compartilhadas = atuais & anteriores
+        if (len(compartilhadas) < 2 or len(compartilhadas)*2 < len(anteriores)
+                or len(compartilhadas)*2 < len(atuais)):
+            continue
+        distancia = _distancia_centros_m(
+            latitude, longitude, vinculo.get("latitude"), vinculo.get("longitude")
+        )
+        if distancia is None or distancia > 1500:
+            continue
+        try:
+            criado = datetime.strptime(
+                str(vinculo.get("criado_em", ""))[:16], "%d/%m/%Y %H:%M")
+        except ValueError:
+            continue
+        if criado > agora + timedelta(minutes=10) or agora - criado > timedelta(days=8):
+            continue
+        candidatos.append({
+            "chave_anterior": str(vinculo.get("chave", "")),
+            "evento_id": str(vinculo.get("evento_id", "")),
+            "municipio": str(vinculo.get("municipio", "")),
+            "criado_em": str(vinculo.get("criado_em", "")),
+            "os_em_comum": len(compartilhadas),
+            "os_anteriores": len(anteriores),
+            "os_atuais": len(atuais),
+            "distancia_m": round(distancia),
+            "cobertura_anterior": len(compartilhadas) / len(anteriores),
+            "cobertura_atual": len(compartilhadas) / len(atuais),
+        })
+    # A mesma ficha pode possuir várias chaves históricas; basta exibir a
+    # melhor candidata por ficha, sem sugeri-la duas vezes na mesma área.
+    por_ficha = {}
+    for c in candidatos:
+        anterior = por_ficha.get(c["evento_id"])
+        score = (c["os_em_comum"], min(c["cobertura_anterior"],
+                 c["cobertura_atual"]), -c["distancia_m"])
+        if anterior is None or score > (
+                anterior["os_em_comum"],
+                min(anterior["cobertura_anterior"], anterior["cobertura_atual"]),
+                -anterior["distancia_m"]):
+            por_ficha[c["evento_id"]] = c
+    return sorted(por_ficha.values(), key=lambda c: (
+        -c["os_em_comum"], -min(c["cobertura_anterior"], c["cobertura_atual"]),
+        c["distancia_m"], c["evento_id"],
+    ))
+
+
+def recuperar_vinculo_confirmado(contexto, chave_anterior, evento_id):
+    """Recuperação persistente e auditada, somente após confirmação explícita."""
+    if not fonte_supabase():
+        raise RuntimeError("Recuperação de vínculos disponível somente com Supabase ativo.")
+    from farol_acomp_supabase_backend import recuperar_vinculo as sb_recuperar
+    resposta = sb_recuperar(chave_anterior, evento_id, contexto)
+    invalidar_cache_acompanhamento()
+    return resposta
+
 
 def registrar_vinculo(contexto, evento_id):
     if fonte_supabase():
