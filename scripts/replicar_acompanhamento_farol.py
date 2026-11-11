@@ -312,16 +312,58 @@ def executar(full=False, simulacao=False):
         raise RuntimeError("Replica nao concluida. Consulte o status administrativo e os logs protegidos do job.") from exc
 
 
+class ErroBackupDiagnostico(RuntimeError):
+    """Somente codigo de erro e etapa, nunca texto da API ou dados da ficha."""
+
+
+def _codigo_google_drive(erro):
+    """Extrai status HTTP e razao permitida, sem expor corpo de resposta/URL."""
+    permitidas = {
+        "storageQuotaExceeded", "insufficientFilePermissions", "notFound",
+        "fileNotFound", "forbidden", "insufficientPermissions",
+        "accessNotConfigured", "appNotAuthorizedToFile", "domainPolicy",
+        "rateLimitExceeded", "userRateLimitExceeded", "dailyLimitExceeded",
+        "backendError", "invalidSharingRequest", "cannotModifyInheritedTeamDrivePermission",
+        "teamDriveFileLimitExceeded", "teamDriveMembershipRequired",
+        "activeItemCreationLimitExceeded", "invalidParent",
+    }
+    http = str(getattr(getattr(erro, "resp", None), "status", "desconhecido"))
+    motivo = "nao_identificado"
+    try:
+        corpo = json.loads(erro.content.decode("utf-8", "replace"))
+        lista = corpo.get("error", {}).get("errors", [])
+        codigo = lista[0].get("reason", "") if lista else ""
+        if codigo in permitidas:
+            motivo = codigo
+        elif codigo:
+            motivo = "outro"
+    except (ValueError, TypeError, AttributeError, IndexError, UnicodeError):
+        pass
+    return f"HTTP {http}, razao {motivo}"
+
+
 def backup_drive():
-    """Exporta snapshot para pasta PRIVADA de Drive previamente compartilhada."""
+    """Backup em Drive compartilhado; somente indicadores sanitizados nos logs."""
     folder = obrigatorio("FAROL_BACKUP_DRIVE_FOLDER_ID")
-    sb = Supabase()
-    cred_dict = json.loads(obrigatorio("FAROL_GCP_JSON"))
-    cred = Credentials.from_service_account_info(
-        cred_dict, scopes=["https://www.googleapis.com/auth/drive.file"])
+    if not re.fullmatch(r"[A-Za-z0-9_-]{10,160}", folder):
+        raise ErroBackupDiagnostico(
+            "Configuracao: FAROL_BACKUP_DRIVE_FOLDER_ID deve conter somente o ID da pasta; nao cole URL."
+        )
+    try:
+        cred_dict = json.loads(obrigatorio("FAROL_GCP_JSON"))
+        cred = Credentials.from_service_account_info(
+            cred_dict, scopes=["https://www.googleapis.com/auth/drive.file"])
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ErroBackupDiagnostico(
+            "Configuracao: FAROL_GCP_JSON invalido ou conta de servico incompleta."
+        ) from exc
+
     from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaIoBaseUpload
 
+    print("Etapa backup: obtendo snapshot das tres tabelas no Supabase.")
+    sb = Supabase()
     instante = dt.datetime.now(dt.timezone.utc)
     nome = "farol_acomp_supabase_{}.zip".format(instante.strftime("%Y%m%d_%H%M%SZ"))
     buf = io.BytesIO()
@@ -341,11 +383,23 @@ def backup_drive():
             "observacao": "Backup historico; nao publicar no GitHub.",
         }, ensure_ascii=False, indent=2))
     buf.seek(0)
-    drive = build("drive", "v3", credentials=cred, cache_discovery=False)
-    media = MediaIoBaseUpload(buf, mimetype="application/zip", resumable=False)
-    drive.files().create(body={"name": nome, "parents": [folder],
-                               "mimeType": "application/zip"},
-                         media_body=media, fields="id", supportsAllDrives=True).execute()
+    print("Etapa backup: snapshot preparado; iniciando envio privado ao Google Drive.")
+    try:
+        drive = build("drive", "v3", credentials=cred, cache_discovery=False)
+        media = MediaIoBaseUpload(buf, mimetype="application/zip", resumable=False)
+        drive.files().create(
+            body={"name": nome, "parents": [folder], "mimeType": "application/zip"},
+            media_body=media, fields="id", supportsAllDrives=True,
+        ).execute()
+    except HttpError as exc:
+        raise ErroBackupDiagnostico(
+            "Google Drive: falha na criacao do arquivo (" + _codigo_google_drive(exc) + ")."
+        ) from None
+    except Exception as exc:
+        # Nao expor mensagem de cliente OAuth, arquivo local ou HTTP para logs.
+        raise ErroBackupDiagnostico(
+            "Google Drive: erro de autenticacao ou conexao (" + type(exc).__name__ + ")."
+        ) from None
     print("Backup historico enviado para a pasta privada configurada.")
 
 
@@ -363,6 +417,10 @@ def main():
             backup_drive()
         else:
             executar(full=args.full, simulacao=args.dry_run)
+    except ErroBackupDiagnostico as exc:
+        # Diagnostico composto apenas por codigos e nomes de Secrets.
+        print("ERRO BACKUP: " + str(exc), file=sys.stderr)
+        sys.exit(1)
     except Exception:
         print("ERRO: rotina de replica/backup nao concluida. Verifique as configuracoes e o monitor.",
               file=sys.stderr)
