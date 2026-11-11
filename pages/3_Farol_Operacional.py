@@ -53,7 +53,7 @@ from farol_graficos_temporarios import (
     data_hoje as dia_graficos, indice_do_dia, salvar_grafico, excluir_grafico,
     chave_logger, rotulo_logger, filtrar_loggers,
 )
-from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado)
+from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
 from farol_acomp_supabase_backend import fonte_supabase
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 
@@ -5056,12 +5056,77 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     "chave": chave_atual,
                     "municipio": cidade_atual,
                     "os": numeros_atuais,
+                    "bairros": str(c_atual.get("BAIRROS", "") or ""),
                     "multiplos_municipios": len(cidades_atuais) != 1,
                     "latitude": float(c_atual["LATITUDE"]),
                     "longitude": float(c_atual["LONGITUDE"]),
                 }
 
             chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
+
+            # Continuidade automática SOMENTE quando as O.S. anteriores
+            # permanecem integralmente na concentração, novas O.S. são
+            # acrescentadas e a correspondência é única e geograficamente segura.
+            # O mapeamento em memória permite CONSULTA imediata também ao
+            # operador; a gravação persistente só ocorre sob perfil com edição.
+            continuidades_automaticas = {}
+            continuidades_persistidas = set()
+            continuidades_pendentes = set()
+            if recuperar_supabase_ativo and not erro_acomp_visivel:
+                continuidades_automaticas = identificar_continuidades_automaticas(
+                    contextos_ativos_acomp, todos_vinculos_acomp,
+                    fichas_acomp_visiveis,
+                )
+                tentativas_auto = st.session_state.setdefault(
+                    "farol_auto_vinculo_tentativas", {}
+                )
+                agora_tentativa = tempo_execucao.monotonic()
+                # Não repetir chamadas de gravação em reruns simultâneos após
+                # falhas temporárias, nem sobrecarregar o banco num único rerun.
+                gravacoes_nesta_interacao = 0
+                for codigo_auto, candidato_auto in continuidades_automaticas.items():
+                    ctx_auto = contextos_ativos_acomp[codigo_auto]
+                    chave_auto = ctx_auto["chave"]
+                    vinculo_virtual = {
+                        "chave": chave_auto,
+                        "evento_id": candidato_auto["evento_id"],
+                        "municipio": ctx_auto["municipio"],
+                        "bairros": ctx_auto["bairros"],
+                        "latitude": str(ctx_auto["latitude"]),
+                        "longitude": str(ctx_auto["longitude"]),
+                        "os_origem": ";".join(ctx_auto["os"]),
+                        "continuidade_automatica": True,
+                    }
+                    vinculos_acomp_visiveis[chave_auto] = vinculo_virtual
+                    if not PODE_EDITAR_FAROL:
+                        continuidades_pendentes.add(codigo_auto)
+                        continue
+                    ultima = tentativas_auto.get(chave_auto)
+                    if (ultima is not None and agora_tentativa - ultima < 600
+                            or gravacoes_nesta_interacao >= 12):
+                        continuidades_pendentes.add(codigo_auto)
+                        continue
+                    tentativas_auto[chave_auto] = agora_tentativa
+                    gravacoes_nesta_interacao += 1
+                    try:
+                        continuar_vinculo_automaticamente(
+                            ctx_auto, candidato_auto["chave_anterior"],
+                            candidato_auto["evento_id"],
+                        )
+                        continuidades_persistidas.add(codigo_auto)
+                        tentativas_auto.pop(chave_auto, None)
+                    except Exception:
+                        # Nunca inventar ficha nova nem perder a continuidade
+                        # reconhecida para consulta se o banco ficar indisponível.
+                        continuidades_pendentes.add(codigo_auto)
+                if continuidades_pendentes and PODE_EDITAR_FAROL:
+                    st.warning(
+                        "Algumas continuidades de acompanhamento foram reconhecidas, "
+                        "mas ainda não tiveram o novo vínculo gravado no Supabase. "
+                        "A associação pode ser consultada nesta sessão; "
+                        "a gravação será tentada novamente após alguns minutos."
+                    )
+
             ids_fichas_ativas = {
                 str(vinculos_acomp_visiveis[chave]["evento_id"])
                 for chave in chaves_ativas if chave in vinculos_acomp_visiveis
@@ -5162,6 +5227,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
                                 st.success(indicador_nota)
+                                if str(codigo) in continuidades_automaticas:
+                                    st.caption(
+                                        "Continuidade reconhecida automaticamente: as O.S. "
+                                        "anteriores permanecem na concentração. "
+                                        "Ficha e movimentações originais preservadas."
+                                    )
                             elif opcoes_recuperar:
                                 st.warning(
                                     "Há acompanhamento(s) anterior(es) com O.S. em comum. "
