@@ -5033,7 +5033,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         if mesclagem_desenhando
                         else ["last_object_clicked", "last_object_clicked_tooltip"]
                     ),
-                    key=f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}_{int(mesclagem_desenhando)}",
+                    key=(f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}"
+                         f"_{int(mesclagem_desenhando)}_"
+                         f"{hashlib.md5(json.dumps(st.session_state.get(CHAVE_POLIGONO_MESCLAGEM), sort_keys=True).encode()).hexdigest()[:8]}"),
                 )
                 if mesclagem_desenhando and estado_mapa:
                     desenho = estado_mapa.get("last_active_drawing")
@@ -5309,12 +5311,38 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     eid = opcao["evento_id"]
                     uso_candidato[eid] = uso_candidato.get(eid, 0) + 1
             if st.session_state.get(CHAVE_MODO_MESCLAGEM):
+                # O painel de seleção trabalha com as concentrações ANTES
+                # das mesclagens; reconstruir também suas chaves originais.
+                contextos_originais_mescla = {}
+                for _, original in concentracoes_originais.iterrows():
+                    codigo_original = str(original["ID_CONCENTRACAO"])
+                    grupo_original = pontos_cluster_originais.loc[
+                        pontos_cluster_originais["_grupo"] == original["GRUPO"]
+                    ]
+                    cidades_original = sorted({
+                        str(c).strip() for c in grupo_original.get("Cidade", [])
+                        if str(c).strip()
+                    })
+                    lista_os_original = sorted({
+                        str(os_id).strip() for os_id in grupo_original.get("Nº da O.S", [])
+                        if str(os_id).strip()
+                    })
+                    if len(cidades_original) != 1:
+                        continue
+                    contextos_originais_mescla[codigo_original] = {
+                        "chave": chave_concentracao(
+                            cidades_original[0], original["LATITUDE"],
+                            original["LONGITUDE"], lista_os_original,
+                        ),
+                        "municipio": cidades_original[0],
+                        "os": lista_os_original,
+                    }
                 st.divider()
                 renderizar_painel_mescla(
                     concentracoes_originais, pontos_cluster_originais,
                     proximidades, df_eventos, bairros,
                     dados_relatorio_concentracao, classificar_os_por_evento,
-                    contextos_ativos_acomp, vinculos_acomp_visiveis,
+                    contextos_originais_mescla, vinculos_acomp_visiveis,
                     fichas_acomp_visiveis, PODE_EDITAR_FAROL,
                 )
                 st.divider()
