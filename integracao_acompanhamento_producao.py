@@ -236,6 +236,76 @@ def sugerir_recuperacoes(vinculos, municipio, latitude, longitude,
     ))
 
 
+
+def identificar_continuidades_automaticas(contextos, vinculos, fichas, agora=None):
+    """Identifica continuações inequívocas por ACRÉSCIMO de O.S. à concentração.
+
+    Somente considera concentração com município único, que ainda não tenha
+    chave exata, e ficha aberta com pelo menos 3 O.S. antigas preservadas
+    integralmente no conjunto atual. A lista atual não pode exceder o dobro
+    da anterior; os centros devem estar até 750 m. Candidatos múltiplos,
+    divisões, fusões e fichas já ativas em outro grupo exigem revisão manual.
+
+    Não executa alterações de dados: o resultado pode ser usado inclusive
+    por operadores com permissão somente de consulta.
+    """
+    if not contextos or not vinculos or not fichas:
+        return {}
+    chaves_ativas = {
+        str(ctx.get("chave", "")) for ctx in contextos.values()
+        if ctx.get("chave")
+    }
+    index = {str(v.get("chave", "")): v for v in vinculos}
+    fichas_ja_ativas = {
+        str(index[chave].get("evento_id", ""))
+        for chave in chaves_ativas if chave in index
+    }
+    propostas = {}
+    for codigo, ctx in contextos.items():
+        chave = str(ctx.get("chave", ""))
+        if not chave or chave in index or ctx.get("multiplos_municipios"):
+            continue
+        numeros = {str(o).strip() for o in ctx.get("os", []) if str(o).strip()}
+        if len(numeros) < 4:
+            continue  # houve ao menos uma O.S. nova após o mínimo de 3
+        opcoes = sugerir_recuperacoes(
+            vinculos, ctx.get("municipio", ""), ctx.get("latitude"),
+            ctx.get("longitude"), numeros, chaves_ativas=chaves_ativas,
+            agora=agora,
+        )
+        # Se dois acompanhamentos apontam para a mesma concentração,
+        # nunca escolher o "melhor" automaticamente (possível fusão).
+        if len(opcoes) != 1:
+            continue
+        opcao = opcoes[0]
+        eid = opcao["evento_id"]
+        ficha = fichas.get(eid)
+        if not ficha or eid in fichas_ja_ativas:
+            continue
+        encerrada = (
+            str(ficha.get("finalizado", "")).strip().casefold() == "sim"
+            or str(ficha.get("status", "")).strip().casefold().startswith("conclu")
+        )
+        if encerrada:
+            continue
+        if (opcao["os_anteriores"] < 3
+                or opcao["os_em_comum"] != opcao["os_anteriores"]
+                or opcao["os_atuais"] <= opcao["os_anteriores"]
+                or opcao["os_atuais"] > 2 * opcao["os_anteriores"]
+                or opcao["distancia_m"] > 750):
+            continue
+        propostas[str(codigo)] = opcao
+
+    # A mesma ficha não pode assumir duas concentrações diferentes.
+    usos = {}
+    for opcao in propostas.values():
+        eid = opcao["evento_id"]
+        usos[eid] = usos.get(eid, 0) + 1
+    return {
+        codigo: opcao for codigo, opcao in propostas.items()
+        if usos[opcao["evento_id"]] == 1
+    }
+
 def recuperar_vinculo_confirmado(contexto, chave_anterior, evento_id):
     """Recuperação persistente e auditada, somente após confirmação explícita."""
     if not fonte_supabase():
