@@ -1,0 +1,31 @@
+name: Validar recuperacao de acompanhamentos Farol
+
+on:
+  push:
+    paths:
+      - 'integracao_acompanhamento_producao.py'
+      - 'farol_acomp_supabase_backend.py'
+      - 'pages/3_Farol_Operacional.py'
+      - 'tests/test_recuperacao_vinculo_farol.py'
+      - '.github/workflows/validar-recuperacao-acomp-farol.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validar sintaxe dos tres modulos
+        run: |
+          python -m py_compile integracao_acompanhamento_producao.py
+          python -m py_compile farol_acomp_supabase_backend.py
+          python -m py_compile pages/3_Farol_Operacional.py
+      - name: Testar regras seguras de recuperacao
+        run: python -m unittest discover -s tests -p 'test_recuperacao_vinculo_farol.py' -v
