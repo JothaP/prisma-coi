@@ -250,7 +250,7 @@ def adicionar_desenho_mapa(mapa, poligono=None):
 
 
 def eventos_e_concentracoes(concentracoes, grupos, proximidades, eventos, bairros,
-                            calcular, classificar):
+                            calcular, classificar, conferir_data=None):
     """Usa o MESMO vínculo espacial e temporal existente no Farol de produção."""
     resultado = {}
     if concentracoes.empty or eventos.empty:
@@ -281,12 +281,30 @@ def eventos_e_concentracoes(concentracoes, grupos, proximidades, eventos, bairro
                 "os_vinculadas": len(vinculadas),
                 "numero_os_evento": sorted({str(x).strip() for x in vinculadas["Nº da O.S"]}),
             }
-    return {k: v for k, v in resultado.items() if len(v["grupos"]) >= 2}
+    # O analista pode desenhar uma área para um evento que ainda não tem
+    # correspondência territorial automática. O evento, porém, precisa ser
+    # da cidade das concentrações e da janela temporal consultada.
+    cidades_disponiveis = set()
+    for _, conc in concentracoes.iterrows():
+        os_grupo = grupos[grupos["_grupo"] == conc["GRUPO"]]
+        cidades = {normalizar(c) for c in os_grupo.get("Cidade", []) if str(c).strip()}
+        if len(cidades) == 1:
+            cidades_disponiveis.update(cidades)
+    for _, evento in eventos.iterrows():
+        cidade = normalizar(evento.get("Cidade", ""))
+        inicio_texto = str(evento.get("Início", "") or "")
+        if (cidade not in cidades_disponiveis
+                or not re.search(r"\d{1,2}:\d{2}", inicio_texto)
+                or (conferir_data is not None and not conferir_data(evento))):
+            continue
+        chave = chave_evento(evento)
+        resultado.setdefault(chave, {"evento": evento.to_dict(), "grupos": {}})
+    return resultado
 
 
 def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, eventos,
                             bairros, calcular, classificar, contextos_acomp,
-                            vinculos, fichas, pode_editar):
+                            vinculos, fichas, pode_editar, conferir_data=None):
     st.markdown("#### 🔗 Mesclar concentrações de um mesmo evento")
     st.caption(
         "Selecione um evento e suas concentrações ou desenhe um polígono no panorama "
@@ -298,11 +316,10 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
         return
     indice = eventos_e_concentracoes(
         concentracoes, pontos_cluster, proximidades, eventos, bairros,
-        calcular, classificar,
+        calcular, classificar, conferir_data=conferir_data,
     )
     if not indice:
-        st.info("Nenhum evento tem duas ou mais concentrações vinculadas, "
-                "considerando município, território e horários das O.S.")
+        st.info("Não há eventos elegíveis para o município e a data consultada.")
         return
     chaves = list(indice)
     def rotulo(chave):
@@ -317,9 +334,55 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
         key=CHAVE_EVENTO,
     )
     escolhido = indice[event_key]
-    grupo_candidatos = escolhido["grupos"]
-    codigos = list(grupo_candidatos)
+    grupo_candidatos = dict(escolhido["grupos"])
     poligono = st.session_state.get(CHAVE_POLIGONO)
+    if poligono:
+        # A seleção espacial também pode recuperar concentrações que não
+        # estavam previamente marcadas com este evento no Farol. O analista
+        # assume a associação mediante confirmação explícita; ainda exigimos
+        # município, O.S. dentro do desenho e vínculo TEMPORAL com o evento.
+        evento_selecionado = escolhido["evento"]
+        cidade_evento = normalizar(evento_selecionado.get("Cidade", ""))
+        evento_para_tempo = {
+            k: v for k, v in evento_selecionado.items()
+            if k not in ("_indices_os_correspondentes", "_criterios_os_correspondentes")
+        }
+        evento_para_tempo["Bairros coincidentes"] = "Todo o município"
+        area = shape(poligono)
+        for _, conc in concentracoes.iterrows():
+            codigo = str(conc["ID_CONCENTRACAO"])
+            if codigo in grupo_candidatos:
+                continue
+            sub = pontos_cluster[pontos_cluster["_grupo"] == conc["GRUPO"]]
+            cidades = {normalizar(x) for x in sub.get("Cidade", []) if str(x).strip()}
+            if cidades != {cidade_evento}:
+                continue
+            qtd_dentro, centro_dentro = contagem_no_poligono(poligono, conc, sub)
+            if not centro_dentro or not qtd_dentro:
+                continue
+            temporais, _ = classificar(sub, pd.DataFrame([evento_para_tempo]))
+            if temporais.empty:
+                continue
+            # A O.S. que satisfaz a janela deve estar TAMBÉM dentro do desenho.
+            os_compativeis = []
+            for _, osr in temporais.iterrows():
+                try:
+                    y = float(osr.get("_lat", osr.get("Latitude")))
+                    x = float(osr.get("_lon", osr.get("Longitude")))
+                except (ValueError, TypeError):
+                    continue
+                if area.covers(Point(x, y)):
+                    os_compativeis.append(str(osr.get("Nº da O.S", "")).strip())
+            if not os_compativeis:
+                continue
+            grupo_candidatos[codigo] = {
+                "concentracao": conc.to_dict(),
+                "total": len(sub),
+                "os_vinculadas": len(set(os_compativeis)),
+                "numero_os_evento": sorted(set(os_compativeis)),
+                "associacao_manual": True,
+            }
+    codigos = list(grupo_candidatos)
     if poligono:
         selecionados_auto = []
         for cod, item in grupo_candidatos.items():
@@ -348,6 +411,9 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             "Concentração": c, "Bairros": grupo_candidatos[c]["concentracao"]["BAIRROS"],
             "O.S. do grupo": grupo_candidatos[c]["total"],
             "O.S. vinculadas ao evento": grupo_candidatos[c]["os_vinculadas"],
+            "Critério": ("Polígono + horário (confirmação do analista)"
+                        if grupo_candidatos[c].get("associacao_manual")
+                        else "Vínculo territorial e temporal do Farol"),
         } for c in elegiveis
     ]), hide_index=True, use_container_width=True)
     chave_multi = f"farol_merge_grupos_{event_key}"
