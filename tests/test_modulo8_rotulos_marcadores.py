@@ -23,7 +23,7 @@ found = [
 assert {node.name for node in found} == names
 namespace = {
     "folium": folium, "Draw": Draw, "Fullscreen": Fullscreen,
-    "Element": Element, "pd": pd, "html_escape": html_escape,
+    "Element": Element, "pd": pd, "html_escape": html_escape, "math": math,
     "LIMITE_EQUIPAMENTOS_MAPA": 350,
 }
 exec(compile(ast.Module(body=found, type_ignores=[]), str(source), "exec"), namespace)
