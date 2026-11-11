@@ -1323,6 +1323,23 @@ def adicionar_ativos_eventos_mapa(mapa, contexto, municipio=None, centros=None, 
             camada.add_to(mapa)
 
 
+def ri7_desenhar_area_mesclada(mapa, concentracao):
+    """Respeita a área real desenhada no Módulo 3, sem círculo hidráulico fictício."""
+    geometria = concentracao.get("AREA_MESCLADA")
+    if not isinstance(geometria, dict):
+        return False
+    folium.GeoJson(
+        geometria,
+        name="Área mesclada",
+        style_function=lambda _: {
+            "color": "#8b5cf6", "weight": 3,
+            "fillColor": "#a78bfa", "fillOpacity": 0.12,
+        },
+        tooltip=f"Concentração mesclada: {concentracao.get('Concentração', '')}",
+    ).add_to(mapa)
+    return True
+
+
 def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pontos_todos=None):
     """Panorama do Farol com TODAS as O.S. do período, alvos, ativos e aferições.
 
@@ -1366,8 +1383,9 @@ def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pon
     pontos_bp=adicionar_pontos_pressao(mapa,pressao)
     for _,c in (concs if concs is not None else pd.DataFrame()).iterrows():
         y,x=float(c["Latitude"]),float(c["Longitude"])
-        folium.Circle([y,x],radius=raio_cluster,color="#8522a5",weight=3,
-                      fill=True,fill_color="#8522a5",fill_opacity=.05).add_to(mapa)
+        if not ri7_desenhar_area_mesclada(mapa, c):
+            folium.Circle([y,x],radius=raio_cluster,color="#8522a5",weight=3,
+                          fill=True,fill_color="#8522a5",fill_opacity=.05).add_to(mapa)
         marcador_concentracao(c).add_to(mapa)
         posicoes.append([y,x])
     # Todas as medições válidas selecionadas entram no enquadramento, inclusive
@@ -1383,8 +1401,9 @@ def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pon
 def mapa_ficha_farol(c, grupo, pressao, contexto, raio_cluster):
     centro=[float(c["Latitude"]),float(c["Longitude"])]
     mapa=folium.Map(location=centro,zoom_start=15,tiles="OpenStreetMap",control_scale=True,zoom_control=False)
-    folium.Circle(centro,radius=raio_cluster,color="#8522a5",weight=3,
-                  fill=True,fill_color="#8522a5",fill_opacity=.06).add_to(mapa)
+    if not ri7_desenhar_area_mesclada(mapa, c):
+        folium.Circle(centro,radius=raio_cluster,color="#8522a5",weight=3,
+                      fill=True,fill_color="#8522a5",fill_opacity=.06).add_to(mapa)
     pontos_os=[]
     os_fg=folium.FeatureGroup(name="O.S. — Concentração",show=True)
     for _,p in grupo.iterrows():
