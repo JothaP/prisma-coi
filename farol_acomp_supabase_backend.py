@@ -83,6 +83,25 @@ def _request(method, caminho, *, params=None, dados=None):
                             "Reabra-a antes de salvar.")
             elif "Concentração já vinculada" in corpo:
                 mensagem = "Esta concentração já possui acompanhamento."
+            elif "A mesclagem já tem outra ficha de acompanhamento" in corpo:
+                mensagem = (
+                    "Este evento já possui mesclagem vinculada a outra ficha. "
+                    "Revise as fichas existentes antes de tentar unir as concentrações."
+                )
+            elif "Concentrações têm fichas diferentes" in corpo:
+                mensagem = (
+                    "As concentrações selecionadas possuem fichas diferentes. "
+                    "A mesclagem foi bloqueada para preservar os históricos."
+                )
+            elif "O.S. já pertence a outra mesclagem ativa" in corpo:
+                mensagem = (
+                    "Uma ou mais O.S. já pertencem a outra mesclagem ativa. "
+                    "Confira os agrupamentos anteriores."
+                )
+            elif "Ficha antiga não encontrada" in corpo:
+                mensagem = "A ficha anterior não foi encontrada. Nenhum registro foi alterado."
+            elif "Parâmetros inválidos para a mesclagem" in corpo:
+                mensagem = "A mesclagem foi rejeitada por parâmetros inválidos."
         raise FalhaAcompanhamentoSupabase(mensagem)
     try:
         return res.json() if res.content else None
