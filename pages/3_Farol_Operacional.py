@@ -2630,19 +2630,26 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
             geometrias_evento = [b for b in (bairros_geograficos or [])
                 if (normalizar_municipio(b.get("municipio", "")) == cidade
                     and b.get("nome_normalizado", "") in chaves_areas)] if not municipal else []
+            indice_geometrias = indexar_geometrias_evento(
+                geometrias_evento, cidade, areas_evento
+            )
             indices_compativeis, nomes_compativeis = [], set()
+            criterios_por_os = {}
             for idx_os, os_reg in os_grupo.iterrows():
-                nome = correspondencia_territorial_evento_os(
-                    os_reg, cidade, areas_evento, geometrias_evento, municipal
+                nome, criterio = identificar_correspondencia_territorial_evento_os(
+                    os_reg, cidade, areas_evento, municipal=municipal,
+                    indice_geometrias=indice_geometrias,
                 )
                 if nome is not None:
                     indices_compativeis.append(idx_os)
                     nomes_compativeis.add(nome)
+                    criterios_por_os[idx_os] = criterio
             if indices_compativeis:
                 item = evento.to_dict()
                 item["Bairros coincidentes"] = ", ".join(sorted(nomes_compativeis))
-                # Coluna técnica temporária; não grava na aba EVENTOS.
+                # Metadados temporários; não são gravados na aba EVENTOS.
                 item["_indices_os_correspondentes"] = tuple(indices_compativeis)
+                item["_criterios_os_correspondentes"] = criterios_por_os
                 relacionados.append(item)
     return os_grupo, ativos, pd.DataFrame(relacionados)
 
@@ -2688,6 +2695,7 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
         cidade_os = normalizar_municipio(os_reg.get("Cidade", ""))
         bairro_os = limpar_nome_bairro(os_reg.get("Bairro", ""))
         protocolos = []
+        criterios_vinculo = []
         if pd.notna(data_os) and eventos_relacionados is not None and not eventos_relacionados.empty:
             for _, evento in eventos_relacionados.iterrows():
                 if cidade_os != normalizar_municipio(evento.get("Cidade", "")):
@@ -2725,13 +2733,18 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
                         # Mantém eventos sem protocolo distinguíveis por ativo.
                         protocolo = str(evento.get("Código do Ativo", "") or evento.get("Serviço", "") or "Evento").strip()
                     protocolos.append(protocolo)
+                    if "_criterios_os_correspondentes" in evento.index:
+                        criterio = evento.get("_criterios_os_correspondentes")
+                        if isinstance(criterio, dict) and criterio.get(indice_os):
+                            criterios_vinculo.append(criterio[indice_os])
         linha = os_reg.copy()
         linha["Evento(s) vinculado(s)"] = ", ".join(dict.fromkeys(protocolos))
+        linha["Critério do vínculo"] = ", ".join(dict.fromkeys(criterios_vinculo))
         if protocolos:
             vinculadas.append(linha)
         else:
             nao_vinculadas.append(linha)
-    cols = list(os_grupo.columns) + ["Evento(s) vinculado(s)"]
+    cols = list(os_grupo.columns) + ["Evento(s) vinculado(s)", "Critério do vínculo"]
     def dataframe(linhas):
         return pd.DataFrame(linhas).reindex(columns=cols) if linhas else pd.DataFrame(columns=cols)
     return dataframe(vinculadas), dataframe(nao_vinculadas)
@@ -3294,7 +3307,9 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         f"{float(concentracao['LONGITUDE']):.6f} | Raio operacional: {raio} m"
     )
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
-    colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS", "Dt. Emissão", "Serviço Executado"]
+    colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Endereço",
+                  "Status OS", "Dt. Emissão", "Serviço Executado",
+                  "Evento(s) vinculado(s)", "Critério do vínculo"]
     for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
                              ("Ordens não vinculadas", nao_vinculadas)):
         st.markdown(f"#### {nome_grupo} ({len(base)})")
@@ -3532,10 +3547,15 @@ def modal_eventos():
             rel.groupby("_indice_evento", as_index=True)["Bairro"]
             .agg(lambda col: ", ".join(dict.fromkeys(str(v) for v in col if str(v).strip())))
         )
+        resumo_criterios = (
+            rel.groupby("_indice_evento", as_index=True)["Critérios de associação"]
+            .agg(lambda col: " | ".join(str(v) for v in col if str(v).strip()))
+        )
     else:
         rel_municipio = pd.DataFrame()
         resumo_os = pd.Series(dtype=int)
         resumo_bairros = pd.Series(dtype=str)
+        resumo_criterios = pd.Series(dtype=str)
 
     st.markdown("### Eventos armazenados e O.S. relacionadas")
     colunas_evento = [c for c in [
@@ -3548,6 +3568,9 @@ def modal_eventos():
     tabela = eventos_visiveis.loc[:, colunas_evento].copy()
     tabela["O.S. encontradas"] = [int(resumo_os.get(i, 0)) for i in indices_visiveis]
     tabela["Bairros com O.S."] = [str(resumo_bairros.get(i, "")) for i in indices_visiveis]
+    tabela["Critérios de associação"] = [
+        str(resumo_criterios.get(i, "")) for i in indices_visiveis
+    ]
     tabela = tabela.reset_index(drop=True)
 
     if PODE_EDITAR_FAROL:
