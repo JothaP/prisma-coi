@@ -1,6 +1,7 @@
 """Teste isolado do mapa Folium do Módulo 8: marcadores independentes dos rótulos."""
 import ast
 from html import escape as html_escape
+import math
 from pathlib import Path
 import unittest
 
