@@ -3015,49 +3015,85 @@ with st.form("parametros"):
 raio_cluster=RAIO_CONCENTRACOES_M
 raio_relacao=RAIO_MEDICOES_M
 minimo=MINIMO_OS_CONCENTRACAO
+def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
+    """Consulta fontes ativas, sem snapshots de cache, para tela ou exportação."""
+    # O cache de 120s protege consultas comuns, mas uma geração explícita
+    # não pode apresentar dados anteriores às últimas edições do Farol/Pressões.
+    ler_base.clear()
+    carregar_contexto_farol.clear()
+    if fonte_supabase():
+        listar_mesclas_farol.clear()
+
+    os_df = preparar_os(ler_base(ID_FAROL, "PONTOS"))
+    contexto = carregar_contexto_farol()
+    bp_todas = preparar_pressao(ler_base(ID_PRESSAO, "baixa_pressao"))
+    contagem_origem = {
+        "total": len(bp_todas),
+        "data_valida": int(bp_todas["_data"].notna().sum()),
+        "pressao_valida": int(bp_todas["_pressao"].notna().sum()),
+    }
+    os_df = os_df[os_df["_data"].dt.date.between(inicio, fim)].copy()
+    bp = bp_todas[bp_todas["_data"].dt.date.between(inicio, fim)
+                  & bp_todas["_pressao"].notna()].copy()
+    contagem_origem["periodo"] = len(bp)
+    os_df = os_df[os_df["Cidade"].map(unidade_da_cidade_farol) == unidade].copy()
+    bp = bp[bp["Municipio"].map(unidade_da_cidade_farol) == unidade].copy()
+    if municipio_filtro.strip():
+        mun = normalizar(municipio_filtro)
+        os_df = os_df[os_df["_municipio"] == mun]
+        bp = bp[bp["_municipio"] == mun]
+    contagem_origem["unidade_municipio"] = len(bp)
+    bp = associar_pressao_as_os(bp, os_df)
+    resumo_bp = resumo_pressao_por_bairro(bp)
+    concs, grupos = concentracoes_farol(os_df, int(RAIO_CONCENTRACOES_M),
+                                         int(MINIMO_OS_CONCENTRACAO))
+    if not concs.empty:
+        # O Módulo 3 mantém suas mesclagens no Supabase; o Módulo 7 deve
+        # aplicá-las ANTES dos cruzamentos e da emissão de PDFs.
+        concs, grupos = aplicar_mesclagens_do_modulo_3(concs, grupos)
+        resumo, associados, territoriais = relacionar(
+            concs, grupos, bp, int(RAIO_MEDICOES_M), inicio, fim
+        )
+        achados, pressao_sem_conc = diagnostico_geral(
+            resumo, bp, associados, territoriais, inicio, fim
+        )
+    else:
+        resumo, associados, territoriais = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        achados = ["Nenhuma concentração atende aos critérios selecionados."]
+        pressao_sem_conc = bp.iloc[:0].copy()
+
+    return {
+        "versao_esquema": 13,
+        "consultado_em": datetime.now(FUSO_LOGGERS).strftime("%d/%m/%Y %H:%M:%S"),
+        "municipio_filtro": municipio_filtro,
+        "resumo": resumo, "associados": associados, "territoriais": territoriais,
+        "concentracoes": concs, "achados": achados,
+        "pressao_sem_conc": pressao_sem_conc,
+        "inicio": inicio, "fim": fim, "raio": int(RAIO_MEDICOES_M),
+        "n_os": len(os_df), "n_bp": len(bp), "grupos": grupos,
+        "raio_cluster": int(RAIO_CONCENTRACOES_M), "contexto": contexto,
+        "pressao_mapa": bp, "unidade": unidade, "os_base": os_df,
+        "resumo_bp": resumo_bp, "contagem_origem": contagem_origem,
+    }
+
+
 if executar:
-    # Descarta resultados antigos antes de uma nova consulta, evitando exibir diagnósticos desatualizados.
     st.session_state.pop("relatorio_coi_integrado", None)
     st.session_state.pop("pdf_relatorio_integrado_farol", None)
     st.session_state.pop("pdf_relatorio_integrado_dia", None)
-    if inicio>fim:
+    if inicio > fim:
         st.error("A data inicial não pode ser posterior à data final.")
         st.stop()
     try:
-        with st.spinner("Consultando as bases e cruzando O.S. com medições..."):
-            os_df=preparar_os(ler_base(ID_FAROL,"PONTOS"))
-            contexto=carregar_contexto_farol()
-            bp_todas=preparar_pressao(ler_base(ID_PRESSAO,"baixa_pressao"))
-            contagem_origem={"total": len(bp_todas),
-                "data_valida": int(bp_todas["_data"].notna().sum()),
-                "pressao_valida": int(bp_todas["_pressao"].notna().sum())}
-            os_df=os_df[os_df["_data"].dt.date.between(inicio,fim)].copy()
-            bp=bp_todas[bp_todas["_data"].dt.date.between(inicio,fim) & bp_todas["_pressao"].notna()].copy()
-            contagem_origem["periodo"] = len(bp)
-            unidade=unidade_sel.split(" ",1)[0]
-            os_df=os_df[os_df["Cidade"].map(unidade_da_cidade_farol)==unidade].copy()
-            bp=bp[bp["Municipio"].map(unidade_da_cidade_farol)==unidade].copy()
-            if municipio_sel.strip():
-                mun=normalizar(municipio_sel)
-                os_df=os_df[os_df["_municipio"]==mun]
-                bp=bp[bp["_municipio"]==mun]
-            contagem_origem["unidade_municipio"] = len(bp)
-            bp=associar_pressao_as_os(bp,os_df)
-            resumo_bp=resumo_pressao_por_bairro(bp)
-            concs,grupos=concentracoes_farol(os_df,int(raio_cluster),int(minimo))
-            if not concs.empty:
-                resumo,associados,territoriais=relacionar(concs,grupos,bp,int(raio_relacao),inicio,fim)
-                achados,pressao_sem_conc=diagnostico_geral(resumo,bp,associados,territoriais,inicio,fim)
-            else:
-                resumo,associados,territoriais=pd.DataFrame(),pd.DataFrame(),pd.DataFrame()
-                achados=["Nenhuma concentração atende aos critérios selecionados."]
-                pressao_sem_conc=bp.iloc[:0].copy()
-            st.session_state["relatorio_coi_integrado"]={"versao_esquema":12,"resumo":resumo,"associados":associados,"territoriais":territoriais,
-             "concentracoes":concs,"achados":achados,"pressao_sem_conc":pressao_sem_conc,
-             "inicio":inicio,"fim":fim,"raio":int(raio_relacao),"n_os":len(os_df),"n_bp":len(bp),"grupos":grupos,"raio_cluster":int(raio_cluster),"contexto":contexto,"pressao_mapa":bp,"unidade":unidade,"os_base":os_df,"resumo_bp":resumo_bp,"contagem_origem":contagem_origem}
+        with st.spinner("Consultando as fontes atualizadas e cruzando O.S. com medições..."):
+            unidade = unidade_sel.split(" ", 1)[0]
+            st.session_state["relatorio_coi_integrado"] = consultar_diagnostico_atualizado(
+                inicio, fim, unidade, municipio_sel
+            )
     except gspread.exceptions.APIError as ex:
-        codigo=getattr(getattr(ex,"response",None),"status_code",None)
-        st.error("Quota temporária do Google Sheets excedida (429)." if codigo==429 else f"Falha na consulta às fontes (HTTP {codigo or 'desconhecido'}).")
+        codigo = getattr(getattr(ex, "response", None), "status_code", None)
+        st.error("Quota temporária do Google Sheets excedida (429)." if codigo == 429
+                 else f"Falha na consulta às fontes (HTTP {codigo or 'desconhecido'}).")
         st.stop()
     except Exception as ex:
         st.error(f"Falha ao preparar relatório: {ex}")
@@ -3073,13 +3109,17 @@ _chaves_necessarias = {
 }
 if r is not None and (
     not isinstance(r, dict)
-    or r.get("versao_esquema") != 12
+    or r.get("versao_esquema") != 13
     or not _chaves_necessarias.issubset(r)
 ):
     st.session_state.pop("relatorio_coi_integrado", None)
     r = None
     st.info("O diagnóstico anterior é de uma versão antiga. Clique em **Gerar diagnóstico integrado** para atualizar a análise.")
 if r:
+    st.caption(
+        f"Dados consultados em {r.get('consultado_em', 'horário não disponível')} "
+        "(horário de Teresina). A geração do PDF consulta novamente as fontes."
+    )
     resumo=r["resumo"]
     tem_pressao = r["n_bp"] > 0
     if tem_pressao:
@@ -3125,23 +3165,36 @@ if r:
             st.session_state.pop("pdf_relatorio_integrado_farol", None)
             st.session_state.pop("pdf_relatorio_integrado_dia", None)
             try:
-                with st.spinner("Capturando mapas e montando as fichas operacionais..."):
+                with st.spinner("Atualizando as fontes e gerando o PDF integrado..."):
+                    # Reconsulta os dados neste clique, inclusive mesclagens,
+                    # fichas e medições. Nunca exporta a cópia antiga da sessão.
+                    r = consultar_diagnostico_atualizado(
+                        r["inicio"], r["fim"], r["unidade"], r.get("municipio_filtro", "")
+                    )
+                    st.session_state["relatorio_coi_integrado"] = r
                     dia_graficos = _dia_evidencias()
-                    # Gráficos enviados hoje só acompanham relatórios cujo
-                    # período inclui o dia atual; não atribuí-los a datas antigas.
                     indice_graficos = (
                         carregar_graficos_do_dia_somente_leitura(ID_FAROL, dia_graficos)
                         if r["inicio"] <= dia_graficos <= r["fim"] else {}
                     )
                     pdf = pdf_relatorio(
-                        resumo,r["associados"],r["territoriais"],r["achados"],r["inicio"],r["fim"],
-                        r["raio"],r["n_os"],r["n_bp"],r["concentracoes"],r["grupos"],r["raio_cluster"],
-                        r["contexto"],r["pressao_mapa"],r["os_base"],
+                        r["resumo"], r["associados"], r["territoriais"], r["achados"],
+                        r["inicio"], r["fim"], r["raio"], r["n_os"], r["n_bp"],
+                        r["concentracoes"], r["grupos"], r["raio_cluster"],
+                        r["contexto"], r["pressao_mapa"], r["os_base"],
                         indice_graficos=indice_graficos,
                         raio_operacional_loggers=RAIO_OPERACIONAL_EVIDENCIAS,
-                        incluir_sanear=incluir_sanear_pdf)
+                        incluir_sanear=incluir_sanear_pdf,
+                    )
                     st.session_state["pdf_relatorio_integrado_farol"] = pdf
                     st.session_state["pdf_relatorio_integrado_dia"] = dia_graficos.isoformat()
+                # Atualiza também os indicadores na tela para refletirem
+                # exatamente o recorte recém-exportado, sem gerar outro PDF.
+                st.rerun()
+            except gspread.exceptions.APIError as erro_pdf:
+                codigo = getattr(getattr(erro_pdf, "response", None), "status_code", None)
+                st.error("Google Sheets indisponível por limite de consultas (429)." if codigo == 429
+                         else f"Falha ao consultar as fontes para o PDF (HTTP {codigo or 'desconhecido'}).")
             except Exception as erro_pdf:
                 st.error(f"Não foi possível preparar o PDF integrado: {erro_pdf}")
         if st.session_state.get("pdf_relatorio_integrado_farol"):
