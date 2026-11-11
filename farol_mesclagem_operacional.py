@@ -145,7 +145,7 @@ def salvar_mescla(evento, codigos, os_numeros, chaves_origem, poligono=None):
     titulo = f"{evento.get('Protocolo') or evento.get('Serviço') or 'Evento'} — {municipio}"
     autor = _autor("editar")
     resposta = _request(
-        "POST", "/rest/v1/rpc/farol_salvar_mescla_tx",
+        "POST", "/rest/v1/rpc/farol_incorporar_mescla_tx",
         dados={
             "p_evento_chave": chave,
             "p_municipio": municipio,
@@ -505,72 +505,83 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
         (m for m in listar_mesclas() if m.get("evento_chave") == event_key),
         None,
     )
-    ids_todos = sorted(set(ids_existentes) | ({ficha_mescla} if ficha_mescla else set()))
-    conflito_de_fichas = len(ids_todos) > 1
-    os_mantidas = {str(x).strip() for x in (mescla_anterior or {}).get("os_origem", [])}
-    os_que_sairiam = os_mantidas - conjunto_os
-    # Nunca substituir silenciosamente o recorte da mesclagem anterior:
-    # inclusive quando os IDs de concentração forem renumerados em nova carga.
-    sobreposicao_perigosa = bool(mescla_anterior and os_que_sairiam)
-    st.caption(
-        f"Total consolidado: {len(numeros)} O.S. distintas de "
-        f"{len(selecionadas)} concentrações. "
-        "O polígono é a abrangência visual; não representa um novo raio hidráulico."
+
+    def _ordem_ficha(fid):
+        ficha = fichas.get(fid, {})
+        data = str(ficha.get("data_identificacao") or "").strip()
+        try:
+            momento = datetime.strptime(data, "%d/%m/%Y %H:%M")
+        except ValueError:
+            momento = datetime.max
+        try:
+            numero = int(fid)
+        except ValueError:
+            numero = 999999999
+        return (momento, numero, fid)
+
+    ids_todos = sorted(
+        set(ids_existentes) | ({ficha_mescla} if ficha_mescla else set()),
+        key=_ordem_ficha,
     )
-    if conflito_de_fichas:
-        st.error(
-            "Este evento já possui mais de uma ficha de acompanhamento: "
-            + ", ".join("#" + identificador for identificador in ids_todos)
-            + ". A mesclagem foi bloqueada para evitar a substituição "
-              "indevida de fichas e históricos."
+    # O salvamento transacional acumula as O.S. da mesclagem anterior.
+    os_mantidas = {
+        str(x).strip() for x in (mescla_anterior or {}).get("os_origem", [])
+    }
+    total_final = len(os_mantidas | conjunto_os)
+    st.caption(
+        f"Total previsto após mesclagem: {total_final} O.S. distintas "
+        f"({len(numeros)} da seleção atual e {len(os_mantidas)} "
+        "da mesclagem anterior, sem duplicidades). "
+        "O polígono é a abrangência visual; não representa um raio hidráulico."
+    )
+    if len(ids_todos) > 1:
+        principal = ids_todos[0]
+        recentes = ids_todos[1:]
+        st.info(
+            f"**Ficha principal: #{principal} (mais antiga).** "
+            "As O.S. das fichas mais recentes "
+            + ", ".join(f"#{x}" for x in recentes)
+            + " serão incorporadas à principal. Os registros e movimentações "
+              "originais continuarão preservados para consulta e auditoria."
         )
-        if ficha_mescla:
-            st.info(
-                f"A mesclagem anterior deste evento está vinculada à ficha "
-                f"#{ficha_mescla}. A seleção atual apresenta vínculo(s) com "
-                + (", ".join("#" + x for x in ids_existentes) or "outra ficha")
-                + ". É necessário conciliar os acompanhamentos antes de "
-                  "definir uma ficha principal; nenhum histórico foi alterado."
-            )
-        with st.expander("Conferir as fichas envolvidas", expanded=False):
+        with st.expander("Conferir os acompanhamentos envolvidos", expanded=False):
             for identificador in ids_todos:
                 ficha = fichas.get(identificador, {})
+                indicador = "— principal" if identificador == principal else "— incorporada"
                 st.write(
-                    f"**Ficha #{identificador}:** "
+                    f"**Ficha #{identificador} {indicador}:** "
                     f"{str(ficha.get('titulo') or 'Título indisponível')}"
                 )
             if mescla_anterior:
                 st.caption(
-                    "Concentrações registradas na mesclagem anterior: "
-                    + ", ".join(str(x) for x in mescla_anterior.get("codigos_origem", []))
+                    "Concentrações da mesclagem anterior: "
+                    + ", ".join(
+                        str(x) for x in mescla_anterior.get("codigos_origem", [])
+                    )
                 )
-    elif sobreposicao_perigosa:
-        st.error(
-            f"A seleção retiraria {len(os_que_sairiam)} O.S. de uma mesclagem "
-            "já salva para este evento. Essa substituição automática está "
-            "bloqueada para preservar o acompanhamento anterior."
-        )
     elif ids_todos:
-        ficha = fichas.get(ids_todos[0], {})
+        principal = ids_todos[0]
+        ficha = fichas.get(principal, {})
         st.info(
-            f"A ficha existente #{ids_todos[0]} "
-            f"({ficha.get('titulo','')}) será reutilizada, com histórico intacto."
+            f"A ficha existente #{principal} "
+            f"({ficha.get('titulo','')}) será mantida com histórico intacto."
         )
     else:
-        st.info("Será criada uma única ficha quando o analista iniciar "
-                "o acompanhamento da concentração mesclada.")
-    bloqueado = conflito_de_fichas or sobreposicao_perigosa
+        st.info(
+            "Será criada uma única ficha quando o analista iniciar "
+            "o acompanhamento da concentração mesclada."
+        )
     confirmado = st.checkbox(
-        "Confirmo que estas concentrações pertencem ao mesmo evento e "
-        "que desejo um único acompanhamento.",
+        "Confirmo que as concentrações pertencem ao mesmo evento e que "
+        "a ficha mais antiga receberá as O.S. das mais recentes, "
+        "preservando os históricos.",
         key=f"farol_merge_confirmar_{event_key}",
-        disabled=(not pode_editar or bloqueado),
+        disabled=not pode_editar,
     )
     if st.button(
         "Mesclar em uma única concentração",
         type="primary",
-        disabled=(not pode_editar or bloqueado or not confirmado
-                  or len(numeros) < 6),
+        disabled=(not pode_editar or not confirmado or len(numeros) < 6),
         key=f"farol_merge_confirmar_salvar_{event_key}",
     ):
         try:
@@ -580,9 +591,12 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             )
             st.session_state[CHAVE_MODO] = False
             st.session_state.pop(CHAVE_POLIGONO, None)
-            st.success(
-                f"Mesclagem salva: {retorno['qtd_concentracoes']} concentrações, "
-                f"{retorno['qtd_os']} O.S. e um único acompanhamento."
+            ficha_principal = retorno.get("ficha_principal") or retorno.get("evento_id")
+            st.toast(
+                f"Mesclagem salva: {retorno['qtd_os']} O.S., "
+                f"{retorno['qtd_concentracoes']} concentrações. "
+                + (f"Ficha principal #{ficha_principal}." if ficha_principal
+                   else "Acompanhamento ainda não iniciado.")
             )
             st.rerun()
         except Exception as erro:
