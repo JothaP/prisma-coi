@@ -29,7 +29,7 @@ import xml.etree.ElementTree as ET
 from branca.element import Element
 
 import folium
-from folium.plugins import Draw
+from folium.plugins import Draw, Fullscreen
 import pandas as pd
 import streamlit as st
 from streamlit_folium import st_folium
@@ -1129,6 +1129,14 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
         zoom_inicial = 12
     mapa = folium.Map(location=centro, zoom_start=zoom_inicial,
                       tiles="OpenStreetMap", control_scale=True)
+    # Tela cheia nativa do Leaflet: mantém ferramentas de desenho, rede,
+    # marcadores, pop-ups e camadas no mesmo mapa (sem novo componente).
+    Fullscreen(
+        position="topright",
+        title="Expandir mapa para tela cheia",
+        title_cancel="Sair da tela cheia",
+        force_separate_button=True,
+    ).add_to(mapa)
     mapa.get_root().header.add_child(Element("""
     <style>
     .m8-label-anchor {background:transparent!important; border:0!important;}
