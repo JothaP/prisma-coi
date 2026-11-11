@@ -5018,6 +5018,31 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             + ", ".join(vizinhas)
                             + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
             else:
+                # O desenho é iniciado no próprio panorama, sem exigir que o
+                # analista desça até a lista de concentrações.
+                col_desenho, col_instrucao = st.columns([1, 3], vertical_alignment="center")
+                with col_desenho:
+                    if st.button(
+                        "✏️ Desenhar polígono" if not st.session_state.get(CHAVE_MODO_MESCLAGEM)
+                        else "✖ Encerrar desenho",
+                        key="farol_mescla_atalho_mapa",
+                        disabled=not PODE_EDITAR_FAROL,
+                        use_container_width=True,
+                    ):
+                        ativar_desenho = not bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
+                        st.session_state[CHAVE_MODO_MESCLAGEM] = ativar_desenho
+                        if not ativar_desenho:
+                            st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
+                        st.session_state["farol_v2_panorama_versao"] = (
+                            st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                        )
+                        st.rerun()
+                with col_instrucao:
+                    st.caption(
+                        "Desenhe a área das O.S. no mapa e confirme a união na seção "
+                        "**Análise das concentrações**. Somente concentrações do mesmo evento "
+                        "podem formar um único acompanhamento."
+                    )
                 mapa = criar_mapa_panorama_v2(
                     concentracoes, raio_m=raio_concentracao,
                     bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
