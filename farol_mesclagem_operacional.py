@@ -164,13 +164,24 @@ def aplicar_mesclas(concentracoes, grupos, mesclas):
     for mescla in mesclas:
         os_anteriores = {str(x).strip() for x in mescla.get("os_origem", [])}
         municipio = normalizar(mescla.get("municipio", ""))
+        area_mescla = (
+            shape(mescla["poligono"])
+            if isinstance(mescla.get("poligono"), dict) else None
+        )
         grupos_atuais = []
         for _, c in conc.iterrows():
             grupo = c["GRUPO"]
             sub = pontos[pontos["_grupo"] == grupo]
             cidades = {normalizar(x) for x in sub.get("Cidade", []) if str(x).strip()}
             identificadores = {str(x).strip() for x in sub.get("Nº da O.S", []) if str(x).strip()}
-            if cidades == {municipio} and identificadores & os_anteriores:
+            centro_dentro = (
+                area_mescla is None
+                or area_mescla.covers(
+                    Point(float(c["LONGITUDE"]), float(c["LATITUDE"]))
+                )
+            )
+            if (cidades == {municipio} and centro_dentro
+                    and identificadores & os_anteriores):
                 if grupo in ocupados:
                     grupos_atuais = []
                     break
