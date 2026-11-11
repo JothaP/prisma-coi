@@ -174,13 +174,20 @@ def aplicar_mesclas(concentracoes, grupos, mesclas):
             sub = pontos[pontos["_grupo"] == grupo]
             cidades = {normalizar(x) for x in sub.get("Cidade", []) if str(x).strip()}
             identificadores = {str(x).strip() for x in sub.get("Nº da O.S", []) if str(x).strip()}
-            centro_dentro = (
-                area_mescla is None
-                or area_mescla.covers(
-                    Point(float(c["LONGITUDE"]), float(c["LATITUDE"]))
-                )
-            )
-            if (cidades == {municipio} and centro_dentro
+            # O analista seleciona O.S. pelo polígono, não pelo centro
+            # geométrico da concentração (que pode ficar fora da área).
+            os_na_area = area_mescla is None
+            if area_mescla is not None:
+                for _, osr in sub.iterrows():
+                    try:
+                        latitude = float(osr.get("_lat", osr.get("Latitude")))
+                        longitude = float(osr.get("_lon", osr.get("Longitude")))
+                        if area_mescla.covers(Point(longitude, latitude)):
+                            os_na_area = True
+                            break
+                    except (ValueError, TypeError):
+                        continue
+            if (cidades == {municipio} and os_na_area
                     and identificadores & os_anteriores):
                 if grupo in ocupados:
                     grupos_atuais = []
