@@ -1,0 +1,36 @@
+name: Validar mesclagem por evento no Farol M3
+
+on:
+  push:
+    paths:
+      - 'pages/3_Farol_Operacional.py'
+      - 'farol_mesclagem_operacional.py'
+      - 'sql/10_mesclagem_concentracoes_evento_farol.sql'
+      - 'tests/test_farol_mesclagem_operacional.py'
+      - '.github/workflows/testar-farol-mesclagem-m3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias
+        run: python -m pip install 'pandas>=2.2,<3' 'shapely>=2,<3' 'pyproj>=3,<4' 'folium>=0.16,<1'
+      - name: Validar sintaxe
+        run: |
+          python -m py_compile pages/3_Farol_Operacional.py
+          python -m py_compile farol_mesclagem_operacional.py
+      - name: Testar mesclagem espacial e vínculos
+        run: python -m unittest discover -s tests -p 'test_farol_mesclagem_operacional.py' -v
+      - name: Regressão territorial do Farol
+        run: python -m unittest discover -s tests -p 'test_farol_territorial_hibrido.py' -v
+      - name: Regressão da continuidade de acompanhamentos
+        run: python -m unittest discover -s tests -p 'test_recuperacao_vinculo_farol.py' -v
