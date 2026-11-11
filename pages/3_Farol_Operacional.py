@@ -1869,13 +1869,26 @@ def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
 
     pontos = df_pontos.copy()
     pontos["_cidade_cruzamento"] = pontos["Cidade"].map(normalizar_municipio)
+    # Índices construídos uma única vez; evita pesquisar todas as O.S. e
+    # feições do município novamente para cada evento da tabela.
+    pontos_por_cidade = {
+        chave: grupo for chave, grupo in pontos.groupby("_cidade_cruzamento")
+        if chave
+    }
+    geometria_por_localidade = {}
+    for poligono in (bairros or []):
+        chave = (
+            normalizar_municipio(poligono.get("municipio", "")),
+            limpar_nome_bairro(poligono.get("nome_normalizado") or poligono.get("nome", "")),
+        )
+        geometria_por_localidade.setdefault(chave, []).append(poligono)
     registros = []
     for indice_evento, evento in df_eventos.reset_index(drop=True).iterrows():
         cidade = normalizar_municipio(evento.get("Cidade", ""))
         if not cidade:
             continue
-        bloco = pontos.loc[pontos["_cidade_cruzamento"] == cidade]
-        if bloco.empty:
+        bloco = pontos_por_cidade.get(cidade)
+        if bloco is None or bloco.empty:
             continue
         areas_texto = evento.get("Áreas Impactadas", "")
         municipal = evento_abrange_municipio(areas_texto)
@@ -1899,7 +1912,10 @@ def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
         areas = extrair_bairros_evento(areas_texto, evento.get("Cidade", ""), bairros)
         if not areas:
             continue
-        indice_geometrias = indexar_geometrias_evento(bairros, cidade, areas)
+        indice_geometrias = {
+            area["bairro"]: geometria_por_localidade.get((cidade, area["bairro"]), [])
+            for area in areas
+        }
         por_area = {}
         # Avaliação por O.S., não por polígono, para evitar dupla contagem de
         # uma mesma ordem nas áreas oficiais e subáreas que se sobrepõem.
