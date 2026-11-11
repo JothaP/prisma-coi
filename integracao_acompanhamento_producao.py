@@ -306,6 +306,20 @@ def identificar_continuidades_automaticas(contextos, vinculos, fichas, agora=Non
         if usos[opcao["evento_id"]] == 1
     }
 
+
+def continuar_vinculo_automaticamente(contexto, chave_anterior, evento_id):
+    """Atualiza apenas o vínculo, sem ficha nova e sem alterar movimentações."""
+    if not fonte_supabase():
+        raise RuntimeError("Continuidade automática disponível apenas no Supabase.")
+    from farol_acomp_supabase_backend import (
+        continuar_vinculo_automaticamente as sb_continuar,
+    )
+    resposta = sb_continuar(chave_anterior, evento_id, contexto)
+    invalidar_cache_acompanhamento()
+    return resposta
+
+
+
 def recuperar_vinculo_confirmado(contexto, chave_anterior, evento_id):
     """Recuperação persistente e auditada, somente após confirmação explícita."""
     if not fonte_supabase():
