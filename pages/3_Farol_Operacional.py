@@ -5224,19 +5224,22 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                         recuperar = st.form_submit_button(
                                             "Confirmar recuperação do vínculo",
                                             type="primary",
-                                            disabled=ambiguo or not confirmado or not PODE_EDITAR_FAROL,
+                                            disabled=ambiguo or not PODE_EDITAR_FAROL,
                                         )
                                     if recuperar:
-                                        try:
-                                            recuperar_vinculo_confirmado(
-                                                contexto_popup, candidato["chave_anterior"],
-                                                candidato["evento_id"],
-                                            )
-                                            st.session_state.pop("farol_codigo_recuperacao", None)
-                                            st.toast("Vínculo recuperado; ficha e histórico preservados.")
-                                            st.rerun()
-                                        except Exception as erro_recuperar:
-                                            st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
+                                        if not confirmado:
+                                            st.warning("Confirme a correspondência com a ficha anterior antes de recuperar.")
+                                        else:
+                                            try:
+                                                recuperar_vinculo_confirmado(
+                                                    contexto_popup, candidato["chave_anterior"],
+                                                    candidato["evento_id"],
+                                                )
+                                                st.session_state.pop("farol_codigo_recuperacao", None)
+                                                st.toast("Vínculo recuperado; ficha e histórico preservados.")
+                                                st.rerun()
+                                            except Exception as erro_recuperar:
+                                                st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
                             else:
                                 rotulo_acomp = (
                                     ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
