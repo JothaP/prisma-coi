@@ -372,7 +372,7 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             if cidades != {cidade_evento}:
                 continue
             qtd_dentro, centro_dentro = contagem_no_poligono(poligono, conc, sub)
-            if not centro_dentro or not qtd_dentro:
+            if not qtd_dentro:
                 continue
             temporais, _ = classificar(sub, pd.DataFrame([evento_para_tempo]))
             if temporais.empty:
@@ -403,11 +403,11 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             cc = item["concentracao"]
             sub = pontos_cluster[pontos_cluster["_grupo"] == cc["GRUPO"]]
             dentro, centro = contagem_no_poligono(poligono, cc, sub)
-            if centro and dentro:
+            if dentro:
                 selecionados_auto.append(cod)
         st.caption(
             f"Polígono desenhado: {len(selecionados_auto)} concentração(ões) "
-            "do evento com centro e O.S. dentro da área."
+            "do evento com pelo menos uma O.S. dentro da área."
         )
         elegiveis = selecionados_auto
     else:
@@ -416,8 +416,8 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
                    "relacionadas ao mesmo evento.")
     if len(elegiveis) < 2:
         st.warning(
-            "Selecione ou desenhe uma área que contenha pelo menos duas "
-            "concentrações vinculadas ao mesmo evento."
+            "Selecione ou desenhe uma área que contenha O.S. de pelo menos duas "
+            "concentrações do mesmo evento."
         )
         return
     st.dataframe(pd.DataFrame([
