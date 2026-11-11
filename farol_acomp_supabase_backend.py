@@ -100,8 +100,14 @@ def _request(method, caminho, *, params=None, dados=None):
                 )
             elif "Ficha antiga não encontrada" in corpo:
                 mensagem = "A ficha anterior não foi encontrada. Nenhum registro foi alterado."
-            elif "Parâmetros inválidos para a mesclagem" in corpo:
+            elif "Parâmetros inválidos para a mesclagem" in corpo or "Parâmetros inválidos para mesclagem" in corpo:
                 mensagem = "A mesclagem foi rejeitada por parâmetros inválidos."
+            elif "Ficha previamente incorporada" in corpo or "Ficha incorporada em outro" in corpo:
+                mensagem = "Esta ficha já foi incorporada a outro acompanhamento. Confira a ficha principal."
+            elif "Ficha de outro município" in corpo or "outro município" in corpo:
+                mensagem = "O acompanhamento possui vínculos em outro município. A transferência foi bloqueada."
+            elif "Inconsistência na ficha principal" in corpo:
+                mensagem = "As fichas não puderam ser conciliadas com segurança. Nenhuma transferência foi gravada."
         raise FalhaAcompanhamentoSupabase(mensagem)
     try:
         return res.json() if res.content else None
