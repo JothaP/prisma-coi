@@ -53,7 +53,8 @@ from farol_graficos_temporarios import (
     data_hoje as dia_graficos, indice_do_dia, salvar_grafico, excluir_grafico,
     chave_logger, rotulo_logger, filtrar_loggers,
 )
-from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf)
+from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
+from farol_acomp_supabase_backend import fonte_supabase
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 
 
@@ -157,6 +158,7 @@ CABECALHO_PONTOS = [
     "Status OS",
     "Dt. Emissão",
     "Serviço Executado",
+    "Endereço",
 ]
 
 CABECALHO_EVENTOS = [
@@ -284,8 +286,52 @@ def limpar_nome_bairro(valor):
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
     texto = re.sub(r"^BAIRRO(?:\s*[-–—:]\s*|\s+)", "", texto)
+    # Trata Villa Inglesa e Vila Inglesa como a mesma localidade, sem
+    # aproximar nomes de bairros diferentes nem alterar o rótulo original.
+    texto = re.sub(r"\bVILLA\b", "VILA", texto)
     texto = re.sub(r"\s+", " ", texto).strip(" \t.,;:!?")
     return texto
+
+
+def normalizar_localidade_busca(valor):
+    """Normaliza separadores e grafia para comparar nomes completos no endereço."""
+    texto = re.sub(r"[^A-Z0-9]+", " ", normalizar_texto(valor))
+    texto = re.sub(r"\bVILLA\b", "VILA", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def endereco_contem_localidade(endereco, localidade):
+    """Busca nome COMPLETO em limites de palavras, evitando fragmentos e ruas homônimas.
+
+    Não confunde 'Dom Avelar' com 'Dom Avelar II' nem 'Vila Inglesa' com
+    'Vila Inglesa Nova' quando a localidade exata é outra: para o primeiro
+    caso, a subárea adicional requer identificação explícita. O nome de uma
+    rua/avenida, sozinho, não estabelece que a O.S. pertence à localidade.
+    """
+    area = normalizar_localidade_busca(limpar_nome_bairro(localidade))
+    texto = normalizar_localidade_busca(endereco)
+    if not area or not texto or len(area) < 5:
+        return False
+    # Rejeita tokens genéricos que não individualizam uma localidade.
+    if area in {"BAIRRO", "REGIAO", "AREA", "SETOR", "TODOS", "PARCIAL"}:
+        return False
+    padrao = r"(?<![A-Z0-9])" + re.escape(area) + r"(?![A-Z0-9])"
+    for achado in re.finditer(padrao, texto):
+        anteriores = texto[:achado.start()].split()
+        posteriores = texto[achado.end():].split()
+        if anteriores and anteriores[-1] in {
+            "RUA", "R", "AV", "AVENIDA", "TRAVESSA", "TV",
+            "ESTRADA", "RODOVIA", "ALAMEDA", "PRACA", "PCA",
+        }:
+            continue
+        # Não confundir um conjunto com sua extensão explicitamente nomeada.
+        if posteriores and posteriores[0] in {
+            "I", "II", "III", "IV", "V", "1", "2", "3", "4", "5",
+            "NOVO", "NOVA",
+        }:
+            continue
+        return True
+    return False
 
 
 def indice_nomes_bairros(bairros_geograficos, municipio):
@@ -293,7 +339,7 @@ def indice_nomes_bairros(bairros_geograficos, municipio):
     cidade = normalizar_municipio(municipio)
     nomes = set()
     for item in (bairros_geograficos or []):
-        if normalizar_municipio(item.get("municipio", "")) == cidade:
+        if normalizar_municipio(item.get("municipio", "")) == cidade and not item.get("sem_nome"):
             nome = limpar_nome_bairro(item.get("nome_normalizado") or item.get("nome"))
             if nome:
                 nomes.add(nome)
@@ -943,6 +989,10 @@ def mapear_colunas(df, destino):
             candidatos += ["LAT", "LATITUDE"]
         elif col_destino == "Longitude":
             candidatos += ["LON", "LONG", "LONGITUDE"]
+        elif col_destino == "Endereço":
+            candidatos += ["ENDERECO DA OS", "ENDERECO DA O S",
+                           "ENDERECO DE LIGACAO", "ENDERECO DA LIGACAO",
+                           "LOGRADOURO"]
         elif col_destino == "Código do Ativo":
             candidatos += ["CODIGO DO ATIVO", "ATIVO", "COD ATIVO"]
         elif col_destino == "Áreas Impactadas":
@@ -999,6 +1049,14 @@ def preparar_pontos(df):
         for destino, esperado in MAPA_COLUNAS_ATIVIDADES.items():
             origem = origens[normalizar_cabecalho(esperado)]
             out[destino] = df[origem].map(limpar_valor)
+        # Endereço é opcional na base alternativa e nunca substitui o
+        # protocolo como chave estável de deduplicação.
+        origem_endereco = localizar_coluna(
+            df, ["Endereço", "Endereço da O.S.", "Endereço de Ligação", "Logradouro"]
+        )
+        out["Endereço"] = (
+            df[origem_endereco].map(limpar_valor) if origem_endereco else ""
+        )
         # A chave estável é o protocolo de origem. Não criar chaves por nome
         # do solicitante ou por endereço; isso impediria deduplicação segura.
         sem_protocolo = int(out["Nº da O.S"].eq("").sum())
@@ -1105,7 +1163,20 @@ def consolidar_arquivos_importacao(arquivos, tipo, validar_janela=False):
         # chave_ponto é a mesma chave usada pelo upsert PONTOS.
         chaves = combinado.apply(chave_ponto, axis=1)
         repetidos = int(chaves.duplicated(keep="last").sum())
-        combinado = combinado.loc[~chaves.duplicated(keep="last")].reset_index(drop=True)
+        # Em arquivos mistos, a última O.S. vence, mas um endereço vazio no
+        # arquivo posterior não apaga o último endereço conhecido do lote.
+        enderecos_preenchidos = {}
+        for chave, endereco in zip(chaves, combinado["Endereço"]):
+            valor = limpar_valor(endereco)
+            if valor:
+                enderecos_preenchidos[chave] = valor
+        combinado = combinado.loc[~chaves.duplicated(keep="last")].copy()
+        ultimas_chaves = chaves.loc[combinado.index]
+        combinado["Endereço"] = [
+            limpar_valor(valor) or enderecos_preenchidos.get(chave, "")
+            for chave, valor in zip(ultimas_chaves, combinado["Endereço"])
+        ]
+        combinado = combinado.reset_index(drop=True)
     else:
         # A política de atualização dos eventos já existentes é preservar o
         # campo anterior quando o novo vier vazio. Reproduz essa regra entre
@@ -1143,7 +1214,19 @@ def upsert_pontos(df_novo):
         for _, r in atual.iterrows():
             mapa[chave_ponto(r)] = r.to_dict()
         for _, r in novo.iterrows():
-            mapa[chave_ponto(r)] = r.to_dict()
+            chave = chave_ponto(r)
+            entrada = r.to_dict()
+            anterior = mapa.get(chave)
+            if anterior is not None:
+                # Não apagar endereço já conhecido se a próxima exportação
+                # não trouxer a coluna ou apresentar a célula vazia.
+                if not limpar_valor(entrada.get("Endereço", "")):
+                    entrada["Endereço"] = limpar_valor(anterior.get("Endereço", ""))
+                # Preservar também campos extras preexistentes na aba PONTOS.
+                for campo in colunas:
+                    if campo not in CABECALHO_PONTOS and not limpar_valor(entrada.get(campo, "")):
+                        entrada[campo] = limpar_valor(anterior.get(campo, ""))
+            mapa[chave] = entrada
         final = pd.DataFrame(list(mapa.values()), columns=colunas)
 
     # Padroniza as coordenadas de O.S. para texto decimal com ponto antes
@@ -1314,10 +1397,11 @@ def unidade_da_cidade_farol(valor):
 
 
 def carregar_gpkg(caminho):
-    """Lê os polígonos do GeoPackage sem geopandas/GDAL.
+    """Lê TODAS as geometrias poligonais do GPKG, sem exigir nome de bairro.
 
-    Identifica bairro e município pelos atributos do QGIS; converte o SRC
-    original para WGS84 antes de entregar coordenadas ao Folium.
+    As coordenadas são a fonte de verdade. Os atributos são opcionais e
+    servem para nomear a feição e relacioná-la a eventos quando disponíveis.
+    Preserva anéis internos (furos) e converte o SRC original para WGS84.
     """
     registros = []
     with sqlite3.connect(f"file:{caminho}?mode=ro", uri=True) as conexao:
@@ -1332,26 +1416,27 @@ def carregar_gpkg(caminho):
             if not info:
                 continue
             campo_geometria, srs_geom = info
-            nomes = [r[1] for r in conexao.execute(f'PRAGMA table_info("{tabela.replace(chr(34), chr(34)*2)}")')]
+            quoted = lambda x: '"' + x.replace('"', '""') + '"'
+            nomes = [
+                r[1] for r in conexao.execute(f"PRAGMA table_info({quoted(tabela)})")
+            ]
             campos = {normalizar_cabecalho(c): c for c in nomes}
-            # Compatibilidade automática com as duas origens de bairros:
-            # IBGE: NM_BAIRRO + NM_RGI/NM_MUN
-            # Municípios (ArcGIS): NOME + MUNICIPIO
             campo_bairro = next(
-                (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME") if k in campos),
-                None,
+                (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME")
+                 if k in campos), None,
+            )
+            campo_nome_aux = next(
+                (campos[k] for k in ("NAME", "LOCALIDADE", "NOMELOCALIDADE")
+                 if k in campos and campos[k] != campo_bairro), None,
             )
             campo_mun = next(
-                (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI") if k in campos),
-                None,
+                (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI")
+                 if k in campos), None,
             )
-            if not campo_bairro:
-                continue
-            # GeoPackage usa WKB com cabeçalho GP de 8+ bytes, definido pelos flags.
             src_id = srs_geom or srs_id
             linha_srs = conexao.execute(
-                "SELECT organization, organization_coordsys_id, definition FROM gpkg_spatial_ref_sys WHERE srs_id=?",
-                (src_id,),
+                "SELECT organization, organization_coordsys_id, definition "
+                "FROM gpkg_spatial_ref_sys WHERE srs_id=?", (src_id,),
             ).fetchone()
             if not linha_srs:
                 continue
@@ -1360,46 +1445,81 @@ def carregar_gpkg(caminho):
                 origem = CRS.from_user_input(f"{org}:{cod}") if org and cod else CRS.from_wkt(definicao)
             except Exception:
                 origem = CRS.from_wkt(definicao)
-            conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(origem, 4326, always_xy=True)
-            quoted = lambda x: '"' + x.replace('"', '""') + '"'
-            colunas = [campo_geometria, campo_bairro] + ([campo_mun] if campo_mun else [])
-            consulta = f'SELECT {", ".join(quoted(c) for c in colunas)} FROM {quoted(tabela)}'
-            for row in conexao.execute(consulta):
-                bruto, nome, *municipio_atributo = row
-                if not bruto or not nome:
+            conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(
+                origem, 4326, always_xy=True
+            )
+            # Não descartar a camada quando não há campo de nome:
+            # a geometria pode ser desenhada normalmente.
+            colunas = [campo_geometria]
+            colunas += [c for c in (campo_bairro, campo_nome_aux, campo_mun) if c]
+            consulta = f"SELECT {', '.join(quoted(c) for c in colunas)} FROM {quoted(tabela)}"
+            for numero_feicao, row in enumerate(conexao.execute(consulta), start=1):
+                atributos = dict(zip(colunas, row))
+                bruto = atributos.get(campo_geometria)
+                if not bruto:
                     continue
-                bruto = bytes(bruto)
-                if len(bruto) < 8 or bruto[:2] != b"GP":
+                try:
+                    bruto = bytes(bruto)
+                    if len(bruto) < 8 or bruto[:2] != b"GP":
+                        continue
+                    envelope = (bruto[3] >> 1) & 7
+                    tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+                    if envelope not in tamanhos:
+                        continue
+                    geometria = wkb.loads(bruto[8 + tamanhos[envelope]:])
+                    if conversor:
+                        geometria = transformar_geometria(conversor.transform, geometria)
+                    if geometria.is_empty:
+                        continue
+                    if geometria.geom_type == "Polygon":
+                        partes = [geometria]
+                    elif geometria.geom_type == "MultiPolygon":
+                        partes = list(geometria.geoms)
+                    else:
+                        continue
+                    poligonos, aneis_por_poligono = [], []
+                    for parte in partes:
+                        exterior = [(float(y), float(x)) for x, y in parte.exterior.coords]
+                        if len(exterior) < 4 or not all(
+                            math.isfinite(lat) and math.isfinite(lon)
+                            and -90 <= lat <= 90 and -180 <= lon <= 180
+                            for lat, lon in exterior
+                        ):
+                            continue
+                        aneis = [exterior]
+                        for interno in parte.interiors:
+                            furo = [(float(y), float(x)) for x, y in interno.coords]
+                            if len(furo) >= 4:
+                                aneis.append(furo)
+                        poligonos.append(exterior)
+                        aneis_por_poligono.append(aneis)
+                except (ValueError, TypeError, OverflowError, AttributeError):
+                    # Uma feição malformada não impede a leitura das demais.
                     continue
-                flags = bruto[3]
-                envelope = (flags >> 1) & 7
-                tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
-                if envelope not in tamanhos:
+                if not poligonos:
                     continue
-                geometria = wkb.loads(bruto[8 + tamanhos[envelope]:])
-                if conversor:
-                    geometria = transformar_geometria(conversor.transform, geometria)
-                if geometria.geom_type == "Polygon":
-                    partes = [geometria]
-                elif geometria.geom_type == "MultiPolygon":
-                    partes = list(geometria.geoms)
-                else:
-                    continue
-                poligonos = []
-                for parte in partes:
-                    coords = [(float(y), float(x)) for x, y in parte.exterior.coords]
-                    if len(coords) >= 4 and all(-90 <= lat <= 90 and -180 <= lon <= 180 for lat, lon in coords):
-                        poligonos.append(coords)
-                if poligonos:
-                    municipio = (municipio_atributo[0] if municipio_atributo else "") or nome_municipio_arquivo(caminho)
-                    registros.append({
-                        "nome": str(nome).strip(),
-                        "nome_normalizado": limpar_nome_bairro(nome),
-                        "municipio": normalizar_municipio(municipio),
-                        "poligonos": poligonos,
-                    })
-    return registros
 
+                def nome_valido(valor):
+                    texto = str(valor or "").strip()
+                    return "" if texto.upper() in {
+                        "", "NAN", "NONE", "NULL", "NOVO ELEMENTO", "NEW FEATURE"
+                    } else texto
+
+                nome_real = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
+                if not nome_real and campo_nome_aux:
+                    nome_real = nome_valido(atributos.get(campo_nome_aux))
+                rotulo = nome_real or f"Área sem nome ({tabela} #{numero_feicao})"
+                municipio_atributo = atributos.get(campo_mun) if campo_mun else ""
+                municipio = municipio_atributo or nome_municipio_arquivo(caminho)
+                registros.append({
+                    "nome": rotulo,
+                    "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
+                    "sem_nome": not bool(nome_real),
+                    "municipio": normalizar_municipio(municipio),
+                    "poligonos": poligonos,
+                    "aneis_por_poligono": aneis_por_poligono,
+                })
+    return registros
 
 def nome_municipio_arquivo(caminho):
     nome = os.path.splitext(os.path.basename(caminho))[0]
@@ -1407,32 +1527,49 @@ def nome_municipio_arquivo(caminho):
 
 
 def preparar_poligonos_para_mapa(registros, tolerancia=0.00007):
-    """Reduz vértices SOMENTE no desenho. Preserva 'poligonos' originais para análise.
+    """Simplifica as geometrias apenas para desenhar, preservando todos os anéis.
 
-    0.00007 grau corresponde aproximadamente a alguns metros na região de operação.
-    A geometria simplificada é calculada apenas quando os arquivos mudam (cache).
+    Os polígonos e furos ORIGINAIS permanecem disponíveis para os cruzamentos
+    espaciais. A geometria não depende da presença de atributos cadastrais.
     """
     from shapely.geometry import Polygon
-    for bairro in registros:
-        visuais = []
-        for coords in bairro.get("poligonos", []):
-            if len(coords) < 25:
-                visuais.append(coords)
-                continue
-            try:
-                # shapely usa longitude,latitude; Folium usa latitude,longitude.
-                geom = Polygon([(lon, lat) for lat, lon in coords])
-                simplificado = geom.simplify(tolerancia, preserve_topology=True)
-                if simplificado.is_empty or simplificado.geom_type != "Polygon":
-                    visuais.append(coords)
-                else:
-                    novo = [(float(lat), float(lon)) for lon, lat in simplificado.exterior.coords]
-                    visuais.append(novo if len(novo) >= 4 else coords)
-            except (ValueError, TypeError):
-                visuais.append(coords)
-        bairro["poligonos_mapa"] = visuais
-    return registros
 
+    for bairro in registros:
+        visuais, aneis_visuais = [], []
+        origem = bairro.get("aneis_por_poligono") or [
+            [coords] for coords in bairro.get("poligonos", [])
+        ]
+        for aneis in origem:
+            if not aneis or len(aneis[0]) < 4:
+                continue
+            atual = aneis
+            if len(aneis[0]) >= 25:
+                try:
+                    geom = Polygon(
+                        [(lon, lat) for lat, lon in aneis[0]],
+                        holes=[
+                            [(lon, lat) for lat, lon in furo]
+                            for furo in aneis[1:]
+                        ],
+                    )
+                    simplificado = geom.simplify(tolerancia, preserve_topology=True)
+                    if not simplificado.is_empty and simplificado.geom_type == "Polygon":
+                        novos = [
+                            [(float(lat), float(lon)) for lon, lat in simplificado.exterior.coords]
+                        ]
+                        novos.extend(
+                            [(float(lat), float(lon)) for lon, lat in ring.coords]
+                            for ring in simplificado.interiors
+                        )
+                        if len(novos[0]) >= 4:
+                            atual = novos
+                except (ValueError, TypeError):
+                    pass
+            visuais.append(atual[0])
+            aneis_visuais.append(atual)
+        bairro["poligonos_mapa"] = visuais
+        bairro["aneis_mapa"] = aneis_visuais
+    return registros
 
 @st.cache_data(show_spinner=False, ttl=300)
 def carregar_geometrias_municipais(arquivos_assinados):
@@ -1514,8 +1651,12 @@ def ponto_em_poligono(lat, lon, poligono):
 
 
 def ponto_em_bairro(lat, lon, bairro):
-    for poligono in bairro["poligonos"]:
-        if ponto_em_poligono(lat, lon, poligono):
+    aneis_por_poligono = bairro.get("aneis_por_poligono") or [
+        [p] for p in bairro["poligonos"]
+    ]
+    for aneis in aneis_por_poligono:
+        if (ponto_em_poligono(lat, lon, aneis[0])
+                and not any(ponto_em_poligono(lat, lon, furo) for furo in aneis[1:])):
             return True
     return False
 
@@ -1524,7 +1665,7 @@ def identificar_bairro_por_ponto(lat, lon, bairros):
     if lat is None or lon is None:
         return ""
     for bairro in bairros:
-        if ponto_em_bairro(lat, lon, bairro):
+        if not bairro.get("sem_nome") and ponto_em_bairro(lat, lon, bairro):
             return bairro["nome_normalizado"]
     return ""
 
@@ -1776,65 +1917,100 @@ def pontos_proximos_concentracoes(concentracoes, df_pocos, df_loggers, raio=RAIO
 
 
 def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
+    """Contabiliza cada O.S. uma vez por evento, respeitando polígonos sobrepostos.
+
+    Primeiro usa geometria da área informada; se ela NÃO tiver polígono,
+    tenta bairro cadastrado e nome completo da localidade no Endereço.
+    Esta tela conserva a contagem territorial (sem filtro temporal), como antes.
+    """
     if df_eventos.empty or df_pontos.empty:
         return pd.DataFrame()
 
     pontos = df_pontos.copy()
-    pontos["_bairro_base"] = pontos["Bairro"].map(limpar_nome_bairro)
-
-    # Quando o bairro textual da O.S. não for confiável, usa a geometria do KMZ.
-    if bairros:
-        pontos["_bairro_poligono"] = pontos.apply(
-            lambda r: identificar_bairro_por_ponto(parse_float(r["Latitude"]), parse_float(r["Longitude"]), bairros),
-            axis=1,
+    pontos["_cidade_cruzamento"] = pontos["Cidade"].map(normalizar_municipio)
+    # Índices construídos uma única vez; evita pesquisar todas as O.S. e
+    # feições do município novamente para cada evento da tabela.
+    pontos_por_cidade = {
+        chave: grupo for chave, grupo in pontos.groupby("_cidade_cruzamento")
+        if chave
+    }
+    geometria_por_localidade = {}
+    for poligono in (bairros or []):
+        chave = (
+            normalizar_municipio(poligono.get("municipio", "")),
+            limpar_nome_bairro(poligono.get("nome_normalizado") or poligono.get("nome", "")),
         )
-        pontos["_bairro_cruzamento"] = pontos["_bairro_poligono"].where(
-            pontos["_bairro_poligono"].astype(bool), pontos["_bairro_base"]
-        )
-    else:
-        pontos["_bairro_cruzamento"] = pontos["_bairro_base"]
-
+        geometria_por_localidade.setdefault(chave, []).append(poligono)
     registros = []
     for indice_evento, evento in df_eventos.reset_index(drop=True).iterrows():
-        municipal = evento_abrange_municipio(evento.get("Áreas Impactadas", ""))
-        if municipal:
-            cidade = normalizar_municipio(evento.get("Cidade", ""))
-            bloco = pontos[pontos["Cidade"].map(normalizar_municipio) == cidade]
-            if not bloco.empty:
-                registros.append({
-                    "_indice_evento": indice_evento,
-                    "Cidade": evento.get("Cidade", ""),
-                    "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
-                    "Protocolo": evento.get("Protocolo", ""),
-                    "Status": evento.get("Status", ""),
-                    "Bairro": "Todo o município", "Parcial": "Não",
-                    "O.S. encontradas": len(bloco),
-                    "Matrículas": bloco["Matrícula"].replace("", pd.NA).dropna().nunique(),
-                    "Data": evento.get("Data", ""),
-                })
+        cidade = normalizar_municipio(evento.get("Cidade", ""))
+        if not cidade:
             continue
-        areas = extrair_bairros_evento(evento.get("Áreas Impactadas", ""), evento.get("Cidade", ""), bairros)
-        for area in areas:
-            bloco = pontos[
-                (pontos["_bairro_cruzamento"] == area["bairro"])
-                & (pontos["Cidade"].map(normalizar_municipio) == normalizar_municipio(evento.get("Cidade", "")))
-            ].copy()
-            if bloco.empty:
-                continue
+        bloco = pontos_por_cidade.get(cidade)
+        if bloco is None or bloco.empty:
+            continue
+        areas_texto = evento.get("Áreas Impactadas", "")
+        municipal = evento_abrange_municipio(areas_texto)
+        comum = {
+            "_indice_evento": indice_evento,
+            "Cidade": evento.get("Cidade", ""),
+            "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
+            "Protocolo": evento.get("Protocolo", ""),
+            "Status": evento.get("Status", ""),
+            "Data": evento.get("Data", ""),
+        }
+        if municipal:
             registros.append({
-                "_indice_evento": indice_evento,
-                "Cidade": evento.get("Cidade", ""),
-                "Evento": evento.get("Descrição do Serviço", "") or evento.get("Serviço", ""),
-                "Protocolo": evento.get("Protocolo", ""),
-                "Status": evento.get("Status", ""),
-                "Bairro": area["bairro"],
-                "Parcial": "Sim" if area["parcial"] else "Não",
+                **comum, "Bairro": "Todo o município", "Parcial": "Não",
                 "O.S. encontradas": len(bloco),
                 "Matrículas": bloco["Matrícula"].replace("", pd.NA).dropna().nunique(),
-                "Data": evento.get("Data", ""),
+                "Critérios de associação": f"Município: {len(bloco)}",
+            })
+            continue
+
+        areas = extrair_bairros_evento(areas_texto, evento.get("Cidade", ""), bairros)
+        if not areas:
+            continue
+        indice_geometrias = {
+            area["bairro"]: geometria_por_localidade.get((cidade, area["bairro"]), [])
+            for area in areas
+        }
+        por_area = {}
+        # Avaliação por O.S., não por polígono, para evitar dupla contagem de
+        # uma mesma ordem nas áreas oficiais e subáreas que se sobrepõem.
+        for _, os_reg in bloco.iterrows():
+            area, metodo = identificar_correspondencia_territorial_evento_os(
+                os_reg, cidade, areas, indice_geometrias=indice_geometrias
+            )
+            if area is None:
+                continue
+            resumo = por_area.setdefault(
+                area, {"total": 0, "matriculas": set(), "metodos": {}}
+            )
+            resumo["total"] += 1
+            matricula = limpar_valor(os_reg.get("Matrícula", ""))
+            if matricula:
+                resumo["matriculas"].add(matricula)
+            resumo["metodos"][metodo] = resumo["metodos"].get(metodo, 0) + 1
+
+        for area in areas:
+            dados = por_area.get(area["bairro"])
+            if not dados:
+                continue
+            ordem_metodos = ("Polígono", "Bairro cadastrado", "Endereço")
+            criterios = ", ".join(
+                f"{nome}: {dados['metodos'][nome]}"
+                for nome in ordem_metodos if dados["metodos"].get(nome)
+            )
+            registros.append({
+                **comum,
+                "Bairro": area["bairro"],
+                "Parcial": "Sim" if area["parcial"] else "Não",
+                "O.S. encontradas": dados["total"],
+                "Matrículas": len(dados["matriculas"]),
+                "Critérios de associação": criterios,
             })
     return pd.DataFrame(registros)
-
 
 # ============================================================
 # EVENTOS GEORREFERENCIADOS — SOMENTE ONDE HÁ POLÍGONOS
@@ -1930,9 +2106,12 @@ def adicionar_camada_eventos(mapa, eventos_mapeados):
             f"<b>Abrangência:</b> {html_escape(abrangencia)}"
             f"</div>"
         )
-        for poligono in bairro.get("poligonos_mapa", bairro["poligonos"]):
+        geometrias = bairro.get("aneis_mapa") or [
+            [pol] for pol in bairro.get("poligonos_mapa", bairro["poligonos"])
+        ]
+        for aneis in geometrias:
             folium.Polygon(
-                locations=poligono,
+                locations=aneis[0] if len(aneis) == 1 else aneis,
                 color=item["cor"], weight=2.5, opacity=0.9,
                 fill=True, fill_color=item["cor"], fill_opacity=0.23,
                 tooltip=f"Evento: {bairro['nome']} — {categoria}",
@@ -2021,13 +2200,22 @@ def adicionar_limites_bairros(mapa, bairros):
     """Camada única GeoJSON: mais leve que criar um Polygon Leaflet por bairro."""
     features = []
     for b in bairros:
-        for pol in b.get("poligonos_mapa", b["poligonos"]):
-            if len(pol) < 4:
+        geometrias = b.get("aneis_mapa") or [
+            [pol] for pol in b.get("poligonos_mapa", b["poligonos"])
+        ]
+        for aneis in geometrias:
+            if not aneis or len(aneis[0]) < 4:
                 continue
             features.append({
                 "type": "Feature",
                 "properties": {"bairro": str(b.get("nome", "")), "municipio": str(b.get("municipio", ""))},
-                "geometry": {"type": "Polygon", "coordinates": [[[float(lon), float(lat)] for lat, lon in pol]]},
+                "geometry": {
+                    "type": "Polygon",
+                    "coordinates": [
+                        [[float(lon), float(lat)] for lat, lon in ring]
+                        for ring in aneis
+                    ],
+                },
             })
     if not features:
         return
@@ -2139,6 +2327,7 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
                 f"O.S.: {r.get('Nº da O.S','')}<br>"
                 f"<b>Matrícula:</b> {r.get('Matrícula','')}<br>"
                 f"<b>Bairro:</b> {r.get('Bairro','')}<br>"
+                f"<b>Endereço:</b> {html_escape(str(r.get('Endereço', '') or ''))}<br>"
                 f"<b>Status:</b> {r.get('Status OS','')}<br>"
                 f"<b>Serviço:</b> {r.get('Serviço Executado','')}<br>"
                 f"<b>Classificação:</b> {classificacao}",
@@ -2415,39 +2604,76 @@ def evento_pertinente_data_analise(evento):
     return True
 
 
-def correspondencia_territorial_evento_os(os_reg, cidade_evento, areas_evento,
-                                          bairros_geograficos=None, municipal=False):
-    """Cruza por cidade e bairro exato OU posição dentro da área do evento.
+def indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento):
+    """Relaciona somente polígonos das áreas deste evento e deste município."""
+    nomes = {area["bairro"] for area in areas_evento}
+    indice = {nome: [] for nome in nomes}
+    for bairro in (bairros_geograficos or []):
+        if bairro.get("sem_nome") or normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
+            continue
+        nome = limpar_nome_bairro(bairro.get("nome_normalizado") or bairro.get("nome", ""))
+        if nome in indice:
+            indice[nome].append(bairro)
+    return indice
 
-    A geometria só serve como critério de associação se a O.S. estiver DENTRO
-    do polígono cadastrado para o bairro explicitamente afetado, no MESMO município.
-    Proximidade de equipamentos, centro da concentração e nomes parecidos
-    não estabelecem vínculo por si só.
 
-    Retorna o rótulo territorial correspondente ou None.
+def identificar_correspondencia_territorial_evento_os(
+        os_reg, cidade_evento, areas_evento, bairros_geograficos=None,
+        municipal=False, indice_geometrias=None):
+    """Retorna (área, critério), sem aproximar localidades distintas.
+
+    Se a área afetada tem polígono e a O.S. possui coordenadas, a geometria
+    é decisiva: estar FORA impede vínculo pelo texto do bairro/endereço.
+    Sem polígono cadastrado, usa bairro exato ou, em última instância,
+    localidade completa no Endereço. Nunca cruza municípios diferentes.
     """
     if normalizar_municipio(os_reg.get("Cidade", "")) != cidade_evento:
-        return None
+        return None, None
     if municipal:
-        return "Todo o município"
+        return "Todo o município", "Município"
+    if not areas_evento:
+        return None, None
 
-    bairro_textual = limpar_nome_bairro(os_reg.get("Bairro", ""))
-    chaves_areas = {area["bairro"] for area in areas_evento}
-    if bairro_textual and bairro_textual in chaves_areas:
-        return bairro_textual
-
+    indice = (
+        indice_geometrias if indice_geometrias is not None
+        else indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento)
+    )
     lat = normalizar_coordenada(os_reg.get("Latitude", ""), "lat")
     lon = normalizar_coordenada(os_reg.get("Longitude", ""), "lon")
-    if lat is None or lon is None or not bairros_geograficos:
-        return None
-    for bairro_geo in bairros_geograficos:
-        if (normalizar_municipio(bairro_geo.get("municipio", "")) != cidade_evento
-                or bairro_geo.get("nome_normalizado", "") not in chaves_areas):
-            continue
-        if ponto_em_bairro(lat, lon, bairro_geo):
-            return bairro_geo["nome_normalizado"]
-    return None
+    tem_coordenadas = lat is not None and lon is not None
 
+    # Prioridade global: todas as áreas deste evento com polígonos,
+    # inclusive subáreas sobrepostas a bairros maiores.
+    if tem_coordenadas:
+        for area in areas_evento:
+            nome = area["bairro"]
+            if any(ponto_em_bairro(lat, lon, poligono) for poligono in indice.get(nome, [])):
+                return nome, "Polígono"
+
+    bairro_textual = limpar_nome_bairro(os_reg.get("Bairro", ""))
+    if bairro_textual:
+        for area in areas_evento:
+            nome = area["bairro"]
+            # Não usar texto para contrariar o polígono quando a posição
+            # geográfica permite verificar que a O.S. está fora da área.
+            if bairro_textual == nome and (not indice.get(nome) or not tem_coordenadas):
+                return nome, "Bairro cadastrado"
+
+    endereco = os_reg.get("Endereço", "")
+    for area in areas_evento:
+        nome = area["bairro"]
+        if not indice.get(nome) and endereco_contem_localidade(endereco, nome):
+            return nome, "Endereço"
+    return None, None
+
+
+def correspondencia_territorial_evento_os(os_reg, cidade_evento, areas_evento,
+                                          bairros_geograficos=None, municipal=False):
+    """Compatibilidade: retorna apenas o nome da área territorialmente reconhecida."""
+    nome, _ = identificar_correspondencia_territorial_evento_os(
+        os_reg, cidade_evento, areas_evento, bairros_geograficos, municipal
+    )
+    return nome
 
 def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos=None):
     """Associa eventos às O.S. individualmente, por município, território e data.
@@ -2463,8 +2689,18 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
         if not proximidades.empty else pd.DataFrame()
     )
     relacionados = []
-    if eventos is not None and not eventos.empty and not os_grupo.empty:
-        for _, evento in eventos.iterrows():
+    if (eventos is not None and not eventos.empty and not os_grupo.empty
+            and "Cidade" in eventos.columns and "Cidade" in os_grupo.columns):
+        # Um evento de outro município jamais será associado às O.S. do grupo.
+        # Filtrar primeiro evita reprocessar todas as áreas e geometrias dos
+        # eventos de API/THE/TIM para cada concentração, especialmente em reruns.
+        cidades_do_grupo = {
+            normalizar_municipio(valor) for valor in os_grupo["Cidade"]
+        } - {""}
+        eventos_candidatos = eventos.loc[
+            eventos["Cidade"].map(normalizar_municipio).isin(cidades_do_grupo)
+        ]
+        for _, evento in eventos_candidatos.iterrows():
             if not evento_pertinente_data_analise(evento):
                 continue
             cidade = normalizar_municipio(evento.get("Cidade", ""))
@@ -2481,19 +2717,26 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
             geometrias_evento = [b for b in (bairros_geograficos or [])
                 if (normalizar_municipio(b.get("municipio", "")) == cidade
                     and b.get("nome_normalizado", "") in chaves_areas)] if not municipal else []
+            indice_geometrias = indexar_geometrias_evento(
+                geometrias_evento, cidade, areas_evento
+            )
             indices_compativeis, nomes_compativeis = [], set()
+            criterios_por_os = {}
             for idx_os, os_reg in os_grupo.iterrows():
-                nome = correspondencia_territorial_evento_os(
-                    os_reg, cidade, areas_evento, geometrias_evento, municipal
+                nome, criterio = identificar_correspondencia_territorial_evento_os(
+                    os_reg, cidade, areas_evento, municipal=municipal,
+                    indice_geometrias=indice_geometrias,
                 )
                 if nome is not None:
                     indices_compativeis.append(idx_os)
                     nomes_compativeis.add(nome)
+                    criterios_por_os[idx_os] = criterio
             if indices_compativeis:
                 item = evento.to_dict()
                 item["Bairros coincidentes"] = ", ".join(sorted(nomes_compativeis))
-                # Coluna técnica temporária; não grava na aba EVENTOS.
+                # Metadados temporários; não são gravados na aba EVENTOS.
                 item["_indices_os_correspondentes"] = tuple(indices_compativeis)
+                item["_criterios_os_correspondentes"] = criterios_por_os
                 relacionados.append(item)
     return os_grupo, ativos, pd.DataFrame(relacionados)
 
@@ -2539,6 +2782,7 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
         cidade_os = normalizar_municipio(os_reg.get("Cidade", ""))
         bairro_os = limpar_nome_bairro(os_reg.get("Bairro", ""))
         protocolos = []
+        criterios_vinculo = []
         if pd.notna(data_os) and eventos_relacionados is not None and not eventos_relacionados.empty:
             for _, evento in eventos_relacionados.iterrows():
                 if cidade_os != normalizar_municipio(evento.get("Cidade", "")):
@@ -2576,13 +2820,18 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
                         # Mantém eventos sem protocolo distinguíveis por ativo.
                         protocolo = str(evento.get("Código do Ativo", "") or evento.get("Serviço", "") or "Evento").strip()
                     protocolos.append(protocolo)
+                    if "_criterios_os_correspondentes" in evento.index:
+                        criterio = evento.get("_criterios_os_correspondentes")
+                        if isinstance(criterio, dict) and criterio.get(indice_os):
+                            criterios_vinculo.append(criterio[indice_os])
         linha = os_reg.copy()
         linha["Evento(s) vinculado(s)"] = ", ".join(dict.fromkeys(protocolos))
+        linha["Critério do vínculo"] = ", ".join(dict.fromkeys(criterios_vinculo))
         if protocolos:
             vinculadas.append(linha)
         else:
             nao_vinculadas.append(linha)
-    cols = list(os_grupo.columns) + ["Evento(s) vinculado(s)"]
+    cols = list(os_grupo.columns) + ["Evento(s) vinculado(s)", "Critério do vínculo"]
     def dataframe(linhas):
         return pd.DataFrame(linhas).reindex(columns=cols) if linhas else pd.DataFrame(columns=cols)
     return dataframe(vinculadas), dataframe(nao_vinculadas)
@@ -3111,15 +3360,24 @@ def gerar_pdf_concentracao(concentracao, os_grupo, ativos, eventos_relacionados,
     return buffer.getvalue()
 
 
-def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximidades, eventos, raio, bairros_geograficos=None):
+def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximidades, eventos,
+                                  raio, bairros_geograficos=None, dados_preparados=None):
+    """Renderiza somente a ficha solicitada; reaproveita o cruzamento já calculado.
+
+    Nenhuma outra concentração deve criar tabelas, widgets de logger ou relatórios
+    durante um rerun decorrente da edição do acompanhamento operacional.
+    """
     registro = concentracoes[concentracoes["ID_CONCENTRACAO"] == codigo]
     if registro.empty:
         st.warning("Concentração não encontrada com os filtros atuais.")
         return
     concentracao = registro.iloc[0]
-    os_grupo, ativos, eventos_relacionados = dados_relatorio_concentracao(
-        concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos
-    )
+    if dados_preparados is None:
+        os_grupo, ativos, eventos_relacionados = dados_relatorio_concentracao(
+            concentracao, pontos_cluster, proximidades, eventos, bairros_geograficos
+        )
+    else:
+        os_grupo, ativos, eventos_relacionados = dados_preparados
     cidades = sorted({str(c).strip() for c in os_grupo["Cidade"] if str(c).strip()})
     st.subheader(f"{codigo} — {', '.join(cidades) or 'Município não informado'}")
     st.caption(f"Bairros: {concentracao['BAIRROS'] or 'Não informados'}")
@@ -3136,7 +3394,9 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         f"{float(concentracao['LONGITUDE']):.6f} | Raio operacional: {raio} m"
     )
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
-    colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS", "Dt. Emissão", "Serviço Executado"]
+    colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Endereço",
+                  "Status OS", "Dt. Emissão", "Serviço Executado",
+                  "Evento(s) vinculado(s)", "Critério do vínculo"]
     for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
                              ("Ordens não vinculadas", nao_vinculadas)):
         st.markdown(f"#### {nome_grupo} ({len(base)})")
@@ -3374,10 +3634,15 @@ def modal_eventos():
             rel.groupby("_indice_evento", as_index=True)["Bairro"]
             .agg(lambda col: ", ".join(dict.fromkeys(str(v) for v in col if str(v).strip())))
         )
+        resumo_criterios = (
+            rel.groupby("_indice_evento", as_index=True)["Critérios de associação"]
+            .agg(lambda col: " | ".join(str(v) for v in col if str(v).strip()))
+        )
     else:
         rel_municipio = pd.DataFrame()
         resumo_os = pd.Series(dtype=int)
         resumo_bairros = pd.Series(dtype=str)
+        resumo_criterios = pd.Series(dtype=str)
 
     st.markdown("### Eventos armazenados e O.S. relacionadas")
     colunas_evento = [c for c in [
@@ -3390,6 +3655,9 @@ def modal_eventos():
     tabela = eventos_visiveis.loc[:, colunas_evento].copy()
     tabela["O.S. encontradas"] = [int(resumo_os.get(i, 0)) for i in indices_visiveis]
     tabela["Bairros com O.S."] = [str(resumo_bairros.get(i, "")) for i in indices_visiveis]
+    tabela["Critérios de associação"] = [
+        str(resumo_criterios.get(i, "")) for i in indices_visiveis
+    ]
     tabela = tabela.reset_index(drop=True)
 
     if PODE_EDITAR_FAROL:
@@ -4747,6 +5015,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     # espacialmente coincidente, se a versão do componente informar.
                     if melhor_concentracao and menor_centro <= 4 and not tooltip_clique.startswith("O.S. "):
                         st.session_state["farol_v2_concentracao"] = melhor_concentracao
+                        st.session_state["farol_v2_detalhe_aberto"] = melhor_concentracao
                         st.session_state["farol_concentracao_expandida"] = melhor_concentracao
                         st.session_state.pop("farol_v2_os_selecionada", None)
                         st.rerun()
@@ -4769,6 +5038,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     ):
                         st.session_state["farol_v2_os_raio_aberto"] = chave_ponto(os_selecionada)
                         st.session_state["farol_v2_concentracao"] = ""
+                        st.session_state["farol_v2_detalhe_aberto"] = ""
                         st.session_state["farol_concentracao_expandida"] = ""
                         st.rerun()
                 # A lista tradicional de concentrações permanece abaixo do mapa.
@@ -4815,33 +5085,153 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 )
         else:
             st.markdown("### 📋 Análise das Concentrações")
-            st.caption("Expanda uma concentração para consultar O.S., equipamentos, eventos relacionados e baixar o PDF.")
+            st.caption("Expanda uma concentração e clique em **Carregar detalhes** para consultar O.S., equipamentos, eventos e PDFs. Apenas a ficha escolhida é processada.")
             observacoes_df = carregar_observacoes_concentracoes()
             resumo_pdf = concentracoes.copy()
             grupos_os = {chave: quadro for chave, quadro in pontos_cluster.groupby("_grupo", sort=False)} if not pontos_cluster.empty else {}
             # Uma consulta compartilhada para todas as concentrações, em vez de
             # repetir uma leitura para cada cartão na tela.
             try:
-                vinculos_acomp_visiveis = {v["chave"]: v for v in listar_vinculos()}
+                todos_vinculos_acomp = listar_vinculos()
+                vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
+                recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
+                todos_vinculos_acomp = []
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
+                recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
+
+            # Concentrações mudam após cada importação. Indexar suas chaves
+            # atuais permite identificar fichas cujo vínculo antigo ficou órfão,
+            # sem associar automaticamente uma ficha a outra concentração.
+            contextos_ativos_acomp = {}
+            for _, c_atual in concentracoes.iterrows():
+                os_atuais = grupos_os.get(c_atual["GRUPO"], pontos_cluster.iloc[0:0])
+                cidades_atuais = sorted({
+                    str(v).strip() for v in os_atuais.get("Cidade", []) if str(v).strip()
+                })
+                cidade_atual = cidades_atuais[0] if cidades_atuais else ""
+                numeros_atuais = [
+                    str(x).strip() for x in os_atuais.get("Nº da O.S", []) if str(x).strip()
+                ]
+                chave_atual = chave_concentracao(
+                    cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
+                    numeros_atuais,
+                )
+                contextos_ativos_acomp[str(c_atual["ID_CONCENTRACAO"])] = {
+                    "chave": chave_atual,
+                    "municipio": cidade_atual,
+                    "os": numeros_atuais,
+                    "bairros": str(c_atual.get("BAIRROS", "") or ""),
+                    "multiplos_municipios": len(cidades_atuais) != 1,
+                    "latitude": float(c_atual["LATITUDE"]),
+                    "longitude": float(c_atual["LONGITUDE"]),
+                }
+
+            chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
+
+            # Continuidade automática SOMENTE quando as O.S. anteriores
+            # permanecem integralmente na concentração, novas O.S. são
+            # acrescentadas e a correspondência é única e geograficamente segura.
+            # O mapeamento em memória permite CONSULTA imediata também ao
+            # operador; a gravação persistente só ocorre sob perfil com edição.
+            continuidades_automaticas = {}
+            continuidades_persistidas = set()
+            continuidades_pendentes = set()
+            if recuperar_supabase_ativo and not erro_acomp_visivel:
+                continuidades_automaticas = identificar_continuidades_automaticas(
+                    contextos_ativos_acomp, todos_vinculos_acomp,
+                    fichas_acomp_visiveis,
+                )
+                tentativas_auto = st.session_state.setdefault(
+                    "farol_auto_vinculo_tentativas", {}
+                )
+                agora_tentativa = tempo_execucao.monotonic()
+                # Não repetir chamadas de gravação em reruns simultâneos após
+                # falhas temporárias, nem sobrecarregar o banco num único rerun.
+                gravacoes_nesta_interacao = 0
+                for codigo_auto, candidato_auto in continuidades_automaticas.items():
+                    ctx_auto = contextos_ativos_acomp[codigo_auto]
+                    chave_auto = ctx_auto["chave"]
+                    vinculo_virtual = {
+                        "chave": chave_auto,
+                        "evento_id": candidato_auto["evento_id"],
+                        "municipio": ctx_auto["municipio"],
+                        "bairros": ctx_auto["bairros"],
+                        "latitude": str(ctx_auto["latitude"]),
+                        "longitude": str(ctx_auto["longitude"]),
+                        "os_origem": ";".join(ctx_auto["os"]),
+                        "continuidade_automatica": True,
+                    }
+                    vinculos_acomp_visiveis[chave_auto] = vinculo_virtual
+                    if not PODE_EDITAR_FAROL:
+                        continuidades_pendentes.add(codigo_auto)
+                        continue
+                    ultima = tentativas_auto.get(chave_auto)
+                    if (ultima is not None and agora_tentativa - ultima < 600
+                            or gravacoes_nesta_interacao >= 12):
+                        continuidades_pendentes.add(codigo_auto)
+                        continue
+                    tentativas_auto[chave_auto] = agora_tentativa
+                    gravacoes_nesta_interacao += 1
+                    try:
+                        continuar_vinculo_automaticamente(
+                            ctx_auto, candidato_auto["chave_anterior"],
+                            candidato_auto["evento_id"],
+                        )
+                        continuidades_persistidas.add(codigo_auto)
+                        tentativas_auto.pop(chave_auto, None)
+                    except Exception:
+                        # Nunca inventar ficha nova nem perder a continuidade
+                        # reconhecida para consulta se o banco ficar indisponível.
+                        continuidades_pendentes.add(codigo_auto)
+                if continuidades_pendentes and PODE_EDITAR_FAROL:
+                    st.warning(
+                        "Algumas continuidades de acompanhamento foram reconhecidas, "
+                        "mas ainda não tiveram o novo vínculo gravado no Supabase. "
+                        "A associação pode ser consultada nesta sessão; "
+                        "a gravação será tentada novamente após alguns minutos."
+                    )
+
+            ids_fichas_ativas = {
+                str(vinculos_acomp_visiveis[chave]["evento_id"])
+                for chave in chaves_ativas if chave in vinculos_acomp_visiveis
+            }
+            candidatos_acomp_por_codigo = {}
+            if recuperar_supabase_ativo and not erro_acomp_visivel:
+                for codigo_atual, ctx in contextos_ativos_acomp.items():
+                    if (ctx["chave"] in vinculos_acomp_visiveis
+                            or ctx["multiplos_municipios"]):
+                        continue
+                    opcoes = sugerir_recuperacoes(
+                        todos_vinculos_acomp, ctx["municipio"],
+                        ctx["latitude"], ctx["longitude"], ctx["os"],
+                        chaves_ativas=chaves_ativas,
+                    )
+                    opcoes = [
+                        op for op in opcoes
+                        if op["evento_id"] in fichas_acomp_visiveis
+                        and op["evento_id"] not in ids_fichas_ativas
+                    ]
+                    if opcoes:
+                        candidatos_acomp_por_codigo[codigo_atual] = opcoes
+            # Uma ficha que combina com duas concentrações atuais pode
+            # indicar divisão/fusão: bloquear a recuperação até revisão.
+            uso_candidato = {}
+            for opcoes in candidatos_acomp_por_codigo.values():
+                for opcao in opcoes:
+                    eid = opcao["evento_id"]
+                    uso_candidato[eid] = uso_candidato.get(eid, 0) + 1
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
             ])
             for aba, abrangencia in ((aba_the, "THE"), (aba_api, "API"), (aba_tim, "TIM")):
                 with aba:
-                    cidades_abrangencia = sorted({
-                        cidade
-                        for _, conc in concentracoes.iterrows()
-                        for cidade in cidades_da_concentracao(conc, pontos_cluster)
-                        if unidade_da_cidade_farol(cidade) == abrangencia
-                    }, key=normalizar_texto)
                     concentracoes_abrangencia = concentracoes.loc[
                         concentracoes["ID_CONCENTRACAO"].astype(str).str.startswith(f"{abrangencia} ")
                     ].copy()
@@ -4854,7 +5244,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         cidades_grupo = sorted({str(v).strip() for v in os_grupo["Cidade"] if str(v).strip()})
                         qtd_ativos = (int((proximidades["Concentração"] == codigo).sum())
                                       if not proximidades.empty else 0)
-                        _, _, eventos_do_grupo = dados_relatorio_concentracao(
+                        # Calcular o vínculo de eventos uma única vez por concentração.
+                        # A ficha detalhada reutiliza este resultado quando for aberta.
+                        os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
                             concentracao, pontos_cluster, proximidades, df_eventos, bairros
                         )
                         indicador_eventos = (
@@ -4864,7 +5256,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         municipio_nota = cidades_grupo[0] if cidades_grupo else ""
                         numeros_os = [str(x).strip() for x in os_grupo.get("Nº da O.S", []) if str(x).strip()]
                         municipio_acomp = cidades_grupo[0] if cidades_grupo else municipio_nota
-                        chave_acomp = chave_concentracao(municipio_acomp, concentracao["LATITUDE"], concentracao["LONGITUDE"], numeros_os)
+                        contexto_atual = contextos_ativos_acomp[str(codigo)]
+                        chave_acomp = contexto_atual["chave"]
+                        opcoes_recuperar = candidatos_acomp_por_codigo.get(str(codigo), [])
                         concentracoes.loc[concentracoes["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         vinculo_acomp = vinculos_acomp_visiveis.get(chave_acomp)
@@ -4873,10 +5267,14 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         if ficha_acomp and (str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
                                              or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
                             indicador_nota = "✅ Acompanhamento concluído"
-                        elif vinculo_acomp:
+                        elif vinculo_acomp and ficha_acomp:
                             indicador_nota = "🔄 Acompanhamento em andamento"
+                        elif vinculo_acomp:
+                            indicador_nota = "Acompanhamento vinculado — ficha indisponível"
+                        elif opcoes_recuperar:
+                            indicador_nota = "🔎 Possível acompanhamento existente — revisar vínculo"
                         else:
-                            indicador_nota = "Acompanhamento não iniciado" if not erro_acomp_visivel else "Acompanhamento indisponível"
+                            indicador_nota = "Sem vínculo exato identificado" if not erro_acomp_visivel else "Acompanhamento indisponível"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
                         titulo = (
                             f"{codigo} — {', '.join(cidades_grupo) or 'Município não informado'}"
@@ -4885,42 +5283,148 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             f"{int(concentracao['QTD_MATRICULAS'])} matrículas · "
                             f"{qtd_ativos} ativo(s) próximo(s) · {indicador_eventos} · {indicador_nota}"
                         )
-                        # Preservar TODOS os registros no formato original de expansores.
-                        # Somente a concentração ativa carrega o relatório detalhado,
-                        # evitando gerar tabelas e componentes pesados para as demais.
-                        ativa = str(codigo) == str(st.session_state.get("farol_v2_concentracao", ""))
-                        with st.expander(titulo, expanded=ativa):
+                        # st.expander não faz carregamento preguiçoso: mesmo FECHADO,
+                        # o Streamlit executa todo o conteúdo dentro dele. O detalhamento
+                        # (tabelas, loggers, PDFs) só é construído para UM código escolhido.
+                        # A seleção cartográfica continua determinando qual expansor
+                        # abre inicialmente, sem alterar os dados do acompanhamento.
+                        codigo_texto = str(codigo)
+                        detalhe_escolhido = st.session_state.get("farol_v2_detalhe_aberto")
+                        if detalhe_escolhido is None:
+                            detalhe_escolhido = st.session_state.get("farol_v2_concentracao", "")
+                        detalhe_ativo = codigo_texto == str(detalhe_escolhido or "")
+                        mapa_ativo = codigo_texto == str(st.session_state.get("farol_v2_concentracao", ""))
+                        with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
                                 st.success(indicador_nota)
+                                if str(codigo) in continuidades_automaticas:
+                                    st.caption(
+                                        "Continuidade reconhecida automaticamente: as O.S. "
+                                        "anteriores permanecem na concentração. "
+                                        "Ficha e movimentações originais preservadas."
+                                    )
+                            elif opcoes_recuperar:
+                                st.warning(
+                                    "Há acompanhamento(s) anterior(es) com O.S. em comum. "
+                                    "Nenhuma ficha foi movida; confirme o vínculo antes de criar outra."
+                                )
                             else:
-                                st.caption("Nenhuma ficha operacional iniciada para este conjunto de O.S.")
-                            rotulo_acomp = (
-                                ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                                if vinculo_acomp
-                                else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                            )
-                            if st.button(rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
-                                         disabled=bool(erro_acomp_visivel)):
-                                contexto_popup = {
-                                    "chave": chave_acomp, "codigo": str(codigo),
-                                    "municipio": municipio_acomp, "bairros": bairros_grupo,
-                                    "latitude": float(concentracao["LATITUDE"]),
-                                    "longitude": float(concentracao["LONGITUDE"]),
-                                    "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
-                                    "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
-                                    "origem": "producao",
-                                }
-                                popup_acompanhamento_farol(contexto_popup, pode_editar=PODE_EDITAR_FAROL)
-                            if st.button("🗺️ Abrir mapa desta concentração" if not ativa else "📍 Mapa desta concentração aberto",
-                                         key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=ativa):
-                                st.session_state["farol_v2_concentracao"] = str(codigo)
-                                st.session_state["farol_concentracao_expandida"] = str(codigo)
+                                st.caption(
+                                    "Nenhum vínculo exato encontrado para esta composição de O.S. "
+                                    "Se já existia uma ficha, confira o histórico antes de criar outra."
+                                )
+
+                            contexto_popup = {
+                                "chave": chave_acomp, "codigo": str(codigo),
+                                "municipio": municipio_acomp, "bairros": bairros_grupo,
+                                "latitude": float(concentracao["LATITUDE"]),
+                                "longitude": float(concentracao["LONGITUDE"]),
+                                "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
+                                "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
+                                "origem": "producao",
+                            }
+                            if opcoes_recuperar and not vinculo_acomp:
+                                if st.button(
+                                    "🔗 Revisar acompanhamento existente",
+                                    key=f"farol_revisar_vinculo_{abrangencia}_{codigo}",
+                                    disabled=not PODE_EDITAR_FAROL,
+                                ):
+                                    st.session_state["farol_codigo_recuperacao"] = str(codigo)
+                                    st.session_state["farol_v2_detalhe_aberto"] = str(codigo)
+                                    st.rerun()
+                                if st.session_state.get("farol_codigo_recuperacao") == str(codigo):
+                                    with st.form(f"farol_form_recuperar_{abrangencia}_{codigo}"):
+                                        escolha = st.selectbox(
+                                            "Ficha anterior para esta concentração",
+                                            list(range(len(opcoes_recuperar))),
+                                            format_func=lambda i: (
+                                                f"Ficha #{opcoes_recuperar[i]['evento_id']} — "
+                                                f"{str(fichas_acomp_visiveis[opcoes_recuperar[i]['evento_id']].get('titulo', ''))[:75]} "
+                                                f"— {opcoes_recuperar[i]['os_em_comum']} O.S. em comum "
+                                                f"— {opcoes_recuperar[i]['distancia_m']} m"
+                                            ),
+                                            key=f"farol_escolha_recuperacao_{abrangencia}_{codigo}",
+                                        )
+                                        candidato = opcoes_recuperar[escolha]
+                                        ficha_candidata = fichas_acomp_visiveis[candidato["evento_id"]]
+                                        st.caption(
+                                            f"Registro de {candidato['criado_em']} · "
+                                            f"Status: {ficha_candidata.get('status', '')} · "
+                                            f"{candidato['os_em_comum']} de {candidato['os_anteriores']} O.S. "
+                                            f"anteriores e {candidato['os_atuais']} O.S. atuais · "
+                                            f"Distância entre centros: {candidato['distancia_m']} m"
+                                        )
+                                        ambiguo = uso_candidato.get(candidato["evento_id"], 0) > 1
+                                        if ambiguo:
+                                            st.error(
+                                                "Esta ficha também corresponde a outra concentração atual "
+                                                "(possível divisão/fusão). Recuperação bloqueada para evitar associação incorreta."
+                                            )
+                                        confirmado = st.checkbox(
+                                            "Confirmei que a concentração atual corresponde à ficha selecionada. "
+                                            "O vínculo antigo e todo o histórico serão preservados.",
+                                            key=f"farol_confirmar_recuperacao_{abrangencia}_{codigo}",
+                                        )
+                                        recuperar = st.form_submit_button(
+                                            "Confirmar recuperação do vínculo",
+                                            type="primary",
+                                            disabled=ambiguo or not PODE_EDITAR_FAROL,
+                                        )
+                                    if recuperar:
+                                        if not confirmado:
+                                            st.warning("Confirme a correspondência com a ficha anterior antes de recuperar.")
+                                        else:
+                                            try:
+                                                recuperar_vinculo_confirmado(
+                                                    contexto_popup, candidato["chave_anterior"],
+                                                    candidato["evento_id"],
+                                                )
+                                                st.session_state.pop("farol_codigo_recuperacao", None)
+                                                st.toast("Vínculo recuperado; ficha e histórico preservados.")
+                                                st.rerun()
+                                            except Exception as erro_recuperar:
+                                                st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
+                            else:
+                                rotulo_acomp = (
+                                    ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                                    if vinculo_acomp
+                                    else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                                )
+                                if st.button(
+                                    rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
+                                    disabled=bool(erro_acomp_visivel),
+                                ):
+                                    popup_acompanhamento_farol(
+                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                    )
+                            if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
+                                         key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
+                                st.session_state["farol_v2_concentracao"] = codigo_texto
+                                st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
+                                st.session_state["farol_concentracao_expandida"] = codigo_texto
                                 st.session_state.pop("farol_v2_os_raio_aberto", None)
                                 st.rerun()
-                            exibir_relatorio_concentracao(
-                                codigo, concentracoes, pontos_cluster, proximidades,
-                                df_eventos, int(raio_operacional), bairros
-                            )
+
+                            # Evita criar vários st.dataframe e executar uma consulta aos
+                            # gráficos dos loggers para CADA expansor em todo rerun.
+                            if detalhe_ativo:
+                                if st.button("▴ Ocultar detalhes desta concentração",
+                                             key=f"farol_v2_ocultar_detalhe_{abrangencia}_{codigo}"):
+                                    # String vazia: não reabrir o detalhe apenas por haver
+                                    # uma concentração selecionada no mapa.
+                                    st.session_state["farol_v2_detalhe_aberto"] = ""
+                                    st.rerun()
+                                exibir_relatorio_concentracao(
+                                    codigo, concentracoes, pontos_cluster, proximidades,
+                                    df_eventos, int(raio_operacional), bairros,
+                                    dados_preparados=(os_eventos, ativos_eventos, eventos_do_grupo),
+                                )
+                            else:
+                                st.caption("As tabelas, os loggers e o PDF são carregados somente quando solicitados.")
+                                if st.button("📋 Carregar detalhes desta concentração",
+                                             key=f"farol_v2_carregar_detalhe_{abrangencia}_{codigo}"):
+                                    st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
+                                    st.rerun()
         # Disponível também quando não há concentrações no filtro atual.
         if concentracoes.empty:
             resumo_pdf = concentracoes.copy()
