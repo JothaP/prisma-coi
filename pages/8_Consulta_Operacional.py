@@ -497,22 +497,34 @@ def _bairros_geograficos(assinatura: tuple[str, int, int]) -> list[dict]:
     bairros = []
     if caminho.suffix.lower() == ".gpkg":
         with sqlite3.connect(f"file:{caminho}?mode=ro", uri=True) as banco:
-            tabelas = banco.execute("SELECT table_name, srs_id FROM gpkg_contents WHERE data_type='features'").fetchall()
+            tabelas = banco.execute(
+                "SELECT table_name, srs_id FROM gpkg_contents WHERE data_type='features'"
+            ).fetchall()
             for tabela, srs_id in tabelas:
                 campo_geo = banco.execute(
-                    "SELECT column_name, srs_id FROM gpkg_geometry_columns WHERE table_name=?", (tabela,)
+                    "SELECT column_name, srs_id FROM gpkg_geometry_columns WHERE table_name=?",
+                    (tabela,),
                 ).fetchone()
                 if not campo_geo:
                     continue
-                nomes = [c[1] for c in banco.execute('PRAGMA table_info("' + tabela.replace('"', '""') + '")')]
+                nomes = [
+                    c[1] for c in banco.execute(
+                        'PRAGMA table_info("' + tabela.replace('"', '""') + '")'
+                    )
+                ]
                 campos = {_normalizar_cabecalho(c): c for c in nomes}
-                campo_nome = next((campos[c] for c in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME") if c in campos), None)
-                campo_municipio = next((campos[c] for c in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE") if c in campos), None)
-                if not campo_nome:
-                    continue
+                campo_nome = next(
+                    (campos[c] for c in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME")
+                     if c in campos), None,
+                )
+                campo_nome_aux = next(
+                    (campos[c] for c in ("NAME", "LOCALIDADE", "NOMELOCALIDADE")
+                     if c in campos and campos[c] != campo_nome), None,
+                )
                 nome_geom, srs_geom = campo_geo
                 linha_crs = banco.execute(
-                    "SELECT organization, organization_coordsys_id, definition FROM gpkg_spatial_ref_sys WHERE srs_id=?",
+                    "SELECT organization, organization_coordsys_id, definition "
+                    "FROM gpkg_spatial_ref_sys WHERE srs_id=?",
                     (srs_geom or srs_id,),
                 ).fetchone()
                 if not linha_crs:
@@ -522,30 +534,62 @@ def _bairros_geograficos(assinatura: tuple[str, int, int]) -> list[dict]:
                     origem = CRS.from_user_input(f"{org}:{cod}") if org and cod else CRS.from_wkt(wkt_crs)
                 except Exception:
                     origem = CRS.from_wkt(wkt_crs)
-                conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(origem, 4326, always_xy=True)
-                citar = lambda s: '"' + s.replace('"', '""') + '"'
-                cols = [nome_geom, campo_nome] + ([campo_municipio] if campo_municipio else [])
-                consulta = f"SELECT {', '.join(citar(c) for c in cols)} FROM {citar(tabela)}"
-                for registro in banco.execute(consulta):
-                    blob, nome, *mun = registro
-                    if not blob or not nome or (mun and mun[0] and _normalizar_texto(mun[0]) != "TERESINA"):
+                conversor = None if origem.equals(CRS.from_epsg(4326)) else Transformer.from_crs(
+                    origem, 4326, always_xy=True
+                )
+                citar = lambda valor: '"' + valor.replace('"', '""') + '"'
+                colunas = [nome_geom]
+                colunas += [c for c in (campo_nome, campo_nome_aux) if c]
+                consulta = f"SELECT {', '.join(citar(c) for c in colunas)} FROM {citar(tabela)}"
+                for indice_feicao, registro in enumerate(banco.execute(consulta), start=1):
+                    atributos = dict(zip(colunas, registro))
+                    blob = atributos.get(nome_geom)
+                    if not blob:
                         continue
-                    blob = bytes(blob)
-                    if blob[:2] != b"GP" or len(blob) < 8:
+                    try:
+                        blob = bytes(blob)
+                        if blob[:2] != b"GP" or len(blob) < 8:
+                            continue
+                        envelope = (blob[3] >> 1) & 7
+                        tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+                        if envelope not in tamanhos:
+                            continue
+                        geo = wkb.loads(blob[8 + tamanhos[envelope]:])
+                        if conversor:
+                            geo = transform(conversor.transform, geo)
+                        if geo.is_empty:
+                            continue
+                        partes = (
+                            [geo] if geo.geom_type == "Polygon"
+                            else list(geo.geoms) if geo.geom_type == "MultiPolygon"
+                            else []
+                        )
+                    except (ValueError, TypeError, OverflowError, AttributeError):
                         continue
-                    envelope = (blob[3] >> 1) & 7
-                    tamanhos = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
-                    if envelope not in tamanhos:
-                        continue
-                    geo = wkb.loads(blob[8 + tamanhos[envelope]:])
-                    if conversor:
-                        geo = transform(conversor.transform, geo)
-                    for area in ([geo] if geo.geom_type == "Polygon" else list(geo.geoms) if geo.geom_type == "MultiPolygon" else []):
-                        if not area.is_empty:
-                            simples = area.simplify(0.00007, preserve_topology=True)
-                            visual = simples if simples.geom_type == "Polygon" else area
-                            bairros.append({"nome": str(nome), "coords": [(y, x) for x, y in visual.exterior.coords],
-                                            "limites": area.bounds, "geometria": area})
+                    def nome_valido(valor):
+                        texto = str(valor or "").strip()
+                        return "" if texto.upper() in {
+                            "", "NAN", "NONE", "NULL", "NOVO ELEMENTO", "NEW FEATURE"
+                        } else texto
+                    nome = nome_valido(atributos.get(campo_nome)) if campo_nome else ""
+                    if not nome and campo_nome_aux:
+                        nome = nome_valido(atributos.get(campo_nome_aux))
+                    rotulo = nome or f"Área sem nome ({tabela} #{indice_feicao})"
+                    for area in partes:
+                        if area.is_empty or len(area.exterior.coords) < 4:
+                            continue
+                        visual = area.simplify(0.00007, preserve_topology=True)
+                        if visual.is_empty or visual.geom_type != "Polygon":
+                            visual = area
+                        bairros.append({
+                            "nome": rotulo,
+                            "coords": [(float(y), float(x)) for x, y in visual.exterior.coords],
+                            "limites": area.bounds,
+                            "geometria": area,
+                            # GeoJSON preserva os contornos internos que seriam
+                            # perdidos ao desenhar somente o anel exterior.
+                            "geometria_mapa": visual,
+                        })
     else:
         if caminho.suffix.lower() == ".kmz":
             with zipfile.ZipFile(caminho) as zipado:
@@ -1156,12 +1200,31 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     """))
 
     if bairros:
+        # Uma única camada GeoJSON renderiza TODOS os polígonos selecionados
+        # pela localização, inclusive os sem nome e aqueles com anéis internos.
+        # Atributos servem apenas como texto do tooltip.
         grupo = folium.FeatureGroup(name="Limites dos bairros", show=True)
-        for bairro in bairros:
-            folium.Polygon(locations=bairro["coords"], color="#6387a3", weight=1.15,
-                           fill=True, fill_color="#88b8de", fill_opacity=.035,
-                           tooltip=f"Bairro: {html_escape(str(bairro['nome']))}").add_to(grupo)
-        grupo.add_to(mapa)
+        geometrias_bairros = [
+            {
+                "type": "Feature",
+                "properties": {"bairro": str(bairro.get("nome", "Área sem nome"))},
+                "geometry": mapping(bairro.get("geometria_mapa") or bairro["geometria"]),
+            }
+            for bairro in bairros if bairro.get("geometria") is not None
+        ]
+        if geometrias_bairros:
+            folium.GeoJson(
+                {"type": "FeatureCollection", "features": geometrias_bairros},
+                name="Limites dos bairros",
+                style_function=lambda _feature: {
+                    "color": "#6387a3", "weight": 1.15,
+                    "fillColor": "#88b8de", "fillOpacity": 0.035,
+                },
+                tooltip=folium.GeoJsonTooltip(
+                    fields=["bairro"], aliases=["Bairro:"], sticky=True,
+                ),
+            ).add_to(grupo)
+            grupo.add_to(mapa)
     if influencias:
         grupo = folium.FeatureGroup(name="Áreas de influência", show=True)
         for zona in influencias:
@@ -1433,9 +1496,19 @@ def exibir_consulta_operacional() -> None:
                     oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
                     leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
                 else:
-                    oeste, sul, leste, norte = -42.94, -5.23, -42.66, -4.96
-                bairros = [b for b in todas if not (b["limites"][2] < oeste or b["limites"][0] > leste
-                                                      or b["limites"][3] < sul or b["limites"][1] > norte)][:90]
+                    # Sem pesquisa/desenho: exibir todos os polígonos do
+                    # município, sem recorte arbitrário ou limite de 90.
+                    bairros = todas
+                if area is not None or not validos.empty:
+                    # Com pesquisa, selecionar pelo bounding box real de
+                    # cada geometria; NENHUM corte por quantidade.
+                    bairros = [
+                        b for b in todas
+                        if not (
+                            b["limites"][2] < oeste or b["limites"][0] > leste
+                            or b["limites"][3] < sul or b["limites"][1] > norte
+                        )
+                    ]
             except Exception as erro:
                 st.warning(f"Limites de bairros não puderam ser carregados: {erro}")
 
