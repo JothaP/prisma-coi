@@ -19,6 +19,7 @@ TEXTO = SRC.read_text(encoding="utf-8")
 NOMES = {
     "chave_concentracao", "_normalizar_municipio_vinculo",
     "_distancia_centros_m", "sugerir_recuperacoes",
+    "identificar_continuidades_automaticas",
 }
 arvore = ast.parse(TEXTO, filename=str(SRC))
 funcoes = [n for n in arvore.body if isinstance(n, ast.FunctionDef) and n.name in NOMES]
@@ -101,7 +102,7 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         registro = dict(self.mais_cedo, latitude="")
         self.assertEqual(self.opcoes(vinculos=[registro]), [])
 
-    def test_nao_cria_vinculo_automaticamente(self):
+    def test_recuperacao_ambigua_ainda_exige_confirmacao(self):
         pagina = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
         self.assertIn("Confirmar recuperação do vínculo", pagina)
         self.assertIn("if recuperar:", pagina)
@@ -111,6 +112,106 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertIn("chaves_ativas=chaves_ativas", pagina)
         backend = (RAIZ / "farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
         self.assertIn("/rest/v1/rpc/farol_acomp_recuperar_vinculo_tx", backend)
+
+
+
+    def contexto_atual(self, os=None, **alteracoes):
+        dados = {
+            "chave": "b"*32, "municipio": "TERESINA", "latitude": -5.0905,
+            "longitude": -42.8005, "os": os if os is not None else
+            ["1001", "1002", "1003", "1004"], "multiplos_municipios": False,
+        }
+        dados.update(alteracoes)
+        return dados
+
+    def automaticas(self, contextos=None, vinculos=None, fichas=None):
+        return ns["identificar_continuidades_automaticas"](
+            contextos if contextos is not None else {"THE C1": self.contexto_atual()},
+            vinculos if vinculos is not None else [self.mais_cedo],
+            fichas if fichas is not None else {
+                "101": {"id": "101", "status": "Em Andamento", "finalizado": "Não"}
+            },
+            agora=self.agora,
+        )
+
+    def test_continua_automaticamente_com_os_nova(self):
+        opcoes = self.automaticas()
+        self.assertEqual(list(opcoes), ["THE C1"])
+        self.assertEqual(opcoes["THE C1"]["evento_id"], "101")
+        self.assertEqual(opcoes["THE C1"]["os_em_comum"], 3)
+
+    def test_nunca_muda_ficha_quando_ha_chave_exata(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(chave="a"*32)
+        }), {})
+
+    def test_remocao_de_os_nao_e_continuacao_automatica(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(os=["1001", "1002", "1004", "1005"])
+        }), {})
+
+    def test_crescimento_alem_do_dobro_exige_revisao(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(
+                os=["1001", "1002", "1003", "1004", "1005", "1006", "1007"]
+            )
+        }), {})
+
+    def test_nao_reativa_ficha_concluida(self):
+        self.assertEqual(self.automaticas(fichas={
+            "101": {"status": "Concluído", "finalizado": "Sim"}
+        }), {})
+
+    def test_nao_une_duas_fichas_da_mesma_concentracao(self):
+        antiga2 = dict(self.mais_cedo, chave="c"*32,
+                       evento_id="102", os_origem="1002;1003;1004")
+        self.assertEqual(self.automaticas(
+            vinculos=[self.mais_cedo, antiga2],
+            fichas={
+                "101": {"status": "Em Andamento", "finalizado": "Não"},
+                "102": {"status": "Em Andamento", "finalizado": "Não"},
+            }
+        ), {})
+
+    def test_nao_divide_ficha_entre_duas_concentracoes(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(),
+            "THE C2": self.contexto_atual(chave="c"*32, os=["1001","1002","1003","1005"]),
+        }), {})
+
+    def test_ficha_ja_ativa_em_outro_grupo_nao_pode_duplicar(self):
+        ativa = dict(self.mais_cedo, chave="c"*32)
+        self.assertEqual(self.automaticas(
+            contextos={
+                "THE C1": self.contexto_atual(),
+                "THE C2": self.contexto_atual(chave="c"*32, os=["2000", "2001", "2002"]),
+            },
+            vinculos=[self.mais_cedo, ativa],
+        ), {})
+
+    def test_geometria_distante_que_ainda_e_candidata_manual(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(latitude=-5.099)
+        }), {})
+
+    def test_municipio_misto_nao_e_vinculado(self):
+        self.assertEqual(self.automaticas(contextos={
+            "THE C1": self.contexto_atual(multiplos_municipios=True)
+        }), {})
+
+    def test_nova_gravacao_usa_rpc_restrita_e_gera_auditoria(self):
+        src = (RAIZ / "farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
+        sql = (RAIZ / "sql" / "09_continuidade_automatica_farol.sql").read_text(encoding="utf-8")
+        pag = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
+        self.assertIn("/rest/v1/rpc/farol_acomp_continuar_auto_tx", src)
+        self.assertIn("v_os_antigas <@ v_os_novas", sql)
+        self.assertIn("v_distancia>750", sql)
+        self.assertIn("INSERT INTO public.prisma_auditoria", sql)
+        self.assertIn("REVOKE ALL ON FUNCTION", sql)
+        self.assertIn("identificar_continuidades_automaticas(", pag)
+        self.assertIn("continuar_vinculo_automaticamente(", pag)
+        self.assertIn("PODE_EDITAR_FAROL", pag)
+
 
 
 if __name__ == "__main__":
