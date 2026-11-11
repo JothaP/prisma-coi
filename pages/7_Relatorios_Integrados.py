@@ -35,6 +35,9 @@ from reportlab.pdfbase.ttfonts import TTFont
 from streamlit_folium import st_folium
 from auth import verificar_autenticacao, tem_acesso_modulo
 from farol_graficos_temporarios import chave_logger, filtrar_loggers, rotulo_logger
+from integracao_acompanhamento_producao import listar_vinculos, dados_acompanhamento
+from farol_acomp_supabase_backend import fonte_supabase
+from farol_mesclagem_operacional import listar_mesclas as listar_mesclas_farol, aplicar_mesclas as aplicar_mesclas_farol
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
 # usado para formar as concentrações ou associar medições do Módulo 1).
@@ -277,6 +280,61 @@ def concentracoes_farol(df, raio_m, minimo):
         ids.append(f"{tipo} C{contador[tipo]:03d}")
     cdf.insert(0,"Concentração",ids)
     return cdf,df
+
+
+
+def aplicar_mesclagens_do_modulo_3(concentracoes, grupos):
+    """Reaproveita as mesclagens confirmadas no Farol sem alterar O.S. originais.
+
+    Converte o esquema de exibição do Módulo 7 para o do Módulo 3, executa a
+    mesma regra de identificação pelas O.S. e restaura as colunas do relatório.
+    """
+    if concentracoes.empty or grupos.empty or not fonte_supabase():
+        return concentracoes, grupos
+    mesclas = listar_mesclas_farol()
+    if not mesclas:
+        return concentracoes, grupos
+    compat = concentracoes.rename(columns={
+        "Concentração": "ID_CONCENTRACAO", "_grupo": "GRUPO",
+        "Latitude": "LATITUDE", "Longitude": "LONGITUDE",
+        "O.S.": "QTD_OS", "Matrículas": "QTD_MATRICULAS",
+        "Bairros": "BAIRROS",
+    })
+    compat, grupos_mesclados = aplicar_mesclas_farol(compat, grupos, mesclas)
+    if not any(str(g).startswith("MESCLA_") for g in compat["GRUPO"]):
+        return concentracoes, grupos
+    saida = []
+    por_grupo = {
+        grupo: dados for grupo, dados in grupos_mesclados.groupby("_grupo", sort=False)
+    }
+    for _, c in compat.iterrows():
+        dados = por_grupo.get(c["GRUPO"])
+        if dados is None or dados.empty:
+            continue
+        cidades = sorted(set(dados["_municipio"]) - {""})
+        bairros = sorted(set(dados["_bairro"]) - {""})
+        pares = sorted({
+            (str(r["_municipio"]), str(r["_bairro"]))
+            for _, r in dados.iterrows() if r["_municipio"] and r["_bairro"]
+        })
+        registro = {
+            "Concentração": str(c["ID_CONCENTRACAO"]),
+            "_grupo": c["GRUPO"],
+            "Latitude": float(c["LATITUDE"]),
+            "Longitude": float(c["LONGITUDE"]),
+            "O.S.": int(c["QTD_OS"]),
+            "Matrículas": int(c["QTD_MATRICULAS"]),
+            "Município": ", ".join(cidades),
+            "Bairros": ", ".join(bairros),
+            "_unidade": str(dados["_unidade"].iloc[0]),
+            "_pares_bairro": pares,
+        }
+        for campo in ("CHAVE_MESCLA", "AREA_MESCLADA", "EVENTO_MESCLA", "CODIGOS_ORIGEM"):
+            valor = c.get(campo)
+            if isinstance(valor, (str, dict, list)) and valor:
+                registro[campo] = valor
+        saida.append(registro)
+    return pd.DataFrame(saida), grupos_mesclados
 
 
 def relacionar(concs, os_cluster, pressao, raio, inicio, fim):
@@ -1151,7 +1209,11 @@ def carregar_contexto_farol():
     contexto.update({"vinculos_farol_producao": pd.DataFrame(),
                       "eventos_acomp": pd.DataFrame(), "movimentacoes": pd.DataFrame()})
     id_acomp = str(st.secrets.get("acompanhamento_operacional_spreadsheet_id", "")).strip()
-    if id_acomp and id_acomp != ID_FAROL:
+    if fonte_supabase():
+        # Mesma fonte ativa do Módulo 3: fichas e vínculos atuais no Supabase.
+        contexto["vinculos_farol_producao"] = pd.DataFrame(listar_vinculos())
+        contexto["eventos_acomp"] = pd.DataFrame(dados_acompanhamento().values())
+    elif id_acomp and id_acomp != ID_FAROL:
         for aba in ("vinculos_farol_producao", "eventos"):
             destino = "eventos_acomp" if aba == "eventos" else aba
             contexto[destino] = opcional(id_acomp, aba)
@@ -1529,8 +1591,12 @@ def ficha_acompanhamento(c, grupo, contexto, incluir_movimentacoes=True):
                             key=normalizar)
         if not municipios:
             return None, [], None
-        chave = chave_concentracao(municipios[0], float(c["Latitude"]),
-                                  float(c["Longitude"]), numeros)
+        chave_mescla = c.get("CHAVE_MESCLA")
+        chave = (
+            str(chave_mescla) if isinstance(chave_mescla, str) and chave_mescla
+            else chave_concentracao(municipios[0], float(c["Latitude"]),
+                                    float(c["Longitude"]), numeros)
+        )
     except (KeyError, TypeError, ValueError, ImportError):
         return None, [], None
     colunas = {normalizar(z).replace(" ", "_"): z for z in vinc.columns}
