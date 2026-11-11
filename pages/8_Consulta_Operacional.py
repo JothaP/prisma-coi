@@ -1201,7 +1201,13 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     # Nunca criar marcadores ou rótulos para centenas de matrículas da área.
     # Assim, a leitura visual prioriza a matrícula pesquisada e os equipamentos.
 
+    # Os marcadores são permanentes. Rótulos fixos ficam em uma camada
+    # independente para nunca ocultar ícones ao desativar sua exibição.
     grupo_clientes = folium.FeatureGroup(name="Matrículas consultadas", show=True)
+    grupo_rotulos = (
+        folium.FeatureGroup(name="Rótulos fixos", show=True, control=False)
+        if exibir_rotulos else None
+    )
     for _, linha in clientes.iterrows():
         lat, lon = float(linha["_lat"]), float(linha["_lon"])
         matricula = str(linha["NUM_LIGACAO"])
@@ -1210,14 +1216,21 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
         pop = _popup_cliente(linha)
         if elevacao:
             pop += f"<div><b>Cota da superfície:</b> {elevacao}</div>"
-        folium.Marker([lat, lon], tooltip=f"Matrícula {matricula}" +
-                      (f" • {elevacao}" if elevacao else ""),
-                      popup=folium.Popup(pop, max_width=380),
-                      icon=folium.Icon(color="green", icon="home", prefix="fa")).add_to(grupo_clientes)
+        # Tooltip do próprio marcador: funciona com rótulos fixos desligados.
+        tooltip_matricula = folium.Tooltip(
+            f"Matrícula: {html_escape(matricula)} • "
+            f"Elevação: {html_escape(elevacao) if elevacao else 'indisponível'}",
+            sticky=True,
+        )
+        folium.Marker(
+            [lat, lon], tooltip=tooltip_matricula,
+            popup=folium.Popup(pop, max_width=380),
+            icon=folium.Icon(color="green", icon="home", prefix="fa"),
+        ).add_to(grupo_clientes)
         folium.Circle([lat, lon], radius=raio, color="#397cba", fill=False,
                       opacity=.32, weight=1, tooltip=f"Proximidade: {raio} m").add_to(grupo_clientes)
-        if exibir_rotulos:
-            _m8_adicionar_rotulo(grupo_clientes, lat, lon,
+        if grupo_rotulos is not None:
+            _m8_adicionar_rotulo(grupo_rotulos, lat, lon,
                                  f"{matricula} • {elevacao}" if elevacao else matricula,
                                  deslocamento=19)
     grupo_clientes.add_to(mapa)
@@ -1237,11 +1250,13 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
             folium.Marker([lat, lon], popup=folium.Popup(popup, max_width=360),
                           tooltip=tooltip,
                           icon=folium.Icon(color=cor, icon=icone, prefix="fa")).add_to(grupo)
-            if exibir_rotulos and i < 110 and nome:
+            if grupo_rotulos is not None and i < 110 and nome:
                 texto_rotulo = f"{nome[:36]} • {elevacao}" if elevacao else nome[:36]
-                _m8_adicionar_rotulo(grupo, lat, lon, texto_rotulo,
+                _m8_adicionar_rotulo(grupo_rotulos, lat, lon, texto_rotulo,
                                      tipo="ativo", deslocamento=17)
         grupo.add_to(mapa)
+    if grupo_rotulos is not None:
+        grupo_rotulos.add_to(mapa)
 
     Draw(export=False, position="topleft",
          draw_options={"polygon": {"allowIntersection": False, "showArea": True},
@@ -1515,9 +1530,16 @@ def exibir_consulta_operacional() -> None:
                          key="m8_integrado_rotulos")
     mapa = _m8_mapa_unificado(validos, ativos, raio, bairros, influencias, area,
                               rede, mapa_cotas, rotulos)
+    # Trocar a chave ao alternar rótulos força a reconstrução correta do
+    # componente Leaflet. A consulta, a área desenhada e os filtros continuam
+    # preservados em st.session_state, sem alterar a base de matrículas.
+    chave_mapa = (
+        f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}"
+        f"_rotulos_{int(rotulos)}"
+    )
     retorno = st_folium(
         mapa, width=None, height=660, returned_objects=["all_drawings"],
-        key=f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}",
+        key=chave_mapa,
     )
     if isinstance(retorno, dict):
         nova_area = _m8_area_desenhada(retorno.get("all_drawings") or [])
