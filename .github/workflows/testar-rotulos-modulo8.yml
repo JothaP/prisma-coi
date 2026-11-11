@@ -1,0 +1,28 @@
+name: Testar marcadores e rotulos do Modulo 8
+
+on:
+  push:
+    paths:
+      - 'pages/8_Consulta_Operacional.py'
+      - 'tests/test_modulo8_rotulos_marcadores.py'
+      - '.github/workflows/testar-rotulos-modulo8.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias para teste isolado do mapa
+        run: python -m pip install 'folium>=0.16,<1' 'pandas>=2.2,<3' 'shapely>=2,<3'
+      - name: Verificar sintaxe do Modulo 8
+        run: python -m py_compile pages/8_Consulta_Operacional.py
+      - name: Testar marcadores com rotulos ligados e desligados
+        run: python -m unittest discover -s tests -p 'test_modulo8_rotulos_marcadores.py' -v
