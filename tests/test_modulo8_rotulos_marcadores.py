@@ -34,7 +34,7 @@ def todos_grupos(mapa):
 
 
 def marcadores(grupo):
-    return [v for v in grupo._children.values() if isinstance(v, folium.Marker)]
+    return [v for v in grupo._children.values() if type(v) is folium.Marker]
 
 
 class TestarRotulosModulo8(unittest.TestCase):
