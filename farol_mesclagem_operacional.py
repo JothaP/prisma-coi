@@ -259,7 +259,16 @@ def eventos_e_concentracoes(concentracoes, grupos, proximidades, eventos, bairro
         grupo, _, eventos_grupo = calcular(c, grupos, proximidades, eventos, bairros)
         if eventos_grupo.empty:
             continue
+        cidades_grupo = {
+            normalizar(valor) for valor in grupo.get("Cidade", []) if str(valor).strip()
+        }
+        # Grupos da API podem atravessar municípios; nunca mesclar um grupo
+        # misto integralmente com um evento declarado para um só município.
+        if len(cidades_grupo) != 1:
+            continue
         for _, evt in eventos_grupo.iterrows():
+            if normalizar(evt.get("Cidade", "")) not in cidades_grupo:
+                continue
             vinculadas, _ = classificar(grupo, pd.DataFrame([evt]))
             if vinculadas.empty:
                 continue
@@ -340,9 +349,14 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
             "O.S. vinculadas ao evento": grupo_candidatos[c]["os_vinculadas"],
         } for c in elegiveis
     ]), hide_index=True, use_container_width=True)
+    chave_multi = f"farol_merge_grupos_{event_key}"
+    if chave_multi in st.session_state:
+        antigos = st.session_state[chave_multi]
+        if not isinstance(antigos, list) or any(x not in elegiveis for x in antigos):
+            del st.session_state[chave_multi]
     selecionadas = st.multiselect(
         "Concentrações para um único acompanhamento", elegiveis,
-        default=elegiveis, key=f"farol_merge_grupos_{event_key}",
+        default=elegiveis, key=chave_multi,
     )
     if len(selecionadas) < 2:
         return
@@ -351,10 +365,27 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
     numeros = sorted({
         str(v).strip() for v in os_unidas["Nº da O.S"] if str(v).strip()
     })
+    # Não ignorar fichas cujas concentrações mudaram de chave após
+    # importações: localizar sobreposições consistentes nas O.S. históricas.
+    conjunto_os = set(numeros)
+    chaves_fichas_candidatas = {
+        contextos_acomp[c]["chave"]
+        for c in selecionadas if c in contextos_acomp
+    }
+    for chave_v, v in vinculos.items():
+        if normalizar(v.get("municipio", "")) != normalizar(
+                escolhido["evento"].get("Cidade", "")):
+            continue
+        anteriores = {
+            x.strip() for x in str(v.get("os_origem", "")).split(";") if x.strip()
+        }
+        comum = anteriores & conjunto_os
+        if (len(comum) >= 2 and len(comum)*2 >= len(anteriores)
+                and len(comum)*2 >= len(conjunto_os)/len(selecionadas)):
+            chaves_fichas_candidatas.add(chave_v)
     ids_existentes = sorted({
-        str(vinculos[contextos_acomp[c]["chave"]]["evento_id"])
-        for c in selecionadas
-        if c in contextos_acomp and contextos_acomp[c]["chave"] in vinculos
+        str(vinculos[k]["evento_id"]) for k in chaves_fichas_candidatas
+        if k in vinculos
     })
     st.caption(
         f"Total consolidado: {len(numeros)} O.S. distintas de "
@@ -391,7 +422,7 @@ def renderizar_painel_mescla(concentracoes, pontos_cluster, proximidades, evento
         key=f"farol_merge_confirmar_salvar_{event_key}",
     ):
         try:
-            origens = [contextos_acomp[c]["chave"] for c in selecionadas]
+            origens = sorted(chaves_fichas_candidatas)
             retorno = salvar_mescla(
                 escolhido["evento"], selecionadas, numeros, origens, poligono
             )
