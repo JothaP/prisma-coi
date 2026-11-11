@@ -352,7 +352,7 @@ def backup_drive():
     try:
         cred_dict = json.loads(obrigatorio("FAROL_GCP_JSON"))
         cred = Credentials.from_service_account_info(
-            cred_dict, scopes=["https://www.googleapis.com/auth/drive.file"])
+            cred_dict, scopes=["https://www.googleapis.com/auth/drive"])
     except (ValueError, TypeError, KeyError) as exc:
         raise ErroBackupDiagnostico(
             "Configuracao: FAROL_GCP_JSON invalido ou conta de servico incompleta."
@@ -386,6 +386,33 @@ def backup_drive():
     print("Etapa backup: snapshot preparado; iniciando envio privado ao Google Drive.")
     try:
         drive = build("drive", "v3", credentials=cred, cache_discovery=False)
+        try:
+            pasta = drive.files().get(
+                fileId=folder,
+                fields="id,mimeType,trashed,driveId,capabilities(canAddChildren)",
+                supportsAllDrives=True,
+            ).execute()
+        except HttpError as exc:
+            raise ErroBackupDiagnostico(
+                "Google Drive: pasta de destino inacessivel ou inexistente ("
+                + _codigo_google_drive(exc)
+                + "). Confira ID e compartilhamento com client_email da conta de servico."
+            ) from None
+        if pasta.get("mimeType") != "application/vnd.google-apps.folder" or pasta.get("trashed"):
+            raise ErroBackupDiagnostico(
+                "Google Drive: o ID informado nao corresponde a uma pasta ativa."
+            )
+        if not pasta.get("capabilities", {}).get("canAddChildren"):
+            raise ErroBackupDiagnostico(
+                "Google Drive: conta de servico sem permissao para criar arquivos na pasta."
+            )
+        if not pasta.get("driveId"):
+            raise ErroBackupDiagnostico(
+                "Google Drive: pasta encontrada em Meu Drive. "
+                "Contas de servico nao possuem cota propria; use um Drive compartilhado "
+                "ou credenciais OAuth de um usuario."
+            )
+        print("Etapa backup: pasta validada em Drive compartilhado; iniciando upload.", flush=True)
         media = MediaIoBaseUpload(buf, mimetype="application/zip", resumable=False)
         drive.files().create(
             body={"name": nome, "parents": [folder], "mimeType": "application/zip"},
