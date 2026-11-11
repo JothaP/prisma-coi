@@ -5139,7 +5139,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         elif opcoes_recuperar:
                             indicador_nota = "🔎 Possível acompanhamento existente — revisar vínculo"
                         else:
-                            indicador_nota = "Acompanhamento não iniciado" if not erro_acomp_visivel else "Acompanhamento indisponível"
+                            indicador_nota = "Sem vínculo exato identificado" if not erro_acomp_visivel else "Acompanhamento indisponível"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
                         titulo = (
                             f"{codigo} — {', '.join(cidades_grupo) or 'Município não informado'}"
@@ -5168,7 +5168,10 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     "Nenhuma ficha foi movida; confirme o vínculo antes de criar outra."
                                 )
                             else:
-                                st.caption("Nenhuma ficha operacional iniciada para este conjunto de O.S.")
+                                st.caption(
+                                    "Nenhum vínculo exato encontrado para esta composição de O.S. "
+                                    "Se já existia uma ficha, confira o histórico antes de criar outra."
+                                )
 
                             contexto_popup = {
                                 "chave": chave_acomp, "codigo": str(codigo),
