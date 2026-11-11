@@ -2296,7 +2296,7 @@ def criar_mapa_panorama_v2(concentracoes, raio_m=RAIO_CONCENTRACAO_PADRAO, bairr
         resumo = (f"<b>{codigo}</b><br>{bairros_txt}<br>"
                   f"{int(c['QTD_OS'])} O.S. · {int(c['QTD_MATRICULAS'])} matrículas<br>"
                   "<small>Clique no ponto central para abrir a análise detalhada.</small>")
-        if not isinstance(c.get("AREA_MESCLADA"), dict):
+        if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
             folium.Circle([lat, lon], radius=float(raio_m), color="#7c3aed",
                           weight=2, fill=True, fill_opacity=.07,
                           interactive=False).add_to(mapa)
@@ -2462,7 +2462,7 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
             "</div>"
         )
         popup_concentracao = folium.Popup(conteudo_popup, max_width=370)
-        if not isinstance(c.get("AREA_MESCLADA"), dict):
+        if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
             folium.Circle(
                 [lat, lon], radius=(raio_circulo if raio_circulo is not None else RAIO_CONCENTRACAO_PADRAO),
                 color="purple", fill=True, fill_opacity=0.08,
@@ -3970,6 +3970,7 @@ def mapa_relatorio_concentracoes(concentracoes, pontos_cluster, concentracao=Non
                       control_scale=True, zoom_control=False)
     selecionadas = (concentracoes if concentracao is None else
                     concentracoes[concentracoes["ID_CONCENTRACAO"] == concentracao["ID_CONCENTRACAO"]])
+    desenhar_areas_mescladas(mapa, selecionadas)
     coordenadas = []
     # No panorama, a camada de O.S. será desenhada uma única vez, incluindo
     # registros dentro e fora das concentrações.
@@ -3990,8 +3991,9 @@ def mapa_relatorio_concentracoes(concentracoes, pontos_cluster, concentracao=Non
         lat, lon = float(c["LATITUDE"]), float(c["LONGITUDE"])
         raio = RAIO_CONCENTRACAO_PADRAO
         if not panoramico:
-            folium.Circle([lat, lon], radius=raio, color="#8522A5", weight=2.5,
-                          fill=True, fill_color="#8522A5", fill_opacity=.09).add_to(mapa)
+            if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
+                folium.Circle([lat, lon], radius=raio, color="#8522A5", weight=2.5,
+                              fill=True, fill_color="#8522A5", fill_opacity=.09).add_to(mapa)
             folium.Marker([lat, lon], icon=icone_alvo_concentracao_panorama()).add_to(mapa)
         coordenadas.append((lat, lon))
         if "_grupo" not in pontos_cluster.columns:
