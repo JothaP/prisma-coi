@@ -157,6 +157,7 @@ CABECALHO_PONTOS = [
     "Status OS",
     "Dt. Emissão",
     "Serviço Executado",
+    "Endereço",
 ]
 
 CABECALHO_EVENTOS = [
@@ -284,8 +285,45 @@ def limpar_nome_bairro(valor):
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
     texto = re.sub(r"^BAIRRO(?:\s*[-–—:]\s*|\s+)", "", texto)
+    # Trata Villa Inglesa e Vila Inglesa como a mesma localidade, sem
+    # aproximar nomes de bairros diferentes nem alterar o rótulo original.
+    texto = re.sub(r"\bVILLA\b", "VILA", texto)
     texto = re.sub(r"\s+", " ", texto).strip(" \t.,;:!?")
     return texto
+
+
+def normalizar_localidade_busca(valor):
+    """Normaliza separadores e grafia para comparar nomes completos no endereço."""
+    texto = re.sub(r"[^A-Z0-9]+", " ", normalizar_texto(valor))
+    texto = re.sub(r"\bVILLA\b", "VILA", texto)
+    return re.sub(r"\s+", " ", texto).strip()
+
+
+def endereco_contem_localidade(endereco, localidade):
+    """Busca nome COMPLETO em limites de palavras, evitando fragmentos e ruas homônimas.
+
+    Não confunde 'Dom Avelar' com 'Dom Avelar II' nem 'Vila Inglesa' com
+    'Vila Inglesa Nova' quando a localidade exata é outra: para o primeiro
+    caso, a subárea adicional requer identificação explícita. O nome de uma
+    rua/avenida, sozinho, não estabelece que a O.S. pertence à localidade.
+    """
+    area = normalizar_localidade_busca(limpar_nome_bairro(localidade))
+    texto = normalizar_localidade_busca(endereco)
+    if not area or not texto or len(area) < 5:
+        return False
+    # Rejeita tokens genéricos que não individualizam uma localidade.
+    if area in {"BAIRRO", "REGIAO", "AREA", "SETOR", "TODOS", "PARCIAL"}:
+        return False
+    padrao = r"(?<![A-Z0-9])" + re.escape(area) + r"(?![A-Z0-9])"
+    for achado in re.finditer(padrao, texto):
+        anteriores = texto[:achado.start()].split()
+        if anteriores and anteriores[-1] in {
+            "RUA", "R", "AV", "AVENIDA", "TRAVESSA", "TV",
+            "ESTRADA", "RODOVIA", "ALAMEDA", "PRACA", "PCA",
+        }:
+            continue
+        return True
+    return False
 
 
 def indice_nomes_bairros(bairros_geograficos, municipio):
@@ -943,6 +981,10 @@ def mapear_colunas(df, destino):
             candidatos += ["LAT", "LATITUDE"]
         elif col_destino == "Longitude":
             candidatos += ["LON", "LONG", "LONGITUDE"]
+        elif col_destino == "Endereço":
+            candidatos += ["ENDERECO DA OS", "ENDERECO DA O S",
+                           "ENDERECO DE LIGACAO", "ENDERECO DA LIGACAO",
+                           "LOGRADOURO"]
         elif col_destino == "Código do Ativo":
             candidatos += ["CODIGO DO ATIVO", "ATIVO", "COD ATIVO"]
         elif col_destino == "Áreas Impactadas":
@@ -999,6 +1041,14 @@ def preparar_pontos(df):
         for destino, esperado in MAPA_COLUNAS_ATIVIDADES.items():
             origem = origens[normalizar_cabecalho(esperado)]
             out[destino] = df[origem].map(limpar_valor)
+        # Endereço é opcional na base alternativa e nunca substitui o
+        # protocolo como chave estável de deduplicação.
+        origem_endereco = localizar_coluna(
+            df, ["Endereço", "Endereço da O.S.", "Endereço de Ligação", "Logradouro"]
+        )
+        out["Endereço"] = (
+            df[origem_endereco].map(limpar_valor) if origem_endereco else ""
+        )
         # A chave estável é o protocolo de origem. Não criar chaves por nome
         # do solicitante ou por endereço; isso impediria deduplicação segura.
         sem_protocolo = int(out["Nº da O.S"].eq("").sum())
@@ -1105,7 +1155,20 @@ def consolidar_arquivos_importacao(arquivos, tipo, validar_janela=False):
         # chave_ponto é a mesma chave usada pelo upsert PONTOS.
         chaves = combinado.apply(chave_ponto, axis=1)
         repetidos = int(chaves.duplicated(keep="last").sum())
-        combinado = combinado.loc[~chaves.duplicated(keep="last")].reset_index(drop=True)
+        # Em arquivos mistos, a última O.S. vence, mas um endereço vazio no
+        # arquivo posterior não apaga o último endereço conhecido do lote.
+        enderecos_preenchidos = {}
+        for chave, endereco in zip(chaves, combinado["Endereço"]):
+            valor = limpar_valor(endereco)
+            if valor:
+                enderecos_preenchidos[chave] = valor
+        combinado = combinado.loc[~chaves.duplicated(keep="last")].copy()
+        ultimas_chaves = chaves.loc[combinado.index]
+        combinado["Endereço"] = [
+            limpar_valor(valor) or enderecos_preenchidos.get(chave, "")
+            for chave, valor in zip(ultimas_chaves, combinado["Endereço"])
+        ]
+        combinado = combinado.reset_index(drop=True)
     else:
         # A política de atualização dos eventos já existentes é preservar o
         # campo anterior quando o novo vier vazio. Reproduz essa regra entre
@@ -1143,7 +1206,19 @@ def upsert_pontos(df_novo):
         for _, r in atual.iterrows():
             mapa[chave_ponto(r)] = r.to_dict()
         for _, r in novo.iterrows():
-            mapa[chave_ponto(r)] = r.to_dict()
+            chave = chave_ponto(r)
+            entrada = r.to_dict()
+            anterior = mapa.get(chave)
+            if anterior is not None:
+                # Não apagar endereço já conhecido se a próxima exportação
+                # não trouxer a coluna ou apresentar a célula vazia.
+                if not limpar_valor(entrada.get("Endereço", "")):
+                    entrada["Endereço"] = limpar_valor(anterior.get("Endereço", ""))
+                # Preservar também campos extras preexistentes na aba PONTOS.
+                for campo in colunas:
+                    if campo not in CABECALHO_PONTOS and not limpar_valor(entrada.get(campo, "")):
+                        entrada[campo] = limpar_valor(anterior.get(campo, ""))
+            mapa[chave] = entrada
         final = pd.DataFrame(list(mapa.values()), columns=colunas)
 
     # Padroniza as coordenadas de O.S. para texto decimal com ponto antes
@@ -2139,6 +2214,7 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
                 f"O.S.: {r.get('Nº da O.S','')}<br>"
                 f"<b>Matrícula:</b> {r.get('Matrícula','')}<br>"
                 f"<b>Bairro:</b> {r.get('Bairro','')}<br>"
+                f"<b>Endereço:</b> {html_escape(str(r.get('Endereço', '') or ''))}<br>"
                 f"<b>Status:</b> {r.get('Status OS','')}<br>"
                 f"<b>Serviço:</b> {r.get('Serviço Executado','')}<br>"
                 f"<b>Classificação:</b> {classificacao}",
