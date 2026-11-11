@@ -422,6 +422,8 @@ def backup_drive():
         raise ErroBackupDiagnostico(
             "Google Drive: falha na criacao do arquivo (" + _codigo_google_drive(exc) + ")."
         ) from None
+    except ErroBackupDiagnostico:
+        raise
     except Exception as exc:
         # Nao expor mensagem de cliente OAuth, arquivo local ou HTTP para logs.
         raise ErroBackupDiagnostico(
