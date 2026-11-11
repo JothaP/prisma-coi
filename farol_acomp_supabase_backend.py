@@ -214,3 +214,41 @@ def editar(evento_id, versao_esperada, dados: dict, movimentacao: str) -> dict:
         raise FalhaAcompanhamentoSupabase("Edição sem confirmação da nova versão.")
     limpar_cache()
     return resultado
+
+
+def recuperar_vinculo(chave_anterior: str, evento_id: str, contexto: dict) -> dict:
+    """Acrescenta vínculo à ficha existente sem substituir o vínculo histórico.
+
+    Só deve ser chamado após confirmação explícita no Módulo 3; a função SQL
+    valida usuário, município, interseção de O.S. e concorrência.
+    """
+    autor = _autor("editar")
+    if not isinstance(contexto, dict) or not isinstance(contexto.get("os"), (list, tuple, set)):
+        raise ValueError("Contexto da concentração inválido para recuperação.")
+    nova_chave = str(contexto.get("chave", "")).strip()
+    if nova_chave == str(chave_anterior).strip():
+        raise ValueError("A concentração já possui a chave original.")
+    dados_contexto = {
+        "chave": nova_chave,
+        "municipio": str(contexto.get("municipio", "")).strip(),
+        "bairros": str(contexto.get("bairros", "")).strip(),
+        "latitude": str(contexto.get("latitude", "")),
+        "longitude": str(contexto.get("longitude", "")),
+        "os_origem": ";".join(sorted({
+            str(item).strip() for item in contexto["os"] if str(item).strip()
+        })),
+    }
+    resposta = _request(
+        "POST", "/rest/v1/rpc/farol_acomp_recuperar_vinculo_tx",
+        dados={
+            "p_chave_anterior": str(chave_anterior).strip(),
+            "p_evento_id": str(evento_id).strip(),
+            "p_contexto": dados_contexto,
+            "p_autor": autor,
+        },
+    )
+    if (not isinstance(resposta, dict) or str(resposta.get("id")) != str(evento_id)
+            or str(resposta.get("chave")) != nova_chave):
+        raise FalhaAcompanhamentoSupabase("Recuperação sem confirmação de vínculo.")
+    limpar_cache()
+    return resposta
