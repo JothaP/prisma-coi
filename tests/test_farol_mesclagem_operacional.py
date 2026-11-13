@@ -17,6 +17,7 @@ SRC=ROOT/"farol_mesclagem_operacional.py"
 ARVORE=ast.parse(SRC.read_text(encoding="utf-8"), filename=str(SRC))
 FUNCOES={
     "normalizar","chave_evento","chave_acompanhamento_mesclado",
+    "nome_concentracao_mesclada",
     "validar_poligono","extrair_desenho_folium","contagem_no_poligono",
     "aplicar_mesclas","eventos_e_concentracoes",
 }
@@ -103,7 +104,7 @@ class TestMerge(unittest.TestCase):
         cc,pp=func("aplicar_mesclas")(c,p,[mescla(poligono())])
         self.assertEqual(len(cc),2)
         self.assertEqual(len(pp),9)
-        reg=cc[cc["ID_CONCENTRACAO"]=="THE M000123"].iloc[0]
+        reg=cc[cc["ID_CONCENTRACAO"]=="THE C001, THE C002"].iloc[0]
         self.assertEqual(reg["QTD_OS"],6)
         self.assertEqual(reg["QTD_MATRICULAS"],6)
         self.assertEqual(reg["CHAVE_MESCLA"],"c"*32)
@@ -132,7 +133,7 @@ class TestMerge(unittest.TestCase):
         self.assertIn("last_active_drawing",modulo)
         self.assertIn("renderizar_painel_mescla(",modulo)
         self.assertIn("CHAVE_MESCLA",modulo)
-        self.assertIn("farol_salvar_mescla_tx",auxiliar)
+        self.assertIn("farol_incorporar_mescla_tx",auxiliar)
         self.assertIn("farol_mesclas_operacionais ENABLE ROW LEVEL SECURITY",sql)
         self.assertIn("INSERT INTO public.prisma_auditoria",sql)
         self.assertIn("cardinality(v_fichas),0)>1",sql)
