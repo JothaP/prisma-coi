@@ -668,9 +668,26 @@ acesso_teste = tem_acesso_modulo("teste")
 # Os cartões dos módulos em manutenção são desabilitados para usuários
 # comuns, sem retirar as permissões que já possuem no cadastro.
 bloqueios = {}
+avisos_programados = {}
 if perfil_interno != "admin":
     for modulo_codigo in [str(n) for n in range(1, 10)] + ["teste"]:
-        bloqueios[modulo_codigo] = situacao(modulo_codigo)[0]
+        bloqueios[modulo_codigo], avisos_programados[modulo_codigo] = situacao(modulo_codigo)
+    avisos_exibidos = []
+    for modulo_codigo, aviso in avisos_programados.items():
+        if aviso and aviso.get("escopo") == "modulo":
+            nome = next((m["titulo"] for m in []), None)
+            titulo = {
+                "1": "Baixa Pressão", "2": "Mapeamento de Pressão",
+                "3": "Farol Operacional", "4": "Ferramentas Operacionais",
+                "5": "Cadastros e Consultas", "6": "Ferramentas Adicionais",
+                "7": "Relatórios Integrados", "8": "Consulta Operacional",
+                "9": "Gestão de Ativos", "teste": "Ambiente de Teste",
+            }.get(modulo_codigo, modulo_codigo)
+            avisos_exibidos.append(f"{titulo}: início "
+                + str(aviso.get("inicio", ""))[:16].replace("T", " ")
+                + " (horário da fonte); retorno: " + texto_fim(aviso))
+    if avisos_exibidos:
+        st.info("🛠️ Manutenções próximas — " + " | ".join(avisos_exibidos))
 
 # A posição e os destinos são os mesmos do Hub anterior.
 MODULOS = [
