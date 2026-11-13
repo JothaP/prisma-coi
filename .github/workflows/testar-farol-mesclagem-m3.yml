@@ -6,6 +6,7 @@ on:
       - 'pages/3_Farol_Operacional.py'
       - 'farol_mesclagem_operacional.py'
       - 'sql/10_mesclagem_concentracoes_evento_farol.sql'
+      - 'sql/farol_desfazer_mescla_operacional.sql'
       - 'tests/test_farol_mesclagem_operacional.py'
       - '.github/workflows/testar-farol-mesclagem-m3.yml'
   workflow_dispatch:
