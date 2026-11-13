@@ -170,10 +170,11 @@ if enviar:
                 f"{inicio_confirmado} até {fim_confirmado} "
                 f"(horário de Teresina)."
             )
-            # Não modificar session_state do checkbox após a renderização:
-            # Streamlit não permite alterar o estado de um widget já montado.
+            # Na próxima interação exige uma nova confirmação, sem alterar
+            # o valor do checkbox após ele já ter sido renderizado.
+            st.session_state["prisma_man_ultima_previa"] = None
     except (ErroPRISMA, ValueError) as erro:
-        st.error(f"Não foi possível salvar a manutenção: {erro}")
+        st.error(f"Problema ao registrar ou conferir a manutenção: {erro}")
 
 st.divider()
 st.subheader("Manutenções registradas")
