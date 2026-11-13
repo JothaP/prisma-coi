@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 FONTE = ROOT / "prisma_manutencao.py"
 tree = ast.parse(FONTE.read_text(encoding="utf-8"))
 names = {"_horario", "_visiveis_para_modulo", "situacao", "texto_fim",
-         "mensagem_publica", "status_historico"}
+         "mensagem_publica", "status_historico", "texto_inicio",
+         "descricao_abrangencia", "avisos_publicos", "assinatura_avisos"}
 selected = [x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name in names]
 assert {x.name for x in selected} == names
 now = datetime(2026, 11, 13, 14, 0, tzinfo=timezone.utc)
@@ -18,6 +19,7 @@ amb = {
     "datetime": datetime, "timedelta": timedelta, "timezone": timezone,
     "FUSO": ZoneInfo("America/Fortaleza"),
     "AVISO_ANTECEDENCIA": timedelta(minutes=30),
+    "MODULOS": {"3": "Farol Operacional", "8": "Consulta Operacional"},
     "consultar_manutencoes": lambda: data,
 }
 exec(compile(ast.Module(body=selected, type_ignores=[]), str(FONTE), "exec"), amb)
@@ -63,6 +65,36 @@ class TesteManutencao(unittest.TestCase):
         self.assertEqual(amb["situacao"]("8", agora=now+timedelta(minutes=25))[0]["id"], 6)
         self.assertIsNone(amb["situacao"]("8", agora=now+timedelta(minutes=51))[0])
 
+    def test_aviso_desde_o_agendamento_independente_da_janela_30min(self):
+        data.extend([
+            registro(10, "global", None, now+timedelta(days=3),
+                     now+timedelta(days=3,hours=2,minutes=30)),
+            registro(11, "modulo", "3", now+timedelta(days=4),
+                     now+timedelta(days=4,hours=1)),
+        ])
+        anteriores = amb["avisos_publicos"](agora=now)
+        self.assertEqual({r["id"] for _,r in anteriores}, {10,11})
+        self.assertTrue(all(status=="agendada" for status,_ in anteriores))
+        self.assertEqual(
+            amb["avisos_publicos"](agora=now+timedelta(days=3,minutes=-20))[0][0],
+            "iminente"
+        )
+        self.assertEqual(
+            amb["avisos_publicos"](agora=now+timedelta(days=3,minutes=20))[0][0],
+            "em_andamento"
+        )
+        self.assertEqual(amb["descricao_abrangencia"](data[1]),"Farol Operacional")
+        self.assertIn("2026", amb["texto_inicio"](data[0]))
+
+    def test_assinatura_detecta_novo_agendamento_e_cancelamento(self):
+        primeira = amb["assinatura_avisos"](agora=now)
+        data.append(registro(9,"modulo","8",now+timedelta(days=4),
+                             now+timedelta(days=4,hours=1)))
+        segunda = amb["assinatura_avisos"](agora=now)
+        self.assertNotEqual(primeira, segunda)
+        data.clear()
+        self.assertEqual(amb["assinatura_avisos"](agora=now), primeira)
+
     def test_ate_encerramento_manual(self):
         data.append(registro(7, "global", None, now-timedelta(minutes=2), None))
         self.assertEqual(amb["situacao"]("2", agora=now+timedelta(days=10))[0]["id"], 7)
@@ -88,6 +120,15 @@ class TesteManutencao(unittest.TestCase):
         self.assertNotIn("99_Migracao_Acompanhamento.py", hub)
         self.assertFalse((ROOT / "pages" / "99_Migracao_Acompanhamento.py").exists())
         self.assertIn("st.form", page)
+        self.assertIn('format="DD/MM/YYYY"', page)
+        self.assertIn('key="prisma_man_data_inicio"', page)
+        self.assertIn('key="prisma_man_hora_inicio"', page)
+        self.assertIn('key="prisma_man_data_fim"', page)
+        self.assertIn('key="prisma_man_hora_fim"', page)
+        self.assertIn("assinatura_previa", page)
+        self.assertIn("confirmado_banco", page)
+        self.assertIn("renderizar_avisos_publicos()", hub)
+        self.assertIn("monitorar_avisos_login()", hub)
         self.assertIn("prisma_auditoria", sql)
         self.assertIn("ENABLE ROW LEVEL SECURITY", sql)
         self.assertIn("service_role", sql)
