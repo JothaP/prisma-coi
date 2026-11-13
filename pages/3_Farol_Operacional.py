@@ -2016,11 +2016,9 @@ def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
     }
     geometria_por_localidade = {}
     for poligono in (bairros or []):
-        chave = (
-            normalizar_municipio(poligono.get("municipio", "")),
-            limpar_nome_bairro(poligono.get("nome_normalizado") or poligono.get("nome", "")),
-        )
-        geometria_por_localidade.setdefault(chave, []).append(poligono)
+        cidade_poligono = normalizar_municipio(poligono.get("municipio", ""))
+        for nome in nomes_reconhecidos_feicao(poligono):
+            geometria_por_localidade.setdefault((cidade_poligono, nome), []).append(poligono)
     registros = []
     for indice_evento, evento in df_eventos.reset_index(drop=True).iterrows():
         cidade = normalizar_municipio(evento.get("Cidade", ""))
