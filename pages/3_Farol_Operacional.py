@@ -4054,6 +4054,11 @@ def modal_eventos():
     tabela["Critérios de associação"] = [
         str(resumo_criterios.get(i, "")) for i in indices_visiveis
     ]
+    tabela["Abrangência territorial"] = [
+        "Todo o município" if evento_abrange_municipio(valor)
+        else "Bairros ou subáreas informados"
+        for valor in eventos_visiveis["Áreas Impactadas"]
+    ]
     tabela = tabela.reset_index(drop=True)
 
     if PODE_EDITAR_FAROL:
@@ -4099,24 +4104,73 @@ def modal_eventos():
             st.caption(
                 f"Evento selecionado: {registro.get('Protocolo') or 'Sem protocolo'} · "
                 f"{registro.get('Cidade', '')} · {registro.get('Serviço', '')}. "
-                "A correção de Áreas Impactadas será preservada nas próximas importações."
+                "A abrangência escolhida será preservada nas próximas importações."
             )
+            # O tipo explícito é salvo em Áreas Impactadas como valor
+            # canônico, sem alterar o cabeçalho da planilha EVENTOS.
+            # Assim, a correção protegida sobrevive à próxima importação.
+            area_original = str(registro.get("Áreas Impactadas", "") or "")
+            opcoes_abrangencia = [
+                "Bairros ou subáreas informados",
+                "Todo o município",
+            ]
+            abrangencia_selecionada = st.radio(
+                "Abrangência territorial do evento",
+                opcoes_abrangencia,
+                index=1 if evento_abrange_municipio(area_original) else 0,
+                key=f"farol_abrangencia_editada_{indice_edicao}",
+                help=(
+                    "Somente 'Todo o município' permite usar o município inteiro "
+                    "na associação das O.S. Sem essa declaração, os bairros e "
+                    "subáreas devem coincidir com as Áreas Impactadas."
+                ),
+            )
+            todo_municipio = abrangencia_selecionada == "Todo o município"
             with st.form(f"farol_edicao_evento_{indice_edicao}"):
                 area_editada = st.text_area(
-                    "Áreas Impactadas",
-                    value=str(registro.get("Áreas Impactadas", "") or ""),
+                    "Bairros ou subáreas impactados",
+                    value=("" if evento_abrange_municipio(area_original)
+                           else area_original),
                     height=110,
-                    help="Somente este campo pode ser alterado.",
+                    disabled=todo_municipio,
+                    key=(
+                        f"farol_areas_impactadas_editadas_{indice_edicao}_"
+                        + ("municipal" if todo_municipio else "local")
+                    ),
+                    help=(
+                        "Liste as localidades separadas por vírgulas. "
+                        "Sem polígonos, a associação utiliza o bairro exato "
+                        "cadastrado na O.S. ou a localidade completa no endereço."
+                    ),
                 )
-                salvar = st.form_submit_button("💾 Salvar área impactada", width="stretch")
+                st.caption(
+                    "Abrangência municipal associa somente O.S. do mesmo município "
+                    "dentro da janela temporal, mesmo sem polígonos."
+                    if todo_municipio else
+                    "Bairros ou subáreas são comparados pelo nome exato, "
+                    "com validação geográfica quando houver polígonos."
+                )
+                salvar = st.form_submit_button(
+                    "💾 Salvar abrangência territorial", width="stretch"
+                )
             if salvar:
                 try:
-                    atualizar_evento_cadastrado(
-                        indice_edicao, registro, {"Áreas Impactadas": area_editada}
-                    )
-                    st.session_state.pop("farol_evento_em_edicao", None)
-                    st.success("Evento atualizado. O mapa e as associações serão recalculados.")
-                    st.rerun()
+                    areas_salvar = "Todo o município" if todo_municipio else area_editada.strip()
+                    if not todo_municipio and not areas_salvar:
+                        st.error(
+                            "Informe os bairros ou subáreas impactados. Para "
+                            "atingir toda a cidade, selecione 'Todo o município'."
+                        )
+                    else:
+                        atualizar_evento_cadastrado(
+                            indice_edicao, registro, {"Áreas Impactadas": areas_salvar}
+                        )
+                        st.session_state.pop("farol_evento_em_edicao", None)
+                        st.success(
+                            "Abrangência atualizada. O mapa e as associações "
+                            "territoriais e temporais serão recalculados."
+                        )
+                        st.rerun()
                 except Exception as erro:
                     st.error(f"Não foi possível salvar o evento: {erro}")
     else:
@@ -4148,8 +4202,11 @@ def modal_eventos():
             areas_diag = extrair_bairros_evento(valor_areas, cidade_diag, bairros)
             catalogo_diag = indice_nomes_bairros(bairros, cidade_diag)
             if municipal_diag:
-                st.info("Evento declarado para todo o município. Os polígonos existentes são usados como referência.")
-            if not areas_diag:
+                st.success(
+                    "Abrangência declarada: todo o município. O Farol considera "
+                    "as O.S. da cidade dentro da janela temporal, mesmo sem polígonos."
+                )
+            elif not areas_diag:
                 st.warning(
                     "Nenhum bairro ou subárea foi extraído do campo Áreas Impactadas. "
                     "Se as localidades estiverem apenas na mensagem do WhatsApp ou na "
@@ -4194,7 +4251,9 @@ def modal_eventos():
                 else:
                     st.warning(
                         "Nenhum polígono foi carregado para este município. "
-                        "Confira os arquivos de geodados/municipios."
+                        "A associação automática por bairro cadastrado, "
+                        "endereço ou abrangência municipal declarada continua "
+                        "disponível. Para exibir limites, confira geodados/municipios."
                     )
 
     # O gráfico utiliza APENAS a cidade selecionada, nunca mistura municípios.
