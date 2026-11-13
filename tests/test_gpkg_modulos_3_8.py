@@ -144,8 +144,12 @@ class LeituraGpkgTeresina(unittest.TestCase):
         self.assertTrue(all(not b["geometria"].is_empty for b in self.m8))
 
     def test_subarea_da_exportacao_preservada(self):
-        self.assertIn("Vila Inglesa", {b["nome"] for b in self.m3})
-        self.assertIn("Vila Inglesa", {b["nome"] for b in self.m8})
+        self.assertIn("VILA INGLESA", {
+            g3["limpar_nome_bairro"](b["nome"]) for b in self.m3
+        })
+        self.assertIn("VILA INGLESA", {
+            g3["limpar_nome_bairro"](b["nome"]) for b in self.m8
+        })
 
     def test_subarea_do_campo_name_e_bairro_pai_identificados(self):
         with tempfile.TemporaryDirectory() as diretorio:
@@ -159,14 +163,14 @@ class LeituraGpkgTeresina(unittest.TestCase):
             with sqlite3.connect(arquivo) as conexao:
                 conexao.execute(
                     "INSERT INTO regioes(geom,NM_BAIRRO,NM_MUN,name) VALUES (?,?,?,?)",
-                    (blob, "Bairro Pai", "Teresina", "Subárea Nova"),
+                    (blob, "Jardim Europa", "Teresina", "Reserva Aldebaran"),
                 )
                 conexao.commit()
             registros = g3["carregar_gpkg"](str(arquivo))
-        entrada = next(x for x in registros if x["nome"] == "Subárea Nova")
+        entrada = next(x for x in registros if x["nome"] == "Reserva Aldebaran")
         self.assertEqual(entrada["tipo_area"], "Subárea")
-        self.assertIn("BAIRRO PAI", g3["nomes_reconhecidos_feicao"](entrada))
-        self.assertIn("SUBAREA NOVA", g3["nomes_reconhecidos_feicao"](entrada))
+        self.assertIn("JARDIM EUROPA", g3["nomes_reconhecidos_feicao"](entrada))
+        self.assertIn("RESERVA ALDEBARAN", g3["nomes_reconhecidos_feicao"](entrada))
 
     def test_modulo_3_geojson_contem_todas_as_feicoes(self):
         regs = g3["preparar_poligonos_para_mapa"](self.m3)
