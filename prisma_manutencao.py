@@ -185,11 +185,13 @@ def verificar_manutencao(modulo=None):
         st.stop()
     if bloqueio:
         exibir_tela_manutencao(bloqueio, modulo=modulo)
-    if aviso:
-        area = "toda a plataforma" if aviso["escopo"] == "global" else MODULOS.get(str(aviso["modulo"]), "este módulo")
+    if aviso and modulo is not None:
+        # No Hub o banner unificado é renderizado após o cabeçalho.
+        # Nos módulos individuais permanece o lembrete operacional.
+        area = descricao_abrangencia(aviso)
         st.info(
             f"🛠️ Manutenção programada para {area} a partir de "
-            f"{_horario(aviso['inicio']).astimezone(FUSO):%d/%m/%Y às %H:%M}. "
+            f"{texto_inicio(aviso)}. "
             f"Previsão de retorno: {texto_fim(aviso)}."
         )
 
@@ -207,41 +209,41 @@ def monitorar_liberacao(modulo=None):
 
 @st.fragment(run_every=f"{ATUALIZACAO_SEGUNDOS}s")
 def monitorar_manutencao(modulo=None):
-    """Enquanto uma aba permanece aberta, detecta bloqueios e restaurações."""
-    if str(st.session_state.get("perfil") or "").strip().lower() == "admin":
+    """Atualiza avisos e cartões em sessões abertas; admin segue com acesso."""
+    eh_admin = str(st.session_state.get("perfil") or "").strip().lower() == "admin"
+    if eh_admin and modulo is not None:
         return
     try:
-        ativo, aviso = situacao(modulo)
-    except ErroPRISMA:
-        # Força passagem pelo guard principal, que apresenta o erro seguro.
-        st.rerun(scope="app")
-        return
-    if ativo:
-        st.rerun(scope="app")
-    if aviso:
-        # Atualiza uma única vez quando a janela entrar nos 30 minutos
-        # anteriores ao início, sem fazer reruns infinitos.
-        chave = "prisma_aviso_manutencao_" + str(modulo)
-        identificador = str(aviso.get("id"))
-        if st.session_state.get(chave) != identificador:
-            st.session_state[chave] = identificador
-            st.rerun(scope="app")
-
-    if modulo is None:
-        # No Hub os cartões de TODOS os módulos devem atualizar ao entrar
-        # ou sair de manutenção, mesmo sem interação do usuário.
-        agora = datetime.now(timezone.utc)
-        bloqueados = tuple(sorted(
-            str(r["id"]) for r in consultar_manutencoes()
-            if r.get("escopo") == "modulo"
-            and (_horario(r.get("inicio")) is not None)
-            and _horario(r["inicio"]) <= agora
-            and (_horario(r.get("fim")) is None or agora < _horario(r.get("fim")))
-        ))
-        chave = "prisma_estado_bloqueios_hub"
+        if not eh_admin:
+            ativo, _ = situacao(modulo)
+            if ativo:
+                # Um novo bloqueio tem prioridade sobre qualquer aviso.
+                st.rerun(scope="app")
+                return
+        if modulo is None:
+            # Inclui global + todos os módulos, sem depender dos 30 minutos.
+            atual = assinatura_avisos()
+            chave = "prisma_assinatura_avisos_hub"
+        else:
+            # Nesta aba só interessem global + o módulo corrente.
+            avisos = [
+                (estado, registro) for estado, registro in avisos_publicos()
+                if (registro.get("escopo") == "global" or
+                    str(registro.get("modulo")) == str(modulo))
+            ]
+            atual = tuple(
+                (str(r.get("id")), estado, str(r.get("inicio")),
+                 str(r.get("fim")), str(r.get("mensagem")))
+                for estado, r in avisos
+            )
+            chave = "prisma_assinatura_avisos_modulo_" + str(modulo)
         anterior = st.session_state.get(chave)
-        st.session_state[chave] = bloqueados
-        if anterior is not None and anterior != bloqueados:
+        st.session_state[chave] = atual
+        if anterior is not None and anterior != atual:
+            st.rerun(scope="app")
+    except ErroPRISMA:
+        # Retorna ao guard da aplicação, que impede acesso sem confirmação.
+        if not eh_admin:
             st.rerun(scope="app")
 
 
