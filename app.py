@@ -14,6 +14,9 @@ from auth import (
     fazer_logout,
     tem_acesso_modulo,
 )
+from prisma_manutencao import (
+    aviso_login, verificar_manutencao, monitorar_manutencao, situacao, texto_fim,
+)
 
 
 # ============================================================
@@ -445,6 +448,7 @@ def definir_etapa_login(etapa: str):
 if not verificar_autenticacao():
     aplicar_estilo_sai()
     aplicar_layout_login_prisma()
+    aviso_login()
     if "prisma_etapa_login" not in st.session_state:
         st.session_state["prisma_etapa_login"] = "Entrar"
     # O formulário somente pode enviar dados quando as credenciais do Supabase
@@ -617,6 +621,10 @@ if not verificar_autenticacao():
 # ============================================================
 # HUB CENTRAL — SOMENTE APRESENTAÇÃO RENOVADA
 # ============================================================
+# Bloqueio global precede cards e ações. Para sessões já abertas, o pulso
+# verifica a janela mesmo sem clique ou recarga manual.
+verificar_manutencao(None)
+monitorar_manutencao(None)
 if "modo_escuro_hub" not in st.session_state:
     st.session_state.modo_escuro_hub = False
 
@@ -657,6 +665,12 @@ st.markdown(
 # Autorização original: todas as permissões continuam sendo lidas de auth.py.
 acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 10)}
 acesso_teste = tem_acesso_modulo("teste")
+# Os cartões dos módulos em manutenção são desabilitados para usuários
+# comuns, sem retirar as permissões que já possuem no cadastro.
+bloqueios = {}
+if perfil_interno != "admin":
+    for modulo_codigo in [str(n) for n in range(1, 10)] + ["teste"]:
+        bloqueios[modulo_codigo] = situacao(modulo_codigo)[0]
 
 # A posição e os destinos são os mesmos do Hub anterior.
 MODULOS = [
@@ -739,11 +753,15 @@ def exibir_cartao(modulo):
     autorizado = bool(modulo["autorizado"])
     ambiente = modulo["numero"] == "teste"
     indice = str(modulo["numero"])
+    bloqueado_manutencao = bloqueios.get(indice)
+    liberado = autorizado and not bloqueado_manutencao
     rotulo = "AMBIENTE DE TESTE" if ambiente else f"MÓDULO {indice.zfill(2)}"
-    status = ("Acesso restrito" if autorizado else "Sem permissão") if ambiente else (
-        "Disponível" if autorizado else "Acesso bloqueado"
+    status = (
+        "Em manutenção" if bloqueado_manutencao
+        else ("Acesso restrito" if autorizado else "Sem permissão") if ambiente
+        else ("Disponível" if autorizado else "Acesso bloqueado")
     )
-    status_classe = "" if autorizado else " is-locked"
+    status_classe = "" if liberado else " is-locked"
     with st.container(border=True, key=f"sai_card_{indice}"):
         st.markdown(
             '<div class="sai-card-top">'
@@ -761,9 +779,11 @@ def exibir_cartao(modulo):
             type="primary" if autorizado else "secondary",
             use_container_width=True,
             key=modulo["chave"],
-            disabled=not autorizado,
+            disabled=not liberado,
         ):
             st.switch_page(modulo["pagina"])
+        if bloqueado_manutencao:
+            st.caption("Restabelecimento: " + texto_fim(bloqueado_manutencao))
 
 
 # Módulos 8 e 9 encerram a terceira linha; Ambiente de Teste inicia a quarta.
@@ -785,8 +805,12 @@ if tem_acesso_modulo("gestao") or perfil_interno == "admin":
         if st.button("Gestão de Acessos — Usuários e permissões", type="primary", use_container_width=True):
             st.switch_page("pages/9_Gestao_de_Acessos.py")
     if perfil_interno == "admin":
-        if st.button("Migração do Farol para Supabase — Etapa 1", key="abrir_migracao_farol_supabase", use_container_width=True):
-            st.switch_page("pages/99_Migracao_Acompanhamento.py")
+        if st.button(
+            "🛠️ Controle de Manutenção — Geral e por Módulo",
+            key="abrir_controle_manutencao_prisma",
+            use_container_width=True,
+        ):
+            st.switch_page("pages/11_Controle_de_Manutencao.py")
 
 st.markdown(
     '<div class="sai-footer">PRISMA — Plataforma de Recursos Integrados para Suporte, Monitoramento e Análises'
