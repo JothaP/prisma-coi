@@ -15,9 +15,8 @@ from auth import (
     tem_acesso_modulo,
 )
 from prisma_manutencao import (
-    aviso_login, verificar_manutencao, monitorar_manutencao, situacao, texto_fim,
-    MODULOS as NOMES_MODULOS_MANUTENCAO, FUSO as FUSO_MANUTENCAO,
-    _horario as _horario_manutencao,
+    aviso_login, monitorar_avisos_login, verificar_manutencao,
+    monitorar_manutencao, situacao, texto_fim, renderizar_avisos_publicos,
 )
 
 
@@ -451,6 +450,7 @@ if not verificar_autenticacao():
     aplicar_estilo_sai()
     aplicar_layout_login_prisma()
     aviso_login()
+    monitorar_avisos_login()
     if "prisma_etapa_login" not in st.session_state:
         st.session_state["prisma_etapa_login"] = "Entrar"
     # O formulário somente pode enviar dados quando as credenciais do Supabase
@@ -670,22 +670,13 @@ acesso_teste = tem_acesso_modulo("teste")
 # Os cartões dos módulos em manutenção são desabilitados para usuários
 # comuns, sem retirar as permissões que já possuem no cadastro.
 bloqueios = {}
-avisos_programados = {}
 if perfil_interno != "admin":
     for modulo_codigo in [str(n) for n in range(1, 10)] + ["teste"]:
-        bloqueios[modulo_codigo], avisos_programados[modulo_codigo] = situacao(modulo_codigo)
-    avisos_exibidos = []
-    for modulo_codigo, aviso in avisos_programados.items():
-        if aviso and aviso.get("escopo") == "modulo":
-            titulo = NOMES_MODULOS_MANUTENCAO.get(modulo_codigo, modulo_codigo)
-            inicio_local = _horario_manutencao(aviso["inicio"]).astimezone(
-                FUSO_MANUTENCAO
-            ).strftime("%d/%m/%Y às %H:%M")
-            avisos_exibidos.append(
-                f"{titulo}: início {inicio_local}; retorno: {texto_fim(aviso)}"
-            )
-    if avisos_exibidos:
-        st.info("🛠️ Manutenções próximas — " + " | ".join(avisos_exibidos))
+        bloqueios[modulo_codigo] = situacao(modulo_codigo)[0]
+
+# Um único centro de avisos para manutenções globais e específicas.
+# Exibe desde o agendamento, também para administradores.
+renderizar_avisos_publicos()
 
 # A posição e os destinos são os mesmos do Hub anterior.
 MODULOS = [
