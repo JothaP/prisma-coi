@@ -55,6 +55,12 @@ from farol_graficos_temporarios import (
 )
 from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
 from farol_acomp_supabase_backend import fonte_supabase
+from farol_vinculos_os_manuais import (
+    listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
+    vincular_os_manual, desfazer_vinculo_os_manual,
+    aplicar_vinculos_manuais, normalizar_os,
+)
+from farol_mesclagem_operacional import chave_evento
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 from farol_mesclagem_operacional import (
     CHAVE_MODO as CHAVE_MODO_MESCLAGEM,
@@ -3434,6 +3440,10 @@ def gerar_pdf_concentracao(concentracao, os_grupo, ativos, eventos_relacionados,
     historia.append(p(resumo, normal))
     historia.append(p(f"Centro: {float(concentracao['LATITUDE']):.6f}, {float(concentracao['LONGITUDE']):.6f}", normal))
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
+    manuais = listar_vinculos_os_manuais(os_grupo.get("Nº da O.S", []))
+    vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+        vinculadas, nao_vinculadas, manuais
+    )
     colunas = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS", "Dt. Emissão", "Serviço Executado"]
     for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
                              ("Ordens não vinculadas", nao_vinculadas)):
@@ -3498,14 +3508,168 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         f"Centro geográfico: {float(concentracao['LATITUDE']):.6f}, "
         f"{float(concentracao['LONGITUDE']):.6f} | Raio operacional: {raio} m"
     )
+    try:
+        manuais = listar_vinculos_os_manuais(os_grupo.get("Nº da O.S", []))
+    except Exception as erro:
+        st.error(f"Não foi possível conferir os vínculos manuais no Supabase: {erro}")
+        return
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
+    vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+        vinculadas, nao_vinculadas, manuais
+    )
     colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Endereço",
                   "Status OS", "Dt. Emissão", "Serviço Executado",
                   "Evento(s) vinculado(s)", "Critério do vínculo"]
-    for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
-                             ("Ordens não vinculadas", nao_vinculadas)):
-        st.markdown(f"#### {nome_grupo} ({len(base)})")
-        st.dataframe(base.reindex(columns=colunas_os).fillna(""), width="stretch", hide_index=True)
+    st.markdown(f"#### Ordens vinculadas aos eventos ({len(vinculadas)})")
+    st.dataframe(
+        vinculadas.reindex(columns=colunas_os).fillna(""),
+        width="stretch", hide_index=True,
+    )
+    st.markdown(f"#### Ordens não vinculadas ({len(nao_vinculadas)})")
+    habilitar_manual = bool(PODE_EDITAR_FAROL and fonte_supabase())
+    selecionadas_os = []
+    if nao_vinculadas.empty or not habilitar_manual:
+        st.dataframe(
+            nao_vinculadas.reindex(columns=colunas_os).fillna(""),
+            width="stretch", hide_index=True,
+        )
+    else:
+        tabela = nao_vinculadas.reindex(columns=colunas_os).fillna("").copy()
+        tabela.insert(0, "Selecionar", False)
+        chave_editor = f"farol_os_manuais_editor_{codigo}"
+        editado = st.data_editor(
+            tabela, key=chave_editor, hide_index=True, width="stretch",
+            disabled=colunas_os,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn(
+                    "Selecionar", help="Marque as O.S. que deseja vincular ao evento.",
+                    default=False,
+                ),
+            },
+        )
+        selecionadas_os = [
+            normalizar_os(v) for v in editado.loc[
+                editado["Selecionar"].fillna(False).astype(bool), "Nº da O.S"
+            ] if normalizar_os(v)
+        ]
+        # O evento é selecionado explicitamente: uma O.S. nunca é ligada
+        # apenas porque está próxima de outra no mesmo grupo.
+        cidades_do_grupo = {
+            normalizar_municipio(v) for v in os_grupo.get("Cidade", []) if str(v).strip()
+        }
+        candidatos = []
+        eventos_vistos = set()
+        if eventos is not None and not eventos.empty:
+            for _, evt in eventos.iterrows():
+                registro = evt.to_dict()
+                cidade_evt = normalizar_municipio(registro.get("Cidade", ""))
+                if cidade_evt not in cidades_do_grupo or not registro.get("Início"):
+                    continue
+                chave_evt = chave_evento(registro)
+                if chave_evt in eventos_vistos:
+                    continue
+                eventos_vistos.add(chave_evt)
+                candidatos.append(registro)
+        if candidatos:
+            evento_indice = st.selectbox(
+                "Evento ao qual associar as O.S. selecionadas",
+                range(len(candidatos)),
+                format_func=lambda i: (
+                    f"{str(candidatos[i].get('Protocolo', '') or 'Sem protocolo')} — "
+                    f"{str(candidatos[i].get('Serviço', '') or 'Serviço não informado')} — "
+                    f"{str(candidatos[i].get('Início', '') or 'Início não informado')}"
+                )[:220],
+                key=f"farol_os_manuais_evento_{codigo}",
+            )
+            justificativa = st.text_input(
+                "Justificativa para associação manual (opcional)",
+                key=f"farol_os_manuais_justificativa_{codigo}",
+                max_chars=1200,
+            )
+            confirmar = st.checkbox(
+                "Confirmo que as O.S. selecionadas pertencem ao evento escolhido. "
+                "A inclusão ficará identificada como vínculo manual, com auditoria.",
+                key=f"farol_os_manuais_confirmar_{codigo}",
+            )
+            if st.button(
+                f"Vincular {len(set(selecionadas_os))} O.S. selecionada(s) ao evento",
+                type="primary",
+                key=f"farol_os_manuais_salvar_{codigo}",
+                disabled=not selecionadas_os or not confirmar,
+            ):
+                escolhidas = nao_vinculadas.loc[
+                    nao_vinculadas["Nº da O.S"].astype(str).str.strip().str.upper().isin(
+                        set(selecionadas_os)
+                    )
+                ]
+                cidade_evento = normalizar_municipio(candidatos[evento_indice].get("Cidade", ""))
+                if any(
+                    normalizar_municipio(v) != cidade_evento
+                    for v in escolhidas["Cidade"]
+                ):
+                    st.error("Há O.S. de outro município na seleção. Associação bloqueada.")
+                else:
+                    try:
+                        quantidade = vincular_os_manual(
+                            candidatos[evento_indice], selecionadas_os, justificativa
+                        )
+                        st.session_state.pop(f"farol_pdf_individual_{codigo}", None)
+                        st.session_state.pop(chave_editor, None)
+                        st.toast(
+                            f"{quantidade} vínculo(s) manual(is) registrado(s). "
+                            "O PDF deverá ser gerado novamente."
+                        )
+                        st.rerun()
+                    except Exception as erro:
+                        st.error(f"Não foi possível salvar os vínculos: {erro}")
+        else:
+            st.warning(
+                "Não há eventos disponíveis para o município das O.S. "
+                "Importe ou cadastre o evento antes de associar manualmente."
+            )
+
+    # Permite desfazer apenas o que foi associado manualmente; vínculos
+    # territoriais/temporais calculados automaticamente nunca são removidos.
+    manuais_do_grupo = [
+        r for r in manuais
+        if normalizar_os(r.get("numero_os")) in {
+            normalizar_os(x) for x in os_grupo.get("Nº da O.S", [])
+        }
+    ]
+    if manuais_do_grupo:
+        with st.expander(
+            f"Revisar / desfazer vínculos manuais ({len(manuais_do_grupo)})",
+            expanded=False,
+        ):
+            opcoes_remocao = {
+                (str(r.get("evento_chave")), normalizar_os(r.get("numero_os"))): r
+                for r in manuais_do_grupo
+            }
+            selecao_remover = st.multiselect(
+                "Associações manuais a desfazer",
+                list(opcoes_remocao),
+                format_func=lambda k: (
+                    f"O.S. {k[1]} — "
+                    f"{opcoes_remocao[k].get('evento_rotulo') or opcoes_remocao[k].get('protocolo')}"
+                ),
+                key=f"farol_os_manuais_desfazer_{codigo}",
+                disabled=not habilitar_manual,
+            )
+            if st.button(
+                "Desfazer vínculos manuais selecionados",
+                key=f"farol_os_manuais_confirmar_desfazer_{codigo}",
+                disabled=not habilitar_manual or not selecao_remover,
+            ):
+                try:
+                    quantidade = 0
+                    for chave_evt in dict.fromkeys(k[0] for k in selecao_remover):
+                        numeros = [k[1] for k in selecao_remover if k[0] == chave_evt]
+                        quantidade += desfazer_vinculo_os_manual(chave_evt, numeros)
+                    st.session_state.pop(f"farol_pdf_individual_{codigo}", None)
+                    st.toast(f"{quantidade} vínculo(s) manual(is) desfeito(s).")
+                    st.rerun()
+                except Exception as erro:
+                    st.error(f"Não foi possível desfazer os vínculos: {erro}")
     st.markdown("#### Poços / ativos e loggers próximos")
     if ativos.empty:
         st.info("Nenhum equipamento dentro do raio operacional desta concentração.")
