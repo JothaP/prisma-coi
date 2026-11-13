@@ -94,6 +94,69 @@ def mensagem_publica(registro):
     return texto or "A plataforma está temporariamente indisponível para manutenção técnica."
 
 
+def descricao_abrangencia(registro):
+    """Identificação pública da abrangência sem expor motivo administrativo."""
+    if registro.get("escopo") == "global":
+        return "toda a plataforma"
+    return MODULOS.get(str(registro.get("modulo")), "módulo operacional")
+
+
+def texto_inicio(registro):
+    inicio = _horario(registro.get("inicio"))
+    return inicio.astimezone(FUSO).strftime("%d/%m/%Y às %H:%M") if inicio else ""
+
+
+def avisos_publicos(*, agora=None):
+    """Manutenções programadas ou em andamento, desde a criação do agendamento.
+
+    Só consulta o Supabase. Não usa o motivo interno nem a auditoria.
+    """
+    agora = agora or datetime.now(timezone.utc)
+    anuncios = []
+    for r in consultar_manutencoes():
+        ini, fim = _horario(r.get("inicio")), _horario(r.get("fim"))
+        if ini is None or (fim is not None and agora >= fim):
+            continue
+        estado = ("em_andamento" if agora >= ini else
+                  "iminente" if ini-AVISO_ANTECEDENCIA <= agora else "agendada")
+        anuncios.append((estado, r))
+    ordem = {"em_andamento": 0, "iminente": 1, "agendada": 2}
+    return sorted(anuncios, key=lambda par: (ordem[par[0]], _horario(par[1]["inicio"])))
+
+
+def assinatura_avisos(*, agora=None):
+    """Mudanças de agenda e de estado para atualizar sessões abertas sem loops."""
+    return tuple(
+        (str(r.get("id")), estado, str(r.get("escopo")), str(r.get("modulo")),
+         str(r.get("inicio")), str(r.get("fim")), str(r.get("mensagem")))
+        for estado, r in avisos_publicos(agora=agora)
+    )
+
+
+def renderizar_avisos_publicos(*, limite=8):
+    """Comunicados no login e no Hub, visíveis inclusive a administradores."""
+    avisos = avisos_publicos()
+    for estado, r in avisos[:limite]:
+        inicio, fim = texto_inicio(r), texto_fim(r)
+        area = descricao_abrangencia(r)
+        detalhe = str(r.get("mensagem") or "").strip()
+        prefixo = (
+            "🛠️ Manutenção em andamento" if estado == "em_andamento" else
+            "⚠️ Manutenção próxima (menos de 30 minutos)" if estado == "iminente" else
+            "🛠️ Manutenção programada"
+        )
+        texto = (f"{prefixo} — {area}. Início: {inicio}. "
+                 f"Retorno previsto: {fim}. Horário de Teresina (UTC−3).")
+        if detalhe:
+            texto += " " + detalhe
+        if estado == "agendada":
+            st.info(texto)
+        else:
+            st.warning(texto)
+    if len(avisos) > limite:
+        st.caption(f"Há mais {len(avisos)-limite} manutenção(ões) na agenda administrativa.")
+
+
 def exibir_tela_manutencao(registro, modulo=None):
     """Renderiza bloqueio, sem expor informações administrativas."""
     st.title("🛠️ PRISMA — Manutenção programada")
@@ -216,8 +279,44 @@ def agendar(escopo, modulo, inicio, fim, motivo, mensagem=""):
     )
     if not isinstance(retorno, int):
         raise ErroPRISMA("O Supabase não confirmou o agendamento.")
+
+    # Lê o registro persistido, em vez de confiar apenas nos valores enviados
+    # à RPC. Se o banco divergir, a interface NÃO informa sucesso incorreto.
+    try:
+        resposta = _request(
+            "GET", "/rest/v1/prisma_manutencoes", admin=True,
+            params={
+                "select": "id,escopo,modulo,inicio,fim",
+                "id": f"eq.{retorno}", "limit": "1",
+            },
+        )
+    except ErroPRISMA as erro:
+        raise ErroPRISMA(
+            f"Manutenção #{retorno} criada, mas não foi possível conferir seus horários. "
+            "Consulte a tabela de manutenções antes de tentar novamente."
+        ) from erro
+    if not isinstance(resposta, list) or len(resposta) != 1:
+        raise ErroPRISMA(
+            f"Manutenção #{retorno} criada, mas não retornou na conferência. "
+            "Consulte o histórico antes de criar outra."
+        )
+    confirmado = resposta[0]
+    inicio_persistido = _horario(confirmado["inicio"])
+    fim_persistido = _horario(confirmado.get("fim"))
+    correto = (
+        inicio_persistido == inicio.astimezone(timezone.utc)
+        and fim_persistido == (fim.astimezone(timezone.utc) if fim else None)
+        and confirmado.get("escopo") == escopo
+        and confirmado.get("modulo") == (modulo if escopo == "modulo" else None)
+    )
     consultar_manutencoes.clear()
-    return retorno
+    if not correto:
+        raise ErroPRISMA(
+            f"Manutenção #{retorno} criada, mas os horários ou a abrangência "
+            "gravados divergem dos selecionados. Verifique e cancele o registro "
+            "incorreto antes de criar outro."
+        )
+    return confirmado
 
 
 def cancelar(identificador):
@@ -256,19 +355,22 @@ def status_historico(registro, agora=None):
 
 
 def aviso_login():
-    """Informa a indisponibilidade sem impedir que um admin faça login."""
+    """Avisos de TODAS as modalidades, mesmo para usuários não autenticados."""
     try:
-        ativa, proxima = situacao(None)
+        renderizar_avisos_publicos()
     except ErroPRISMA:
         return
-    if ativa:
-        st.warning(
-            "🛠️ PRISMA em manutenção: " + mensagem_publica(ativa)
-            + " Retorno: " + texto_fim(ativa) + ". "
-              "O acesso técnico de administradores permanece disponível."
-        )
-    elif proxima:
-        st.info(
-            "Manutenção programada para toda a plataforma: "
-            + _horario(proxima["inicio"]).astimezone(FUSO).strftime("%d/%m/%Y às %H:%M")
-        )
+
+
+@st.fragment(run_every=f"{ATUALIZACAO_SEGUNDOS}s")
+def monitorar_avisos_login():
+    """Atualiza comunicados do login sem exigir recarga da página."""
+    try:
+        atual = assinatura_avisos()
+    except ErroPRISMA:
+        return
+    chave = "prisma_assinatura_avisos_login"
+    anterior = st.session_state.get(chave)
+    st.session_state[chave] = atual
+    if anterior is not None and anterior != atual:
+        st.rerun(scope="app")
