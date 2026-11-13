@@ -26,49 +26,51 @@ if st.button("← Voltar ao Hub Central", key="prisma_man_voltar"):
     st.switch_page("app.py")
 
 st.subheader("Criar período de manutenção")
-with st.form("prisma_form_manutencao", clear_on_submit=False):
-    abrangencia = st.radio(
-        "Modalidade", ["Toda a plataforma", "Apenas um módulo"],
-        horizontal=True, key="prisma_man_modalidade",
+# Controles de modalidade e datas fora do formulário: em Streamlit,
+# seleções dentro de form não re-renderizam campos condicionais.
+abrangencia = st.radio(
+    "Modalidade", ["Toda a plataforma", "Apenas um módulo"],
+    horizontal=True, key="prisma_man_modalidade",
+)
+modulo = None
+if abrangencia == "Apenas um módulo":
+    modulo = st.selectbox(
+        "Módulo a suspender", list(MODULOS),
+        format_func=lambda codigo: f"{codigo.upper()} — {MODULOS[codigo]}",
     )
-    modulo = None
-    if abrangencia == "Apenas um módulo":
-        modulo = st.selectbox(
-            "Módulo a suspender", list(MODULOS),
-            format_func=lambda codigo: f"{codigo.upper()} — {MODULOS[codigo]}",
-        )
 
-    modo_inicio = st.radio(
-        "Início", ["Imediato", "Agendar data e horário"],
-        horizontal=True, key="prisma_man_inicio_tipo",
-    )
-    data_inicio = hora_inicio = None
-    if modo_inicio == "Agendar data e horário":
-        ci, ch = st.columns(2)
-        with ci:
-            data_inicio = st.date_input("Data de início", value=agora.date())
-        with ch:
-            hora_inicio = st.time_input(
-                "Horário de início (Teresina)", value=agora.time().replace(second=0, microsecond=0),
-                step=60,
-            )
-    modo_fim = st.radio(
-        "Término", ["Data e horário definidos", "Até encerramento manual"],
-        horizontal=True, key="prisma_man_fim_tipo",
-    )
-    data_fim = hora_fim = None
-    if modo_fim == "Data e horário definidos":
-        ci, ch = st.columns(2)
-        with ci:
-            data_fim = st.date_input(
-                "Data de término", value=(agora + timedelta(hours=1)).date(),
-            )
-        with ch:
-            hora_fim = st.time_input(
-                "Horário de término (Teresina)",
-                value=(agora + timedelta(hours=1)).time().replace(second=0, microsecond=0),
-                step=60,
-            )
+modo_inicio = st.radio(
+    "Início", ["Imediato", "Agendar data e horário"],
+    horizontal=True, key="prisma_man_inicio_tipo",
+)
+data_inicio = hora_inicio = None
+if modo_inicio == "Agendar data e horário":
+    ci, ch = st.columns(2)
+    with ci:
+        data_inicio = st.date_input("Data de início", value=agora.date())
+    with ch:
+        hora_inicio = st.time_input(
+            "Horário de início (Teresina)", value=agora.time().replace(second=0, microsecond=0),
+            step=60,
+        )
+modo_fim = st.radio(
+    "Término", ["Data e horário definidos", "Até encerramento manual"],
+    horizontal=True, key="prisma_man_fim_tipo",
+)
+data_fim = hora_fim = None
+if modo_fim == "Data e horário definidos":
+    ci, ch = st.columns(2)
+    with ci:
+        data_fim = st.date_input(
+            "Data de término", value=(agora + timedelta(hours=1)).date(),
+        )
+    with ch:
+        hora_fim = st.time_input(
+            "Horário de término (Teresina)",
+            value=(agora + timedelta(hours=1)).time().replace(second=0, microsecond=0),
+            step=60,
+        )
+with st.form("prisma_form_manutencao", clear_on_submit=False):
     motivo = st.text_input(
         "Motivo interno da manutenção", max_chars=500,
         placeholder="Ex.: atualização de módulos e verificação de integridade",
