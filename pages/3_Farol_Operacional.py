@@ -58,7 +58,7 @@ from farol_acomp_supabase_backend import fonte_supabase
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
     vincular_os_manual, desfazer_vinculo_os_manual,
-    aplicar_vinculos_manuais, normalizar_os,
+    aplicar_vinculos_manuais, normalizar_os, eventos_manuais_do_grupo,
 )
 from farol_mesclagem_operacional import chave_evento
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
@@ -3444,6 +3444,11 @@ def gerar_pdf_concentracao(concentracao, os_grupo, ativos, eventos_relacionados,
     vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
         vinculadas, nao_vinculadas, manuais
     )
+    eventos_incluidos = eventos_manuais_do_grupo(manuais, os_grupo)
+    if eventos_incluidos:
+        nomes = ", ".join(str(e.get("Protocolo") or e.get("Serviço") or "Evento")
+                          for e in eventos_incluidos)
+        historia.append(p("Eventos associados manualmente: " + nomes, normal))
     colunas = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS", "Dt. Emissão", "Serviço Executado"]
     for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
                              ("Ordens não vinculadas", nao_vinculadas)):
@@ -3677,13 +3682,25 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         st.dataframe(ativos[["Tipo", "Identificação", "Nome", "Município", "Distância"]],
                      width="stretch", hide_index=True)
     st.markdown("#### Eventos relacionados")
-    st.caption("Correspondência por município e bairro impactado; não estabelece relação causal.")
+    st.caption(
+        "Associações automáticas: município, polígono/bairro e janela temporal. "
+        "Associações manuais: confirmação do analista, sem presumir causalidade."
+    )
     if eventos_relacionados.empty:
-        st.info("Nenhum evento com município e bairro correspondente.")
+        st.info("Nenhum evento associado automaticamente por território.")
     else:
         colunas_eventos = ["Protocolo", "Status", "Cidade", "Bairros coincidentes", "Início", "Término Real", "Serviço", "Descrição do Serviço"]
         st.dataframe(eventos_relacionados.reindex(columns=colunas_eventos).fillna(""),
                      width="stretch", hide_index=True)
+    eventos_manuais_visiveis = eventos_manuais_do_grupo(manuais, os_grupo)
+    if eventos_manuais_visiveis:
+        st.caption(f"Eventos com vínculos manuais: {len(eventos_manuais_visiveis)}")
+        st.dataframe(
+            pd.DataFrame(eventos_manuais_visiveis).reindex(
+                columns=["Protocolo", "Serviço", "Código do Ativo", "Início", "Cidade", "Status"]
+            ).fillna(""),
+            width="stretch", hide_index=True,
+        )
     # A colagem de prints não altera os dados operacionais do Farol.
     interface_graficos_logger(ativos, codigo)
     # Captura cartográfica apenas sob demanda; evita Chromium em cada rerun do Streamlit.
@@ -4419,6 +4436,16 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
             vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
                 vinculadas, nao_vinculadas, manuais_relatorio
             )
+            manuais_da_concentracao = eventos_manuais_do_grupo(
+                manuais_relatorio, grupo
+            )
+            if manuais_da_concentracao:
+                resumo.append(Paragraph(
+                    "<b>Vínculos manuais:</b> " + xml_escape("; ".join(
+                        str(e.get("Protocolo") or e.get("Serviço") or "Evento")
+                        for e in manuais_da_concentracao
+                    )), pequeno
+                ))
             # Distribuir as duas tabelas dentro da área cinza ao lado do mapa.
             # O espaço abaixo do mapa só recebe linhas que não couberem no painel.
             def linhas_pdf(base):
