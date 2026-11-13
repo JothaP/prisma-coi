@@ -155,7 +155,7 @@ class LeituraGpkgTeresina(unittest.TestCase):
                 (-42.84, -5.13), (-42.82, -5.13),
                 (-42.82, -5.11), (-42.84, -5.11),
             ])
-            blob = b"GP\\x00\\x01" + (4326).to_bytes(4, "little") + pol.wkb
+            blob = b"GP\x00\x01" + (4326).to_bytes(4, "little") + pol.wkb
             with sqlite3.connect(arquivo) as conexao:
                 conexao.execute(
                     "INSERT INTO regioes(geom,NM_BAIRRO,NM_MUN,name) VALUES (?,?,?,?)",
