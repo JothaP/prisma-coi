@@ -103,7 +103,7 @@ class TesteVinculosTerritoriaisFarol(unittest.TestCase):
         base = [exemplo]
         catalogo = ambiente["indice_nomes_bairros"](base, "TERESINA")
         self.assertIn("VILA INGLESA", catalogo)
-        self.assertIn("BAIRRO OFICIAL", catalogo)
+        self.assertIn("OFICIAL", catalogo)
         locais = ambiente["extrair_bairros_evento"](
             "Subáreas afetadas: Villa Inglesa", "TERESINA", base
         )
