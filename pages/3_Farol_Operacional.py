@@ -2118,8 +2118,9 @@ def eventos_georreferenciados(eventos, bairros_kmz):
         return saida, 0
     indice = {}
     for bairro in bairros_kmz:
-        chave = (bairro.get("municipio", "TERESINA"), bairro["nome_normalizado"])
-        indice.setdefault(chave, []).append(bairro)
+        cidade_bairro = normalizar_municipio(bairro.get("municipio", ""))
+        for nome in nomes_reconhecidos_feicao(bairro):
+            indice.setdefault((cidade_bairro, nome), []).append(bairro)
     for _, evento in eventos.iterrows():
         # Eventos encerrados permanecem na base, mas não geram feições no mapa.
         categoria_status, _ = classificar_status_evento(evento.get("Status", ""))
@@ -2131,6 +2132,7 @@ def eventos_georreferenciados(eventos, bairros_kmz):
             sem_geometria += 1
             continue
         identificados = set()
+        geometrias_desenhadas = set()
         encontrou = False
         faltou = False
         for area in areas:
@@ -2145,8 +2147,14 @@ def eventos_georreferenciados(eventos, bairros_kmz):
             encontrou = True
             categoria, cor = classificar_status_evento(evento.get("Status", ""))
             for bairro in correspondencias:
+                # Uma feição pode possuir nome de subárea e bairro pai:
+                # desenhá-la uma única vez por evento evita sobreposição.
+                if id(bairro) in geometrias_desenhadas:
+                    continue
+                geometrias_desenhadas.add(id(bairro))
                 saida.append({
                     "bairro": bairro,
+                    "nome_area_evento": nome,
                     "evento": evento.to_dict(),
                     "parcial": area["parcial"],
                     "categoria": categoria,
@@ -2169,9 +2177,16 @@ def adicionar_camada_eventos(mapa, eventos_mapeados):
         parcial = item["parcial"]
         def esc(campo):
             return html_escape(str(evento.get(campo, "") or "—"))
-        abrangencia = ("Parcial (polígono do bairro inteiro como referência)" if parcial
-                       else "Todo o município" if evento_abrange_municipio(evento.get("Áreas Impactadas", ""))
-                       else "Bairro informado como impactado")
+        tipo_localidade = bairro.get("tipo_area", "Bairro")
+        abrangencia = (
+            f"Parcial (polígono da {tipo_localidade.lower()} como referência)"
+            if parcial else
+            "Todo o município"
+            if evento_abrange_municipio(evento.get("Áreas Impactadas", "")) else
+            f"{tipo_localidade} informada como impactada"
+            if tipo_localidade == "Subárea" else
+            "Bairro informado como impactado"
+        )
         html = (
             f"<div style='min-width:250px;max-width:400px'>"
             f"<b>Evento — {html_escape(bairro['nome'])}</b><br>"
@@ -2689,14 +2704,13 @@ def evento_pertinente_data_analise(evento):
 
 
 def indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento):
-    """Relaciona somente polígonos das áreas deste evento e deste município."""
+    """Relaciona bairros e subáreas pelo nome exato e município."""
     nomes = {area["bairro"] for area in areas_evento}
     indice = {nome: [] for nome in nomes}
     for bairro in (bairros_geograficos or []):
         if bairro.get("sem_nome") or normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
             continue
-        nome = limpar_nome_bairro(bairro.get("nome_normalizado") or bairro.get("nome", ""))
-        if nome in indice:
+        for nome in nomes_reconhecidos_feicao(bairro) & nomes:
             indice[nome].append(bairro)
     return indice
 
@@ -2800,7 +2814,8 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
             chaves_areas = {a["bairro"] for a in areas_evento}
             geometrias_evento = [b for b in (bairros_geograficos or [])
                 if (normalizar_municipio(b.get("municipio", "")) == cidade
-                    and b.get("nome_normalizado", "") in chaves_areas)] if not municipal else []
+                    and not nomes_reconhecidos_feicao(b).isdisjoint(chaves_areas))
+                ] if not municipal else []
             indice_geometrias = indexar_geometrias_evento(
                 geometrias_evento, cidade, areas_evento
             )
