@@ -32,6 +32,7 @@ FUNCOES = {
     "consolidar_arquivos_importacao", "upsert_pontos",
     "dados_relatorio_concentracao", "interpretar_data_operacional",
     "classificar_status_evento", "classificar_os_por_evento",
+    "diagnosticar_os_nao_vinculadas",
 }
 CONSTANTES = {"CABECALHO_PONTOS", "MAPA_COLUNAS_ATIVIDADES"}
 ambiente = {
@@ -208,6 +209,87 @@ class TesteVinculosTerritoriaisFarol(unittest.TestCase):
         ambiente["upsert_pontos"](novo)
         self.assertEqual(capturado["df"]["Endereço"].iloc[0], "Dom Avelar")
         self.assertEqual(capturado["df"]["Extra"].iloc[0], "Valor antigo")
+
+    def test_todo_municipio_sem_poligonos_vincula_apenas_cidade_e_horario(self):
+        pontos = pd.DataFrame([
+            os_exemplo(**{"Nº da O.S": "2001", "Cidade": "São Raimundo Nonato",
+                          "Bairro": "Centro", "Endereço": "", "_grupo": 1}),
+            os_exemplo(**{"Nº da O.S": "2002", "Cidade": "São Raimundo Nonato",
+                          "Bairro": "Outro bairro", "Endereço": "",
+                          "Dt. Emissão": "11/11/2026 16:01", "_grupo": 1}),
+            os_exemplo(**{"Nº da O.S": "2003", "Cidade": "Timon",
+                          "Bairro": "Centro", "Endereço": "", "_grupo": 1}),
+        ])
+        eventos = pd.DataFrame([{
+            "Cidade": "São Raimundo Nonato",
+            "Áreas Impactadas": "Todo o município", "Início": "11/11/2026 08:00",
+            "Término Real": "11/11/2026 12:00",
+            "Status": "Em andamento", "Protocolo": "MUNICIPAL",
+        }])
+        conc = {"GRUPO": 1, "ID_CONCENTRACAO": "API 1"}
+        prox = pd.DataFrame(columns=["Concentração"])
+        grupo, _, relacionados = ambiente["dados_relatorio_concentracao"](
+            conc, pontos, prox, eventos, bairros_geograficos=[]
+        )
+        vinculadas, nao = ambiente["classificar_os_por_evento"](grupo, relacionados)
+        self.assertEqual(vinculadas["Nº da O.S"].tolist(), ["2001"])
+        self.assertEqual(vinculadas["Critério do vínculo"].tolist(), ["Município"])
+        self.assertEqual(set(nao["Nº da O.S"]), {"2002", "2003"})
+        diagnostico = ambiente["diagnosticar_os_nao_vinculadas"](nao, eventos, [])
+        motivos = dict(zip(diagnostico["Nº da O.S"], diagnostico["Motivo da não vinculação"]))
+        self.assertEqual(motivos["2002"], "O.S. fora da janela temporal do evento")
+        self.assertEqual(motivos["2003"], "Nenhum evento elegível no município e dia analisado")
+
+    def test_sem_poligono_por_bairro_nao_liga_bairro_diferente(self):
+        pontos = pd.DataFrame([
+            os_exemplo(**{"Nº da O.S": "3001", "Cidade": "Picos",
+                          "Bairro": "Centro", "Endereço": "", "_grupo": 2}),
+            os_exemplo(**{"Nº da O.S": "3002", "Cidade": "Picos",
+                          "Bairro": "Jardim das Flores", "Endereço": "", "_grupo": 2}),
+        ])
+        eventos = pd.DataFrame([{
+            "Cidade": "Picos", "Áreas Impactadas": "Centro, Aldeia",
+            "Início": "11/11/2026 08:00", "Término Real": "11/11/2026 12:00",
+            "Status": "Ativo", "Protocolo": "PICOS 1",
+        }])
+        grupo, _, relacionados = ambiente["dados_relatorio_concentracao"](
+            {"GRUPO": 2, "ID_CONCENTRACAO": "API 2"},
+            pontos, pd.DataFrame(columns=["Concentração"]), eventos, []
+        )
+        vinculadas, nao = ambiente["classificar_os_por_evento"](grupo, relacionados)
+        self.assertEqual(vinculadas["Nº da O.S"].tolist(), ["3001"])
+        self.assertEqual(vinculadas["Critério do vínculo"].tolist(), ["Bairro cadastrado"])
+        diag = ambiente["diagnosticar_os_nao_vinculadas"](nao, eventos, [])
+        self.assertIn("Sem polígono da área", diag["Motivo da não vinculação"].iloc[0])
+
+    def test_evento_sem_abrangencia_nao_vincula_municipio_sem_poligono(self):
+        evento = pd.DataFrame([{
+            "Cidade": "Picos", "Áreas Impactadas": "",
+            "Início": "11/11/2026 08:00", "Término Real": "11/11/2026 12:00",
+            "Status": "Ativo", "Protocolo": "SEM AREAS",
+        }])
+        pontos = pd.DataFrame([
+            os_exemplo(**{"Nº da O.S": "4001", "Cidade": "Picos",
+                          "Bairro": "Centro", "Endereço": "", "_grupo": 3}),
+        ])
+        grupo, _, relacionados = ambiente["dados_relatorio_concentracao"](
+            {"GRUPO": 3, "ID_CONCENTRACAO": "API 3"},
+            pontos, pd.DataFrame(columns=["Concentração"]), evento, []
+        )
+        self.assertTrue(relacionados.empty)
+        vinculadas, nao = ambiente["classificar_os_por_evento"](grupo, relacionados)
+        self.assertTrue(vinculadas.empty)
+        diag = ambiente["diagnosticar_os_nao_vinculadas"](nao, evento, [])
+        self.assertEqual(diag["Motivo da não vinculação"].iloc[0],
+                         "Áreas Impactadas não informadas no evento")
+
+    def test_editor_de_abrangencia_preserva_correcoes_na_importacao(self):
+        fonte = FONTE.read_text(encoding="utf-8")
+        self.assertIn('"Abrangência territorial do evento"', fonte)
+        self.assertIn('areas_salvar = "Todo o município"', fonte)
+        self.assertIn("registrar_area_editada(chave_evento(original), area_nova)", fonte)
+        self.assertIn('evento["Áreas Impactadas"] = areas_protegidas[chave]', fonte)
+        self.assertIn('"Motivo da não vinculação"', fonte)
 
     def test_relatorio_respeita_temporal_e_exibe_metodo(self):
         pontos = pd.DataFrame([os_exemplo(_grupo=1)])
