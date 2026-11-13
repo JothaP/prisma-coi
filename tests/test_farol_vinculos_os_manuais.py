@@ -14,7 +14,8 @@ import pandas as pd
 RAIZ = Path(__file__).resolve().parents[1]
 FONTE = RAIZ / "farol_vinculos_os_manuais.py"
 arvore = ast.parse(FONTE.read_text(encoding="utf-8"), filename=str(FONTE))
-nomes = {"normalizar_os", "normalizar_municipio", "aplicar_vinculos_manuais"}
+nomes = {"normalizar_os", "normalizar_municipio", "aplicar_vinculos_manuais",
+         "eventos_manuais_do_grupo"}
 funcoes = [x for x in arvore.body if isinstance(x, ast.FunctionDef) and x.name in nomes]
 assert {f.name for f in funcoes} == nomes
 ambiente = {
@@ -81,6 +82,24 @@ class VinculoManual(unittest.TestCase):
         self.assertEqual(len(v), 2)
         self.assertEqual(len(n), 1)
         self.assertEqual(v[-1]["Eventos vinculados"], "EV-X")
+
+    def test_resumo_manual_por_os_e_cidade(self):
+        grupo = pd.DataFrame([
+            {"Nº da O.S": "100/2026-1", "Cidade": "Teresina"},
+            {"Nº da O.S": "300/2026-1", "Cidade": "Timon"},
+        ])
+        vinculos = [
+            {"numero_os": "100/2026-1", "municipio": "TERESINA",
+             "evento_chave": "a" * 32, "protocolo": "EV-MANUAL"},
+            {"numero_os": "100/2026-1", "municipio": "TERESINA",
+             "evento_chave": "a" * 32, "protocolo": "EV-MANUAL"},
+            {"numero_os": "300/2026-1", "municipio": "TERESINA",
+             "evento_chave": "b" * 32, "protocolo": "EV-ERRADO"},
+        ]
+        resumo = ambiente["eventos_manuais_do_grupo"](vinculos, grupo)
+        self.assertEqual(len(resumo), 1)
+        self.assertEqual(resumo[0]["Protocolo"], "EV-MANUAL")
+        self.assertEqual(resumo[0]["Status"], "Vínculo manual")
 
     def test_habilitacao_e_auditoria(self):
         m3 = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
