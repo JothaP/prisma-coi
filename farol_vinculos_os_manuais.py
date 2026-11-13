@@ -6,6 +6,7 @@ A gravação utiliza RPC transacional e service_role somente no backend.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 
 import pandas as pd
@@ -19,7 +20,13 @@ VALIDO_OS = re.compile(r"^[A-Z0-9./_-]{1,100}$")
 
 def normalizar_os(numero):
     texto = str(numero if numero is not None else "").strip().upper()
-    return texto if VALIDO_OS.fullmatch(texto) else ""
+    return texto if VALIDO_OS.fullmatch(texto) and texto not in {"NAN", "NONE"} else ""
+
+
+def normalizar_municipio(valor):
+    texto = unicodedata.normalize("NFKD", str(valor or "").strip().upper())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    return re.sub(r"[^A-Z0-9]", "", texto)
 
 
 @st.cache_data(ttl=15, max_entries=80, show_spinner=False)
@@ -145,7 +152,13 @@ def aplicar_vinculos_manuais(vinculadas, nao_vinculadas, registros,
 
     def atualizar(linha):
         linha = dict(linha)
-        manuais = por_os.get(normalizar_os(linha.get("Nº da O.S")), [])
+        manuais = [
+            registro for registro in por_os.get(
+                normalizar_os(linha.get("Nº da O.S")), []
+            )
+            if normalizar_municipio(registro.get("municipio")) ==
+               normalizar_municipio(linha.get("Cidade"))
+        ]
         if not manuais:
             return linha, False
         separador = "; " if coluna_evento == "Eventos vinculados" else ", "
