@@ -71,6 +71,7 @@ from farol_mesclagem_operacional import (
     adicionar_desenho_mapa,
     extrair_desenho_folium,
     renderizar_painel_mescla,
+    renderizar_painel_desfazer_mesclas,
 )
 
 
@@ -5203,6 +5204,19 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
     st.caption("Eventos: vermelho = em andamento · amarelo = programado · verde = finalizado · cinza = outro status. "
                "As áreas destacadas representam os bairros inteiros dos arquivos geográficos, inclusive quando o evento informa impacto parcial.")
 
+    # A reversão não depende da data consultada nem da existência de O.S.
+    # no recorte: as mesclagens são persistentes e compartilhadas no Supabase.
+    try:
+        mesclas_ativas_farol = listar_mesclas_farol() if fonte_supabase() else []
+        erro_mesclagem_farol = None
+    except Exception as erro:
+        mesclas_ativas_farol = []
+        erro_mesclagem_farol = str(erro)
+    if erro_mesclagem_farol:
+        st.warning("Não foi possível carregar as mesclagens: " + erro_mesclagem_farol)
+    elif mesclas_ativas_farol:
+        renderizar_painel_desfazer_mesclas(mesclas_ativas_farol, PODE_EDITAR_FAROL)
+
     if df_pontos.empty:
         st.warning("A aba PONTOS ainda não possui dados.")
         ativos_pocos = ativos_pocos_cidade
@@ -5251,13 +5265,10 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         concentracoes_originais = concentracoes.copy()
         pontos_cluster_originais = pontos_cluster.copy()
         try:
-            mesclas_ativas_farol = listar_mesclas_farol() if fonte_supabase() else []
             concentracoes, pontos_cluster = aplicar_mesclas_farol(
                 concentracoes, pontos_cluster, mesclas_ativas_farol
             )
-            erro_mesclagem_farol = None
         except Exception as erro:
-            mesclas_ativas_farol = []
             erro_mesclagem_farol = str(erro)
         proximidades = pontos_proximos_concentracoes(
             concentracoes,
