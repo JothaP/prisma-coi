@@ -5,6 +5,7 @@ on:
     paths:
       - 'pages/3_Farol_Operacional.py'
       - 'tests/test_farol_territorial_hibrido.py'
+      - 'tests/test_farol_responsavel_atualizacao.py'
       - '.github/workflows/testar-vinculo-territorial-farol.yml'
   workflow_dispatch:
 
@@ -26,3 +27,5 @@ jobs:
         run: python -m py_compile pages/3_Farol_Operacional.py
       - name: Testar importacao, subareas, enderecos e janela temporal
         run: python -m unittest discover -s tests -p 'test_farol_territorial_hibrido.py' -v
+      - name: Testar usuario da ultima atualizacao e legado do Google Sheets
+        run: python -m unittest discover -s tests -p 'test_farol_responsavel_atualizacao.py' -v
