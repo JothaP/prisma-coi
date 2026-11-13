@@ -1454,9 +1454,19 @@ def carregar_gpkg(caminho):
                 (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME")
                  if k in campos), None,
             )
+            # No GPKG, NM_BAIRRO pode identificar o bairro principal,
+            # enquanto name/NM_SUBAREA descrevem uma subárea desenhada
+            # posteriormente. Priorizar só NM_BAIRRO torna a subárea invisível.
+            campo_subarea = next(
+                (campos[k] for k in (
+                    "NMSUBAREA", "NOMESUBAREA", "SUBAREA",
+                    "NOMESUBREGIAO", "SUBREGIAO",
+                    "NAME", "NOMELOCALIDADE", "LOCALIDADE",
+                ) if k in campos and campos[k] != campo_bairro), None,
+            )
             campo_nome_aux = next(
                 (campos[k] for k in ("NAME", "LOCALIDADE", "NOMELOCALIDADE")
-                 if k in campos and campos[k] != campo_bairro), None,
+                 if k in campos and campos[k] not in (campo_bairro, campo_subarea)), None,
             )
             campo_mun = next(
                 (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI")
@@ -1480,7 +1490,9 @@ def carregar_gpkg(caminho):
             # Não descartar a camada quando não há campo de nome:
             # a geometria pode ser desenhada normalmente.
             colunas = [campo_geometria]
-            colunas += [c for c in (campo_bairro, campo_nome_aux, campo_mun) if c]
+            for campo in (campo_bairro, campo_subarea, campo_nome_aux, campo_mun):
+                if campo and campo not in colunas:
+                    colunas.append(campo)
             consulta = f"SELECT {', '.join(quoted(c) for c in colunas)} FROM {quoted(tabela)}"
             for numero_feicao, row in enumerate(conexao.execute(consulta), start=1):
                 atributos = dict(zip(colunas, row))
@@ -1534,15 +1546,35 @@ def carregar_gpkg(caminho):
                         "", "NAN", "NONE", "NULL", "NOVO ELEMENTO", "NEW FEATURE"
                     } else texto
 
-                nome_real = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
-                if not nome_real and campo_nome_aux:
-                    nome_real = nome_valido(atributos.get(campo_nome_aux))
+                nome_bairro = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
+                nome_subarea = nome_valido(atributos.get(campo_subarea)) if campo_subarea else ""
+                nome_auxiliar = nome_valido(atributos.get(campo_nome_aux)) if campo_nome_aux else ""
+                # O nome específico prevalece sobre o bairro de origem; ambos
+                # continuam pesquisáveis, inclusive em eventos já cadastrados.
+                nome_real = nome_subarea or nome_bairro or nome_auxiliar
+                nomes_alternativos = list(dict.fromkeys(
+                    nome for nome in (nome_bairro, nome_subarea, nome_auxiliar)
+                    if nome and limpar_nome_bairro(nome)
+                ))
+                subarea_explicita = bool(
+                    nome_subarea
+                    and (
+                        campo_subarea and normalizar_cabecalho(campo_subarea) in {
+                            "NMSUBAREA", "NOMESUBAREA", "SUBAREA",
+                            "NOMESUBREGIAO", "SUBREGIAO"
+                        }
+                        or nome_bairro and
+                        limpar_nome_bairro(nome_subarea) != limpar_nome_bairro(nome_bairro)
+                    )
+                )
                 rotulo = nome_real or f"Área sem nome ({tabela} #{numero_feicao})"
                 municipio_atributo = atributos.get(campo_mun) if campo_mun else ""
                 municipio = municipio_atributo or nome_municipio_arquivo(caminho)
                 registros.append({
                     "nome": rotulo,
                     "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
+                    "nomes_alternativos": nomes_alternativos,
+                    "tipo_area": "Subárea" if subarea_explicita else "Bairro",
                     "sem_nome": not bool(nome_real),
                     "municipio": normalizar_municipio(municipio),
                     "poligonos": poligonos,
