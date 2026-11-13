@@ -51,6 +51,9 @@ g3 = carregar_funcoes(FONTE3, {
     "preparar_poligonos_para_mapa", "adicionar_limites_bairros",
     "ponto_em_poligono", "ponto_em_bairro", "identificar_bairro_por_ponto",
     "indice_nomes_bairros", "nomes_reconhecidos_feicao",
+    "resolver_nome_bairro", "evento_abrange_municipio",
+    "extrair_bairros_evento", "classificar_status_evento",
+    "eventos_georreferenciados",
 }, {
     "sqlite3": sqlite3, "math": math, "re": re,
     "unicodedata": unicodedata, "wkb": wkb,
@@ -171,6 +174,30 @@ class LeituraGpkgTeresina(unittest.TestCase):
         self.assertEqual(entrada["tipo_area"], "Subárea")
         self.assertIn("JARDIM EUROPA", g3["nomes_reconhecidos_feicao"](entrada))
         self.assertIn("RESERVA ALDEBARAN", g3["nomes_reconhecidos_feicao"](entrada))
+
+    def test_subarea_do_evento_marcada_em_seu_poligono(self):
+        feicao = {
+            "nome": "Reserva Aldebaran",
+            "nome_normalizado": "RESERVA ALDEBARAN",
+            "nomes_alternativos": ["Jardim Europa", "Reserva Aldebaran"],
+            "tipo_area": "Subárea",
+            "municipio": "TERESINA",
+            "poligonos": [[
+                (-5.12, -42.82), (-5.12, -42.79),
+                (-5.10, -42.79), (-5.10, -42.82),
+            ]],
+        }
+        evento = pd.DataFrame([{
+            "Cidade": "Teresina",
+            "Áreas Impactadas": "Subáreas afetadas: Reserva Aldebaran",
+            "Status": "Em andamento",
+            "Protocolo": "EVENTO SUBAREA",
+        }])
+        marcadas, faltantes = g3["eventos_georreferenciados"](evento, [feicao])
+        self.assertEqual(faltantes, 0)
+        self.assertEqual(len(marcadas), 1)
+        self.assertEqual(marcadas[0]["bairro"]["nome"], "Reserva Aldebaran")
+        self.assertEqual(marcadas[0]["nome_area_evento"], "RESERVA ALDEBARAN")
 
     def test_modulo_3_geojson_contem_todas_as_feicoes(self):
         regs = g3["preparar_poligonos_para_mapa"](self.m3)
