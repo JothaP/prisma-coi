@@ -1,0 +1,33 @@
+name: Validar manutenção programada PRISMA
+on:
+  push:
+    paths:
+      - 'prisma_manutencao.py'
+      - 'auth.py'
+      - 'app.py'
+      - 'pages/11_Controle_de_Manutencao.py'
+      - 'sql/prisma_manutencoes.sql'
+      - 'tests/test_prisma_manutencao.py'
+      - 'pages/99_Migracao_Acompanhamento.py'
+      - '.github/workflows/testar-prisma-manutencao.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verificar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar bibliotecas de importação
+        run: python -m pip install 'streamlit>=1.42,<2'
+      - name: Verificar sintaxe
+        run: |
+          python -m py_compile prisma_manutencao.py auth.py app.py pages/11_Controle_de_Manutencao.py
+      - name: Testar regras e integrações de manutenção
+        run: python -m unittest discover -s tests -p 'test_prisma_manutencao.py' -v
