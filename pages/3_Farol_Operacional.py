@@ -130,6 +130,7 @@ NOME_ABA_CONTROLE = "CONTROLE_FAROL"
 NOME_ABA_OBSERVACOES = "OBS_CONCENTRACOES"
 NOME_ABA_AREAS_PROTEGIDAS = "FAROL_AREAS_EDITADAS"
 NOME_ABA_ATUALIZACOES = "FAROL_ATUALIZACOES"
+CABECALHO_ATUALIZACOES = ["BASE", "ATUALIZADO_EM", "ATUALIZADO_POR"]
 NOME_ABA_HISTORICO_V2 = "FAROL_HISTORICO_V2"
 CABECALHO_HISTORICO_V2 = ["Chave", "Valor"]
 DIAS_HISTORICO_V2 = 8
@@ -630,9 +631,53 @@ def salvar_observacao_concentracao(chave, municipio, lat, lon, observacao):
     carregar_observacoes_concentracoes.clear()
 
 
+def interpretar_registros_atualizacao(linhas):
+    """Lê metadados novos e legados sem atribuir autor retroativamente."""
+    if not linhas:
+        return {}
+    cabecalho = [str(c).strip().upper() for c in linhas[0]]
+    if cabecalho[:2] != CABECALHO_ATUALIZACOES[:2]:
+        return {}
+    pos_autor = (
+        cabecalho.index("ATUALIZADO_POR")
+        if "ATUALIZADO_POR" in cabecalho else None
+    )
+    registros = {}
+    for linha in linhas[1:]:
+        if len(linha) < 2:
+            continue
+        tipo = str(linha[0]).strip().upper()
+        if tipo not in {"PONTOS", "EVENTOS"}:
+            continue
+        data_hora = str(linha[1]).strip()
+        if not data_hora:
+            continue
+        autor = (
+            str(linha[pos_autor]).strip()
+            if pos_autor is not None and len(linha) > pos_autor else ""
+        )
+        registros[tipo] = {
+            "atualizado_em": data_hora,
+            "atualizado_por": autor or "Responsável não registrado",
+        }
+    return registros
+
+
+def responsavel_importacao_farol():
+    """Obtém o nome associado ao perfil PRISMA, nunca do arquivo importado."""
+    if not verificar_autenticacao():
+        raise PermissionError("Sessão expirada. Faça login para importar dados.")
+    responsavel = str(st.session_state.get("usuario_logado") or "").strip()
+    if not responsavel:
+        raise PermissionError(
+            "Não foi possível identificar o responsável autenticado pela importação."
+        )
+    return responsavel[:160]
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def carregar_datas_atualizacao():
-    """Consulta apenas duas linhas de metadados; nunca lê as bases para obter datas."""
+    """Consulta só a aba auxiliar, sem ler a base operacional de O.S./eventos."""
     try:
         aba = obter_planilha(SPREADSHEET_ID).worksheet(NOME_ABA_ATUALIZACOES)
         linhas = aba.get_all_values()
@@ -640,43 +685,78 @@ def carregar_datas_atualizacao():
         return {}
     except Exception:
         return {}
-    return {linha[0].strip().upper(): linha[1].strip()
-            for linha in linhas[1:] if len(linha) >= 2 and linha[0].strip()}
+    return interpretar_registros_atualizacao(linhas)
 
 
 def registrar_atualizacao_base(tipo):
-    """Persiste data/hora real de importação, inclusive entre sessões e reinícios."""
+    """Grava o horário e o responsável da última importação no Google Sheets.
+
+    Atualiza a planilha legada de duas colunas sem apagar os registros antigos.
+    """
     exigir_edicao_farol()
     if tipo not in {"PONTOS", "EVENTOS"}:
         raise ValueError("Tipo de base desconhecido.")
+    autor = responsavel_importacao_farol()
     planilha = obter_planilha(SPREADSHEET_ID)
     try:
         aba = planilha.worksheet(NOME_ABA_ATUALIZACOES)
     except gspread.WorksheetNotFound:
-        aba = planilha.add_worksheet(title=NOME_ABA_ATUALIZACOES, rows=10, cols=2)
-        aba.update(range_name="A1:B1", values=[["BASE", "ATUALIZADO_EM"]], value_input_option="RAW")
+        aba = planilha.add_worksheet(title=NOME_ABA_ATUALIZACOES, rows=10, cols=3)
     linhas = aba.get_all_values()
+    if linhas:
+        cabecalho_atual = [str(c).strip().upper() for c in linhas[0]]
+        if cabecalho_atual[:2] != CABECALHO_ATUALIZACOES[:2]:
+            raise ValueError("Cabeçalho inesperado em FAROL_ATUALIZACOES.")
+        if len(cabecalho_atual) >= 3 and cabecalho_atual[2] not in ("", "ATUALIZADO_POR"):
+            raise ValueError(
+                "A terceira coluna de FAROL_ATUALIZACOES já contém outro cabeçalho."
+            )
+    if aba.col_count < len(CABECALHO_ATUALIZACOES):
+        aba.resize(cols=len(CABECALHO_ATUALIZACOES))
+    if not linhas:
+        aba.update(
+            range_name="A1:C1", values=[CABECALHO_ATUALIZACOES],
+            value_input_option="RAW",
+        )
+    elif len(linhas[0]) < 3 or not str(linhas[0][2]).strip():
+        aba.update(
+            range_name="C1", values=[["ATUALIZADO_POR"]],
+            value_input_option="RAW",
+        )
+
     momento = datetime.now(FUSO_FAROL).strftime("%d/%m/%Y %H:%M:%S")
+    valores = [tipo, momento, autor]
     for numero_linha, linha in enumerate(linhas[1:], start=2):
-        if linha and linha[0].strip().upper() == tipo:
-            aba.update(range_name=f"A{numero_linha}:B{numero_linha}",
-                       values=[[tipo, momento]], value_input_option="RAW")
+        if linha and str(linha[0]).strip().upper() == tipo:
+            aba.update(
+                range_name=f"A{numero_linha}:C{numero_linha}",
+                values=[valores], value_input_option="RAW",
+            )
             carregar_datas_atualizacao.clear()
             return
-    aba.append_row([tipo, momento], value_input_option="RAW")
+    aba.append_row(valores, value_input_option="RAW")
     carregar_datas_atualizacao.clear()
 
 
 def exibir_atualizacoes_abaixo_mapa():
-    datas = carregar_datas_atualizacao()
-    os_em = datas.get("PONTOS", "Sem importação registrada")
-    eventos_em = datas.get("EVENTOS", "Sem importação registrada")
+    registros = carregar_datas_atualizacao()
+    def resumo(tipo, titulo):
+        item = registros.get(tipo) or {}
+        hora = html_escape(str(item.get("atualizado_em") or "Sem importação registrada"))
+        autor = html_escape(
+            str(item.get("atualizado_por") or "Responsável não registrado")
+        )
+        return (
+            f"<span>{titulo} — Atualizado em {hora} "
+            f"· Por: {autor}</span>"
+        )
     st.markdown(
         '<div style="display:flex;flex-wrap:wrap;gap:8px 26px;margin:4px 0 14px;'
         'font-size:13px;font-weight:600;color:#1558b0;">'
-        f'<span>O.S. — Atualizado em {os_em}</span>'
-        f'<span>Eventos — Atualizado em {eventos_em}</span>'
-        '</div>', unsafe_allow_html=True,
+        + resumo("PONTOS", "O.S.")
+        + resumo("EVENTOS", "Eventos")
+        + '</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -690,7 +770,7 @@ def limpar_dados_operacionais_admin():
         (NOME_ABA_PONTOS, CABECALHO_PONTOS),
         (NOME_ABA_EVENTOS, CABECALHO_EVENTOS),
         (NOME_ABA_AREAS_PROTEGIDAS, ["CHAVE_EVENTO", "AREAS_IMPACTADAS", "ATUALIZADO_EM", "AUTOR"]),
-        (NOME_ABA_ATUALIZACOES, ["BASE", "ATUALIZADO_EM"]),
+        (NOME_ABA_ATUALIZACOES, CABECALHO_ATUALIZACOES),
     )
     for nome, cabecalho in abas:
         try:
