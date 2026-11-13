@@ -50,7 +50,7 @@ g3 = carregar_funcoes(FONTE3, {
     "normalizar_municipio", "nome_municipio_arquivo", "carregar_gpkg",
     "preparar_poligonos_para_mapa", "adicionar_limites_bairros",
     "ponto_em_poligono", "ponto_em_bairro", "identificar_bairro_por_ponto",
-    "indice_nomes_bairros",
+    "indice_nomes_bairros", "nomes_reconhecidos_feicao",
 }, {
     "sqlite3": sqlite3, "math": math, "re": re,
     "unicodedata": unicodedata, "wkb": wkb,
@@ -61,7 +61,8 @@ g3 = carregar_funcoes(FONTE3, {
 
 g8 = carregar_funcoes(FONTE8, {
     "_normalizar_texto", "_normalizar_cabecalho", "_assinatura",
-    "_caminho_bairros_teresina", "_bairros_geograficos",
+    "_arquivos_bairros_municipais", "_assinaturas_bairros_municipais",
+    "_bairros_geograficos",
     "_m8_mapa_unificado",
 }, {
     "sqlite3": sqlite3, "math": math, "re": re, "unicodedata": unicodedata,
@@ -124,9 +125,14 @@ class LeituraGpkgTeresina(unittest.TestCase):
                 'SELECT COUNT(*) FROM "NM_MUN_Teresina" WHERE geom IS NOT NULL'
             ).fetchone()[0]
 
-    def test_arquivo_novo_e_preferido_ao_backup(self):
-        escolhido = g8["_caminho_bairros_teresina"]()
-        self.assertEqual(escolhido.resolve(), ARQUIVO.resolve())
+    def test_todos_gpkg_reconhecidos_sem_incluir_backup(self):
+        encontrados = g8["_arquivos_bairros_municipais"]()
+        self.assertIn(ARQUIVO.resolve(), {p.resolve() for p in encontrados})
+        self.assertGreater(len(encontrados), 1)
+        self.assertTrue(all(p.suffix.lower() == ".gpkg" for p in encontrados))
+        self.assertTrue(all(not p.name.lower().endswith(".bak") for p in encontrados))
+        assinaturas = g8["_assinaturas_bairros_municipais"]()
+        self.assertEqual(len(assinaturas), len(encontrados))
 
     def test_modulo_3_carrega_todas_as_geometrias(self):
         self.assertGreater(self.esperado, 123)  # há novas subáreas no arquivo atual
@@ -140,6 +146,27 @@ class LeituraGpkgTeresina(unittest.TestCase):
     def test_subarea_da_exportacao_preservada(self):
         self.assertIn("Vila Inglesa", {b["nome"] for b in self.m3})
         self.assertIn("Vila Inglesa", {b["nome"] for b in self.m8})
+
+    def test_subarea_do_campo_name_e_bairro_pai_identificados(self):
+        with tempfile.TemporaryDirectory() as diretorio:
+            arquivo = Path(diretorio) / "NM_MUN_Teresina.gpkg"
+            gerar_gpkg_sintetico(arquivo)
+            pol = Polygon([
+                (-42.84, -5.13), (-42.82, -5.13),
+                (-42.82, -5.11), (-42.84, -5.11),
+            ])
+            blob = b"GP\\x00\\x01" + (4326).to_bytes(4, "little") + pol.wkb
+            with sqlite3.connect(arquivo) as conexao:
+                conexao.execute(
+                    "INSERT INTO regioes(geom,NM_BAIRRO,NM_MUN,name) VALUES (?,?,?,?)",
+                    (blob, "Bairro Pai", "Teresina", "Subárea Nova"),
+                )
+                conexao.commit()
+            registros = g3["carregar_gpkg"](str(arquivo))
+        entrada = next(x for x in registros if x["nome"] == "Subárea Nova")
+        self.assertEqual(entrada["tipo_area"], "Subárea")
+        self.assertIn("BAIRRO PAI", g3["nomes_reconhecidos_feicao"](entrada))
+        self.assertIn("SUBAREA NOVA", g3["nomes_reconhecidos_feicao"](entrada))
 
     def test_modulo_3_geojson_contem_todas_as_feicoes(self):
         regs = g3["preparar_poligonos_para_mapa"](self.m3)
