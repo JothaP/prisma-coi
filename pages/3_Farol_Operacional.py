@@ -1584,7 +1584,14 @@ def carregar_gpkg(caminho):
 
 def nome_municipio_arquivo(caminho):
     nome = os.path.splitext(os.path.basename(caminho))[0]
-    return re.sub(r"^(?:NM_MUN|NM_RGI)[_\s-]*", "", nome, flags=re.I)
+    nome = re.sub(r"^(?:NM_MUN|NM_RGI)[_\s-]*", "", nome, flags=re.I)
+    # Também permite "SUBAREAS_Teresina.gpkg" e nomes equivalentes.
+    # Se o arquivo possuir NM_MUN, o atributo específico prevalece.
+    if re.search(r"(?i)(?:^|[_\s-])TERESINA(?:$|[_\s-])", nome):
+        return "TERESINA"
+    if re.search(r"(?i)(?:^|[_\s-])TIMON(?:$|[_\s-])", nome):
+        return "TIMON"
+    return nome
 
 
 def preparar_poligonos_para_mapa(registros, tolerancia=0.00007):
@@ -1666,18 +1673,30 @@ def descobrir_kmz():
                 caminho = os.path.join(DIRETORIO_KMZ, nome)
                 if os.path.isfile(caminho):
                     arquivos.append(caminho)
-    # Para municípios com dois formatos, prefere o GPKG por conter NM_BAIRRO/NM_MUN.
-    prioridades = {".gpkg": 0, ".kmz": 1, ".kml": 2}
-    escolhidos = {}
+    # Carrega TODOS os GPKG, inclusive complementos de subáreas, e não
+    # apenas o primeiro GPKG de cada município. Evita duplicar o KMZ/KML
+    # antigo quando o município já dispõe de GPKG.
+    geopackages = [a for a in arquivos if a.lower().endswith(".gpkg")]
+    municipios_gpkg = {
+        normalizar_municipio(nome_municipio_arquivo(a)) for a in geopackages
+    }
+    escolhidos = list(geopackages)
+    legados = {}
     for caminho in arquivos:
+        if caminho.lower().endswith(".gpkg"):
+            continue
         municipio = normalizar_municipio(nome_municipio_arquivo(caminho))
-        if municipio and (municipio not in escolhidos or
-                          prioridades[os.path.splitext(caminho)[1].lower()] < prioridades[os.path.splitext(escolhidos[municipio])[1].lower()]):
-            escolhidos[municipio] = caminho
-    if os.path.isfile(ARQUIVO_KMZ_PADRAO) and "TERESINA" not in escolhidos:
-        escolhidos["TERESINA"] = ARQUIVO_KMZ_PADRAO
+        if not municipio or municipio in municipios_gpkg:
+            continue
+        if municipio not in legados or caminho.lower().endswith(".kmz"):
+            legados[municipio] = caminho
+    escolhidos.extend(legados.values())
+    if (os.path.isfile(ARQUIVO_KMZ_PADRAO)
+            and "TERESINA" not in municipios_gpkg
+            and "TERESINA" not in legados):
+        escolhidos.append(ARQUIVO_KMZ_PADRAO)
     assinaturas = []
-    for caminho in escolhidos.values():
+    for caminho in escolhidos:
         try:
             info = os.stat(caminho)
             assinaturas.append((caminho, info.st_size, info.st_mtime_ns))
