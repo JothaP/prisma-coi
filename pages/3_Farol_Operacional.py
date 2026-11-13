@@ -296,7 +296,7 @@ def limpar_nome_bairro(valor):
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
     texto = re.sub(
-        r"^(?:BAIRRO|SUB[\s-]*AREA|SUB[\s-]*REGIAO)"
+        r"^(?:BAIRROS?|SUB[\s-]*AREAS?|SUB[\s-]*REGIAO(?:ES)?)"
         r"(?:\s*[-–—:]\s*|\s+)", "", texto
     )
     # Trata Villa Inglesa e Vila Inglesa como a mesma localidade, sem
