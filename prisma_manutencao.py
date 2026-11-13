@@ -94,7 +94,7 @@ def mensagem_publica(registro):
     return texto or "A plataforma está temporariamente indisponível para manutenção técnica."
 
 
-def exibir_tela_manutencao(registro):
+def exibir_tela_manutencao(registro, modulo=None):
     """Renderiza bloqueio, sem expor informações administrativas."""
     st.title("🛠️ PRISMA — Manutenção programada")
     st.warning(mensagem_publica(registro))
@@ -104,7 +104,8 @@ def exibir_tela_manutencao(registro):
         st.info("Os módulos operacionais estão temporariamente indisponíveis.")
     st.markdown(f"**Previsão de restabelecimento:** {texto_fim(registro)} (horário de Teresina).")
     st.caption("Os registros permanecem preservados. Contate a administração em caso de necessidade.")
-    if st.button("🏠 Voltar ao Hub Central", key="prisma_voltar_manutencao"):
+    monitorar_liberacao(modulo)
+    if modulo is not None and st.button("🏠 Voltar ao Hub Central", key="prisma_voltar_manutencao"):
         st.switch_page("app.py")
     st.stop()
 
@@ -120,7 +121,7 @@ def verificar_manutencao(modulo=None):
                  "Para proteger a operação, o acesso foi temporariamente suspenso.")
         st.stop()
     if bloqueio:
-        exibir_tela_manutencao(bloqueio)
+        exibir_tela_manutencao(bloqueio, modulo=modulo)
     if aviso:
         area = "toda a plataforma" if aviso["escopo"] == "global" else MODULOS.get(str(aviso["modulo"]), "este módulo")
         st.info(
@@ -131,18 +132,37 @@ def verificar_manutencao(modulo=None):
 
 
 @st.fragment(run_every=f"{ATUALIZACAO_SEGUNDOS}s")
+def monitorar_liberacao(modulo=None):
+    """Permite restabelecimento automático da página bloqueada após o prazo."""
+    try:
+        ativo, _ = situacao(modulo)
+    except ErroPRISMA:
+        return
+    if not ativo:
+        st.rerun(scope="app")
+
+
+@st.fragment(run_every=f"{ATUALIZACAO_SEGUNDOS}s")
 def monitorar_manutencao(modulo=None):
     """Enquanto uma aba permanece aberta, detecta bloqueios e restaurações."""
     if str(st.session_state.get("perfil") or "").strip().lower() == "admin":
         return
     try:
-        ativo, _ = situacao(modulo)
+        ativo, aviso = situacao(modulo)
     except ErroPRISMA:
         # Força passagem pelo guard principal, que apresenta o erro seguro.
         st.rerun(scope="app")
         return
     if ativo:
         st.rerun(scope="app")
+    if aviso:
+        # Atualiza uma única vez quando a janela entrar nos 30 minutos
+        # anteriores ao início, sem fazer reruns infinitos.
+        chave = "prisma_aviso_manutencao_" + str(modulo)
+        identificador = str(aviso.get("id"))
+        if st.session_state.get(chave) != identificador:
+            st.session_state[chave] = identificador
+            st.rerun(scope="app")
 
 
 def _autor_administrador():
