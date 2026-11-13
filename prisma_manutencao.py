@@ -164,6 +164,23 @@ def monitorar_manutencao(modulo=None):
             st.session_state[chave] = identificador
             st.rerun(scope="app")
 
+    if modulo is None:
+        # No Hub os cartões de TODOS os módulos devem atualizar ao entrar
+        # ou sair de manutenção, mesmo sem interação do usuário.
+        agora = datetime.now(timezone.utc)
+        bloqueados = tuple(sorted(
+            str(r["id"]) for r in consultar_manutencoes()
+            if r.get("escopo") == "modulo"
+            and (_horario(r.get("inicio")) is not None)
+            and _horario(r["inicio"]) <= agora
+            and (_horario(r.get("fim")) is None or agora < _horario(r.get("fim")))
+        ))
+        chave = "prisma_estado_bloqueios_hub"
+        anterior = st.session_state.get(chave)
+        st.session_state[chave] = bloqueados
+        if anterior is not None and anterior != bloqueados:
+            st.rerun(scope="app")
+
 
 def _autor_administrador():
     from auth import verificar_autenticacao  # evita dependência circular
