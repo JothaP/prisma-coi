@@ -295,7 +295,10 @@ def limpar_nome_bairro(valor):
     """
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
-    texto = re.sub(r"^BAIRRO(?:\s*[-–—:]\s*|\s+)", "", texto)
+    texto = re.sub(
+        r"^(?:BAIRRO|SUB[\s-]*AREA|SUB[\s-]*REGIAO)"
+        r"(?:\s*[-–—:]\s*|\s+)", "", texto
+    )
     # Trata Villa Inglesa e Vila Inglesa como a mesma localidade, sem
     # aproximar nomes de bairros diferentes nem alterar o rótulo original.
     texto = re.sub(r"\bVILLA\b", "VILA", texto)
@@ -344,15 +347,28 @@ def endereco_contem_localidade(endereco, localidade):
     return False
 
 
+def nomes_reconhecidos_feicao(item):
+    """Nomes exatos de um polígono: subárea, bairro e aliases cadastrais.
+
+    Permite reconhecer o campo 'name' de feições adicionadas no PRISMA-GEO,
+    além de NM_BAIRRO, sem aproximação textual entre localidades diferentes.
+    """
+    if item.get("sem_nome"):
+        return set()
+    valores = [
+        item.get("nome_normalizado") or item.get("nome"),
+        *(item.get("nomes_alternativos") or []),
+    ]
+    return {chave for valor in valores if (chave := limpar_nome_bairro(valor))}
+
+
 def indice_nomes_bairros(bairros_geograficos, municipio):
-    """Catálogo restrito ao município, sem correspondência aproximada arriscada."""
+    """Catálogo de bairros e subáreas do município, por nomes exatos."""
     cidade = normalizar_municipio(municipio)
     nomes = set()
     for item in (bairros_geograficos or []):
-        if normalizar_municipio(item.get("municipio", "")) == cidade and not item.get("sem_nome"):
-            nome = limpar_nome_bairro(item.get("nome_normalizado") or item.get("nome"))
-            if nome:
-                nomes.add(nome)
+        if normalizar_municipio(item.get("municipio", "")) == cidade:
+            nomes.update(nomes_reconhecidos_feicao(item))
     return nomes
 
 
@@ -394,6 +410,9 @@ def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
                 for nome in sorted(nomes)]
     texto = str(valor).replace("\r", "\n")
     texto = re.sub(r"(?i)\bBAIRROS?\s*(?:IMPACTADOS?|AFETADOS?)?\s*:", "\n", texto)
+    texto = re.sub(
+        r"(?i)\bSUB[\s-]*[ÁA]REAS?\s*(?:IMPACTADAS?|AFETADAS?)?\s*:", "\n", texto
+    )
     texto = re.sub(r"(?i)\b(?:ÁREAS?|AREAS?)\s+(?:IMPACTADAS?|AFETADAS?)\s*:", "\n", texto)
     partes = re.split(r"[,;\n]+", texto)
     saida = []
