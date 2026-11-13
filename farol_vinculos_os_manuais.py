@@ -132,6 +132,42 @@ def desfazer_vinculo_os_manual(evento_chave, numeros_os):
     return resultado
 
 
+
+def eventos_manuais_do_grupo(registros, grupo_os):
+    """Retorna metadados de eventos ligados manualmente a O.S. deste grupo.
+
+    Usado apenas na exibição dos relatórios; NÃO alimenta o cálculo
+    territorial/temporal da associação automática.
+    """
+    if isinstance(grupo_os, pd.DataFrame):
+        linhas = grupo_os.to_dict("records")
+    else:
+        linhas = list(grupo_os)
+    pares = {
+        (normalizar_os(r.get("Nº da O.S")), normalizar_municipio(r.get("Cidade")))
+        for r in linhas
+    }
+    encontrados = {}
+    for r in registros:
+        if (normalizar_os(r.get("numero_os")),
+                normalizar_municipio(r.get("municipio"))) not in pares:
+            continue
+        chave = str(r.get("evento_chave") or "")
+        if not chave or chave in encontrados:
+            continue
+        encontrados[chave] = {
+            "Cidade": r.get("municipio", ""),
+            "Protocolo": r.get("protocolo", ""),
+            "Serviço": r.get("servico", ""),
+            "Código do Ativo": r.get("codigo_ativo", ""),
+            "Início": r.get("inicio", ""),
+            "Término Real": "",
+            "Status": "Vínculo manual",
+            "Bairros coincidentes": "Associação manual do analista",
+            "Áreas Impactadas": "",
+        }
+    return list(encontrados.values())
+
 def aplicar_vinculos_manuais(vinculadas, nao_vinculadas, registros,
                             coluna_evento="Evento(s) vinculado(s)",
                             coluna_criterio="Critério do vínculo"):
