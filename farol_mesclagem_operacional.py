@@ -165,6 +165,126 @@ def salvar_mescla(evento, codigos, os_numeros, chaves_origem, poligono=None):
     return resposta
 
 
+
+
+def desfazer_mescla(evento_chave, alterado_em):
+    """Desativa SOMENTE o agrupamento; fichas e históricos permanecem intactos.
+
+    A verificação de versão impede desfazer uma mesclagem que outro analista
+    atualizou depois que o formulário foi aberto.
+    """
+    if not fonte_supabase():
+        raise RuntimeError("A reversão compartilhada requer o Supabase.")
+    chave = str(evento_chave or "").strip()
+    if not re.fullmatch(r"[a-f0-9]{32}", chave) or not str(alterado_em or "").strip():
+        raise ValueError("Mesclagem inválida. Atualize a lista e tente novamente.")
+    autor = _autor("editar")
+    resultado = _request(
+        "POST", "/rest/v1/rpc/farol_desfazer_mescla_tx",
+        dados={
+            "p_evento_chave": chave,
+            "p_alterado_em": str(alterado_em).strip(),
+            "p_autor": autor,
+        },
+    )
+    if not isinstance(resultado, dict) or (
+        resultado.get("evento_chave") != chave
+        or resultado.get("agrupamento_ativo") is not False
+        or resultado.get("acompanhamentos_preservados") is not True
+    ):
+        raise RuntimeError("A reversão da mesclagem não foi confirmada pelo Supabase.")
+    listar_mesclas.clear()
+    return resultado
+
+
+def renderizar_painel_desfazer_mesclas(mesclas_ativas, pode_editar):
+    """Controle de reversão independente do modo de criação de mesclagens."""
+    if not mesclas_ativas:
+        return
+    with st.expander(
+        f"↩️ Desfazer mesclagem ({len(mesclas_ativas)} ativa(s))",
+        expanded=False,
+    ):
+        st.caption(
+            "Desativa somente o agrupamento escolhido. As concentrações "
+            "voltam a aparecer separadamente conforme as O.S. do período "
+            "consultado. Fichas consolidadas, vínculos, incorporações "
+            "e movimentações de acompanhamento NÃO serão apagados nem "
+            "redistribuídos automaticamente."
+        )
+        opcoes = sorted(
+            mesclas_ativas,
+            key=lambda item: (normalizar(item.get("municipio", "")),
+                              str(item.get("evento_rotulo", ""))),
+        )
+        indices = list(range(len(opcoes)))
+        indice = st.selectbox(
+            "Mesclagem ativa a desfazer",
+            indices,
+            format_func=lambda i: (
+                f"{opcoes[i].get('evento_rotulo') or 'Evento sem título'} "
+                f"— {nome_concentracao_mesclada(opcoes[i])}"
+            )[:250],
+            key="farol_desfazer_mescla_selecionada",
+        )
+        mescla = opcoes[indice]
+        chave = str(mescla["evento_chave"])
+        codigos = list(dict.fromkeys(
+            str(c).strip() for c in (mescla.get("codigos_origem") or [])
+            if str(c).strip()
+        ))
+        os_origem = {
+            str(n).strip() for n in (mescla.get("os_origem") or [])
+            if str(n).strip()
+        }
+        st.markdown(
+            f"**Município:** {mescla.get('municipio') or 'Não informado'}  |  "
+            f"**Concentrações da mesclagem:** {len(codigos)}  |  "
+            f"**O.S. registradas:** {len(os_origem)}"
+        )
+        if codigos:
+            st.caption("IDs selecionados quando a mesclagem foi criada: "
+                       + ", ".join(codigos))
+        st.warning(
+            "Esta ação não restaura fichas individuais já incorporadas à "
+            "ficha principal. O histórico consolidado e os vínculos existentes "
+            "continuarão disponíveis para consulta e auditoria."
+        )
+        with st.form(f"farol_form_desfazer_mescla_{chave}"):
+            confirmado = st.checkbox(
+                "Confirmo que desejo desfazer APENAS o agrupamento desta "
+                "mesclagem, preservando as fichas de acompanhamento.",
+                disabled=not pode_editar,
+            )
+            enviado = st.form_submit_button(
+                "↩️ Confirmar desfazimento do agrupamento",
+                type="primary",
+                disabled=not pode_editar,
+                use_container_width=True,
+            )
+        if enviado:
+            if not confirmado:
+                st.warning("Confirme a operação antes de continuar.")
+            else:
+                try:
+                    resultado = desfazer_mescla(chave, mescla.get("alterado_em"))
+                    st.session_state[CHAVE_MODO] = False
+                    st.session_state.pop(CHAVE_POLIGONO, None)
+                    st.session_state["farol_v2_concentracao"] = ""
+                    st.session_state["farol_v2_detalhe_aberto"] = ""
+                    st.session_state["farol_concentracao_expandida"] = ""
+                    st.session_state["farol_v2_panorama_versao"] = (
+                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                    )
+                    st.toast(
+                        f"Agrupamento desfeito: {resultado['qtd_concentracoes']} "
+                        "concentrações. Fichas e históricos preservados."
+                    )
+                    st.rerun()
+                except Exception as erro:
+                    st.error(f"Não foi possível desfazer a mesclagem: {erro}")
+
+
 def aplicar_mesclas(concentracoes, grupos, mesclas):
     """Produz uma linha consolidada e um grupo de O.S. sem tocar na base original.
 
