@@ -2303,7 +2303,11 @@ def adicionar_limites_bairros(mapa, bairros):
                 continue
             features.append({
                 "type": "Feature",
-                "properties": {"bairro": str(b.get("nome", "")), "municipio": str(b.get("municipio", ""))},
+                "properties": {
+                    "bairro": str(b.get("nome", "")),
+                    "tipo": str(b.get("tipo_area", "Bairro")),
+                    "municipio": str(b.get("municipio", "")),
+                },
                 "geometry": {
                     "type": "Polygon",
                     "coordinates": [
@@ -2320,7 +2324,11 @@ def adicionar_limites_bairros(mapa, bairros):
         name="Bairros", smooth_factor=1.0,
         style_function=lambda _feature: {"color": "#65758b", "weight": 1.15, "opacity": 0.75, "fillOpacity": 0},
         highlight_function=lambda _feature: {"color": "#334155", "weight": 2, "fillOpacity": 0.06},
-        tooltip=folium.GeoJsonTooltip(fields=["bairro", "municipio"], aliases=["Bairro:", "Município:"], sticky=True),
+        tooltip=folium.GeoJsonTooltip(
+            fields=["bairro", "tipo", "municipio"],
+            aliases=["Localidade:", "Tipo:", "Município:"],
+            sticky=True,
+        ),
     ).add_to(fg)
     fg.add_to(mapa)
 
@@ -3827,7 +3835,7 @@ def modal_eventos():
 
     # Diagnóstico espacial dos nomes deste evento — usa SOMENTE as feições
     # já carregadas. Não adiciona leituras ao Google Sheets nem recria o mapa.
-    with st.expander("🔎 Diagnóstico dos bairros não reconhecidos", expanded=False):
+    with st.expander("🔎 Diagnóstico dos bairros e subáreas não reconhecidos", expanded=False):
         if eventos_visiveis.empty:
             st.info("Nenhum evento disponível neste município.")
         else:
@@ -3854,14 +3862,14 @@ def modal_eventos():
                 st.info("Evento declarado para todo o município. Os polígonos existentes são usados como referência.")
             if not areas_diag:
                 st.warning(
-                    "Nenhum bairro foi extraído do campo Áreas Impactadas. "
-                    "Se os bairros estiverem apenas na mensagem do WhatsApp ou na "
+                    "Nenhum bairro ou subárea foi extraído do campo Áreas Impactadas. "
+                    "Se as localidades estiverem apenas na mensagem do WhatsApp ou na "
                     "Descrição do Serviço, informe a lista em Áreas Impactadas na edição do evento."
                 )
             else:
                 diagnostico = pd.DataFrame([
                     {
-                        "Bairro interpretado": a["bairro"],
+                        "Bairro ou subárea interpretada": a["bairro"],
                         "Polígono no município": (
                             "Encontrado" if a["bairro"] in catalogo_diag else "Não encontrado"
                         ),
@@ -3871,27 +3879,27 @@ def modal_eventos():
                 st.dataframe(diagnostico, hide_index=True, width="stretch")
                 encontrados_diag = int((diagnostico["Polígono no município"] == "Encontrado").sum())
                 st.caption(
-                    f"Bairros reconhecidos no arquivo cartográfico: "
-                    f"{encontrados_diag} de {len(diagnostico)} informados no evento."
+                    f"Bairros e subáreas reconhecidos na base cartográfica: "
+                    f"{encontrados_diag} de {len(diagnostico)} localidades informadas."
                 )
                 ausentes = diagnostico.loc[
                     diagnostico["Polígono no município"] == "Não encontrado",
-                    "Bairro interpretado",
+                    "Bairro ou subárea interpretada",
                 ].tolist()
                 if ausentes:
                     st.warning(
                         "Sem correspondência exata na base geográfica de "
                         f"{cidade_diag}: {', '.join(ausentes)}. "
                         "Confirme a nomenclatura no arquivo GPKG/KMZ/KML do município. "
-                        "O Farol não marca bairros por aproximação de nomes."
+                        "O Farol não marca bairros ou subáreas por aproximação de nomes."
                     )
                 else:
-                    st.success("Todos os bairros interpretados têm polígonos carregados no município.")
+                    st.success("Todos os bairros e subáreas interpretados possuem polígonos no município.")
             st.caption(
                 f"Cobertura cartográfica carregada: {len(catalogo_diag)} "
-                "nome(s) distinto(s) de bairro neste município."
+                "nome(s) distinto(s) de bairros e subáreas neste município."
             )
-            with st.expander("Ver nomes de bairros existentes na base cartográfica", expanded=False):
+            with st.expander("Ver nomes de bairros e subáreas da base cartográfica", expanded=False):
                 if catalogo_diag:
                     st.write(", ".join(sorted(catalogo_diag)))
                 else:
@@ -3901,7 +3909,7 @@ def modal_eventos():
                     )
 
     # O gráfico utiliza APENAS a cidade selecionada, nunca mistura municípios.
-    st.markdown("### Distribuição das O.S. nos bairros impactados")
+    st.markdown("### Distribuição das O.S. nos bairros e subáreas impactados")
     if rel_municipio.empty:
         st.info("Nenhuma O.S. encontrada nos bairros dos eventos deste município.")
     else:
