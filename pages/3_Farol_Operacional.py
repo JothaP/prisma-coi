@@ -2948,6 +2948,115 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
     return dataframe(vinculadas), dataframe(nao_vinculadas)
 
 
+
+def diagnosticar_os_nao_vinculadas(nao_vinculadas, eventos, bairros_geograficos=None):
+    """Explica por que cada O.S. não foi vinculada a evento automaticamente.
+
+    Respeita os mesmos critérios exatos de município, área e horário usados
+    para classificar: início -1h, término real +3h. Nunca cria vínculos.
+    A ausência de polígonos é explicitada, mas não amplia a abrangência.
+    """
+    resultado = nao_vinculadas.copy()
+    coluna = "Motivo da não vinculação"
+    if resultado.empty:
+        resultado[coluna] = pd.Series(dtype=str)
+        return resultado
+    if eventos is None or eventos.empty:
+        resultado[coluna] = "Nenhum evento disponível para análise"
+        return resultado
+
+    contextos_por_cidade = {}
+    for _, evento in eventos.iterrows():
+        cidade = normalizar_municipio(evento.get("Cidade", ""))
+        if not cidade or not evento_pertinente_data_analise(evento):
+            continue
+        areas_texto = evento.get("Áreas Impactadas", "")
+        municipal = evento_abrange_municipio(areas_texto)
+        areas = extrair_bairros_evento(
+            areas_texto, evento.get("Cidade", ""), bairros_geograficos
+        )
+        contextos_por_cidade.setdefault(cidade, []).append({
+            "municipal": municipal,
+            "areas": areas,
+            "geometrias": (
+                indexar_geometrias_evento(bairros_geograficos, cidade, areas)
+                if not municipal else {}
+            ),
+            "inicio": interpretar_data_operacional(evento.get("Início", "")),
+            "fim": interpretar_data_operacional(evento.get("Término Real", "")),
+            "encerrado": (
+                classificar_status_evento(evento.get("Status", ""))[0] == "Finalizado"
+            ),
+        })
+
+    agora = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+    def motivo(os_reg):
+        cidade = normalizar_municipio(os_reg.get("Cidade", ""))
+        if not cidade:
+            return "Município da O.S. não informado"
+        candidatos = contextos_por_cidade.get(cidade, [])
+        if not candidatos:
+            return "Nenhum evento elegível no município e dia analisado"
+        emissao = interpretar_data_operacional(os_reg.get("Dt. Emissão", ""))
+        if pd.isna(emissao):
+            return "Data/hora de emissão da O.S. ausente ou inválida"
+
+        motivos = []
+        for contexto in candidatos:
+            if not contexto["municipal"] and not contexto["areas"]:
+                motivos.append("Áreas Impactadas não informadas no evento")
+                continue
+            localidade, _ = identificar_correspondencia_territorial_evento_os(
+                os_reg, cidade, contexto["areas"],
+                municipal=contexto["municipal"],
+                indice_geometrias=contexto["geometrias"],
+            )
+            if localidade is None:
+                com_geometria = any(contexto["geometrias"].values())
+                lat = normalizar_coordenada(os_reg.get("Latitude", ""), "lat")
+                lon = normalizar_coordenada(os_reg.get("Longitude", ""), "lon")
+                if com_geometria and lat is not None and lon is not None:
+                    motivos.append("O.S. fora dos polígonos das áreas impactadas")
+                elif not com_geometria:
+                    motivos.append(
+                        "Sem polígono da área: bairro/endereço não coincide com o evento"
+                    )
+                else:
+                    motivos.append("Bairro/localidade não corresponde às áreas impactadas")
+                continue
+            inicio, fim = contexto["inicio"], contexto["fim"]
+            if pd.isna(inicio):
+                motivos.append("Evento sem data e horário de início válidos")
+            elif pd.isna(fim) and contexto["encerrado"]:
+                motivos.append("Evento finalizado sem horário de término real")
+            elif pd.notna(fim) and fim < inicio:
+                motivos.append("Horários de início e término do evento inconsistentes")
+            else:
+                limite = fim + pd.Timedelta(hours=3) if pd.notna(fim) else agora
+                if inicio - pd.Timedelta(hours=1) <= emissao <= limite:
+                    motivos.append("Vínculo automático não refletido; atualizar análise")
+                else:
+                    motivos.append("O.S. fora da janela temporal do evento")
+
+        # Diagnóstico mais específico/acionável quando existem eventos múltiplos.
+        preferencias = (
+            "Vínculo automático não refletido; atualizar análise",
+            "O.S. fora da janela temporal do evento",
+            "Evento finalizado sem horário de término real",
+            "Horários de início e término do evento inconsistentes",
+            "Evento sem data e horário de início válidos",
+            "Áreas Impactadas não informadas no evento",
+            "O.S. fora dos polígonos das áreas impactadas",
+            "Sem polígono da área: bairro/endereço não coincide com o evento",
+            "Bairro/localidade não corresponde às áreas impactadas",
+        )
+        return next((item for item in preferencias if item in motivos),
+                    "Não foi identificada correspondência territorial ou temporal")
+
+    resultado[coluna] = resultado.apply(motivo, axis=1)
+    return resultado
+
+
 def descricao_eventos_pdf(eventos_relacionados):
     """Resumo Serviço / Código do Ativo dos eventos efetivamente relacionados à concentração."""
     if eventos_relacionados is None or eventos_relacionados.empty:
