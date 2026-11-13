@@ -19,7 +19,7 @@ FUNCOES={
     "normalizar","chave_evento","chave_acompanhamento_mesclado",
     "nome_concentracao_mesclada",
     "validar_poligono","extrair_desenho_folium","contagem_no_poligono",
-    "aplicar_mesclas","eventos_e_concentracoes",
+    "aplicar_mesclas","eventos_e_concentracoes","desfazer_mescla",
 }
 sel=[n for n in ARVORE.body if isinstance(n,ast.FunctionDef) and n.name in FUNCOES]
 assert {n.name for n in sel}==FUNCOES
@@ -124,6 +124,77 @@ class TestMerge(unittest.TestCase):
         cc,pp=func("aplicar_mesclas")(c,p,[m])
         self.assertEqual(len(cc),3)
         self.assertTrue(pp.equals(p))
+
+    def test_reversao_sem_mescla_ativa_restaura_concentracoes_originais(self):
+        c,p=amostra()
+        agrupadas,pp=func("aplicar_mesclas")(c,p,[mescla()])
+        self.assertEqual(len(agrupadas),2)
+        restauradas,pontos=func("aplicar_mesclas")(c,p,[])
+        self.assertEqual(restauradas["ID_CONCENTRACAO"].tolist(),
+                         c["ID_CONCENTRACAO"].tolist())
+        self.assertTrue(pontos.equals(p))
+
+    def test_rpc_reversao_confere_resposta_e_invalida_cache(self):
+        chamadas=[]
+        cache=[]
+        class Cache:
+            @staticmethod
+            def clear(): cache.append(True)
+        originais={
+            nome:ns.get(nome) for nome in
+            ("fonte_supabase","_autor","_request","listar_mesclas")
+        }
+        def requisicao(metodo,caminho,*,dados=None):
+            chamadas.append((metodo,caminho,dados))
+            return {
+                "evento_chave":"a"*32,"agrupamento_ativo":False,
+                "acompanhamentos_preservados":True,
+                "qtd_concentracoes":2,"qtd_os":6,
+            }
+        try:
+            ns.update({
+                "fonte_supabase":lambda:True,
+                "_autor":lambda acao:"autor-teste",
+                "_request":requisicao,
+                "listar_mesclas":Cache(),
+            })
+            resposta=func("desfazer_mescla")(
+                "a"*32,"2026-11-13T12:30:00+00:00"
+            )
+            self.assertFalse(resposta["agrupamento_ativo"])
+            self.assertTrue(resposta["acompanhamentos_preservados"])
+            self.assertEqual(chamadas[0][1],
+                             "/rest/v1/rpc/farol_desfazer_mescla_tx")
+            self.assertEqual(chamadas[0][2]["p_evento_chave"],"a"*32)
+            self.assertEqual(chamadas[0][2]["p_alterado_em"],
+                             "2026-11-13T12:30:00+00:00")
+            self.assertEqual(cache,[True])
+            with self.assertRaises(ValueError):
+                func("desfazer_mescla")("chave-errada","2026-11-13T12:30:00Z")
+            self.assertEqual(len(chamadas),1)
+        finally:
+            for nome,valor in originais.items():
+                if valor is None:ns.pop(nome,None)
+                else:ns[nome]=valor
+
+    def test_reversao_integrada_ao_panorama_e_sem_apagar_fichas(self):
+        modulo=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
+        auxiliar=SRC.read_text(encoding="utf-8")
+        sql=(ROOT/"sql"/"farol_desfazer_mescla_operacional.sql").read_text(encoding="utf-8")
+        self.assertIn("renderizar_painel_desfazer_mesclas",modulo)
+        trecho=modulo.split('st.subheader("🗺️ Farol V2 — Panorama e concentrações")',1)[1]
+        self.assertLess(
+            trecho.index("renderizar_painel_desfazer_mesclas("),
+            trecho.index("if df_pontos.empty:")
+        )
+        self.assertIn("Desfazer mesclagem",auxiliar)
+        self.assertIn("Fichas consolidadas, vínculos, incorporações",auxiliar)
+        self.assertIn("SET ativo=false, alterado_em=now()",sql)
+        self.assertIn("MESCLA_ATUALIZADA_RECARREGAR",sql)
+        self.assertIn("INSERT INTO public.prisma_auditoria",sql)
+        self.assertIn("SECURITY INVOKER",sql)
+        self.assertNotIn("DELETE FROM public.farol_acomp_",sql)
+        self.assertNotIn("UPDATE public.farol_acomp_",sql)
 
     def test_isolamento_e_auditoria(self):
         modulo=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
