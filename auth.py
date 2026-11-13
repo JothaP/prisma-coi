@@ -76,12 +76,29 @@ def verificar_autenticacao(forcar=False):
         return False
 
 def tem_acesso_modulo(modulo):
-    return bool(verificar_autenticacao() and st.session_state.get("prisma_permissoes",{}).get((str(modulo),"visualizar"),False))
+    return bool(
+        verificar_autenticacao()
+        and st.session_state.get("prisma_permissoes", {}).get((str(modulo), "visualizar"), False)
+    )
 
 def pode_executar_acao(modulo,acao):
-    if acao not in ("visualizar","criar","importar","editar","excluir","exportar","relatorios"):return False
-    return bool(verificar_autenticacao() and st.session_state.get("prisma_permissoes",{}).get((str(modulo),str(acao)),False)
-                and st.session_state.get("prisma_permissoes",{}).get((str(modulo),"visualizar"),False))
+    if acao not in ("visualizar","criar","importar","editar","excluir","exportar","relatorios"):
+        return False
+    if not verificar_autenticacao():
+        return False
+    if st.session_state.get("perfil") != "admin":
+        # Segunda trava para ações de escrita, inclusive após sessões abertas.
+        from prisma_manutencao import situacao
+        try:
+            ativo, _ = situacao(modulo)
+        except ErroPRISMA:
+            return False
+        if ativo:
+            return False
+    return bool(
+        st.session_state.get("prisma_permissoes",{}).get((str(modulo),str(acao)),False)
+        and st.session_state.get("prisma_permissoes",{}).get((str(modulo),"visualizar"),False)
+    )
 
 def exigir_acesso_modulo(modulo):
     if not verificar_autenticacao():
@@ -89,6 +106,9 @@ def exigir_acesso_modulo(modulo):
         if st.button("Ir para login",key="prisma_ir_login_"+str(modulo)):
             st.switch_page("app.py")
         st.stop()
+    from prisma_manutencao import verificar_manutencao, monitorar_manutencao
+    verificar_manutencao(modulo)
+    monitorar_manutencao(modulo)
     if not tem_acesso_modulo(modulo):
         st.error("Você não possui autorização para acessar este módulo.")
         st.stop()
