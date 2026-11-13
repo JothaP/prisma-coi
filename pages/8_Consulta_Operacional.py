@@ -471,18 +471,52 @@ def _popup_ativo(ativo: dict) -> str:
     ) + "</div>"
 
 
-def _caminho_bairros_teresina() -> Path | None:
-    if not PASTA_BAIRROS.is_dir():
-        return None
-    candidatos = [p for p in PASTA_BAIRROS.iterdir()
-                  if p.is_file() and p.suffix.lower() in {".gpkg", ".kml", ".kmz"}
-                  and "TERESINA" in _normalizar_texto(p.stem)
-                  and not any(t in _normalizar_texto(p.stem) for t in ("INFLUENCIA", "ABRANGENCIA"))]
-    prioridade = {".gpkg": 0, ".kmz": 1, ".kml": 2}
-    if candidatos:
-        return sorted(candidatos, key=lambda p: (prioridade[p.suffix.lower()], p.name))[0]
+def _arquivos_bairros_municipais() -> tuple[Path, ...]:
+    """Descobre TODOS os GeoPackages de geodados/municipios.
+
+    Não filtra pelo nome TERESINA, não escolhe apenas um arquivo por
+    município e não substitui um GPKG por outro. Cada arquivo pode conter
+    múltiplas camadas e novas feições. Se a pasta não tiver GPKG, mantém
+    a compatibilidade anterior com KMZ/KML de Teresina.
+    """
+    if PASTA_BAIRROS.is_dir():
+        gpkg = sorted(
+            (p for p in PASTA_BAIRROS.iterdir()
+             if p.is_file() and p.suffix.lower() == ".gpkg"),
+            key=lambda p: p.name.casefold(),
+        )
+        if gpkg:
+            return tuple(gpkg)
+
+        candidatos = [
+            p for p in PASTA_BAIRROS.iterdir()
+            if p.is_file() and p.suffix.lower() in {".kmz", ".kml"}
+            and "TERESINA" in _normalizar_texto(p.stem)
+            and not any(
+                t in _normalizar_texto(p.stem)
+                for t in ("INFLUENCIA", "ABRANGENCIA")
+            )
+        ]
+        prioridade = {".kmz": 0, ".kml": 1}
+        if candidatos:
+            return (min(candidatos, key=lambda p: (
+                prioridade[p.suffix.lower()], p.name.casefold(),
+            )),)
     legado = RAIZ / "TERESINA.kmz"
-    return legado if legado.is_file() else None
+    return (legado,) if legado.is_file() else ()
+
+
+def _assinaturas_bairros_municipais() -> tuple[tuple[str, int, int], ...]:
+    """Versão de TODOS os GPKG: novos arquivos também invalidam o mapa."""
+    assinaturas = []
+    for arquivo in _arquivos_bairros_municipais():
+        try:
+            assinaturas.append(_assinatura(arquivo))
+        except OSError:
+            # Arquivo substituído durante a publicação: será detectado
+            # na próxima leitura, sem bloquear os outros GeoPackages.
+            continue
+    return tuple(assinaturas)
 
 
 @st.fragment(run_every="60s")
@@ -492,11 +526,7 @@ def _m8_monitorar_novas_feicoes_bairros():
     Analisa apenas nome, tamanho e data de modificação da fonte, evitando
     percorrer o GeoPackage na checagem periódica.
     """
-    arquivo = _caminho_bairros_teresina()
-    try:
-        versao = _assinatura(arquivo) if arquivo else None
-    except OSError:
-        versao = None
+    versao = _assinaturas_bairros_municipais()
     chave = "m8_versao_fonte_bairros"
     anterior = st.session_state.get(chave, "__primeira_verificacao__")
     st.session_state[chave] = versao
@@ -1523,38 +1553,54 @@ def exibir_consulta_operacional() -> None:
         validos["_influencia"] = "Não disponível"
 
     bairros = []
-    assinatura_bairros = None
+    assinaturas_bairros = ()
     if mostrar_bairros:
-        # A detecção leve permite atualizar novas feições mesmo que o usuário
-        # mantenha esta página aberta após substituir o arquivo no servidor.
+        # A atualização acompanha a lista inteira: arquivos novos, removidos
+        # ou alterados, independentemente de seus nomes.
         _m8_monitorar_novas_feicoes_bairros()
-        caminho_bairros = _caminho_bairros_teresina()
-        if caminho_bairros:
+        assinaturas_bairros = _assinaturas_bairros_municipais()
+        todas = []
+        falhas_bairros = []
+        for assinatura in assinaturas_bairros:
             try:
-                assinatura_bairros = _assinatura(caminho_bairros)
-                todas = _bairros_geograficos(assinatura_bairros)
-                if area is not None:
-                    bx = area.bounds
-                    oeste, sul, leste, norte = bx[0]-.008, bx[1]-.008, bx[2]+.008, bx[3]+.008
-                elif not validos.empty:
-                    oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
-                    leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
-                else:
-                    # Sem pesquisa/desenho: exibir todos os polígonos do
-                    # município, sem recorte arbitrário ou limite de 90.
-                    bairros = todas
-                if area is not None or not validos.empty:
-                    # Com pesquisa, selecionar pelo bounding box real de
-                    # cada geometria; NENHUM corte por quantidade.
-                    bairros = [
-                        b for b in todas
-                        if not (
-                            b["limites"][2] < oeste or b["limites"][0] > leste
-                            or b["limites"][3] < sul or b["limites"][1] > norte
-                        )
-                    ]
-            except Exception as erro:
-                st.warning(f"Limites de bairros não puderam ser carregados: {erro}")
+                # Cache por ARQUIVO, não pelo conjunto: GPKG inalterados não
+                # são relidos quando só um deles recebe novas feições.
+                todas.extend(_bairros_geograficos(assinatura))
+            except (OSError, ValueError, RuntimeError, sqlite3.Error,
+                    zipfile.BadZipFile, ET.ParseError) as erro:
+                falhas_bairros.append(f"{Path(assinatura[0]).name}: {erro}")
+        if falhas_bairros:
+            st.warning(
+                "Alguns arquivos de bairros não puderam ser lidos: "
+                + "; ".join(falhas_bairros[:3])
+                + ("; ..." if len(falhas_bairros) > 3 else "")
+            )
+        st.caption(
+            f"Base geográfica: {len(assinaturas_bairros)} arquivo(s) "
+            f"e {len(todas)} feição(ões) poligonais reconhecidas."
+        )
+        if area is not None:
+            oeste, sul, leste, norte = (
+                area.bounds[0]-.008, area.bounds[1]-.008,
+                area.bounds[2]+.008, area.bounds[3]+.008,
+            )
+        elif not validos.empty:
+            oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
+            leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
+        else:
+            # Consulta livre: inclui todas as feições dos arquivos encontrados,
+            # sem escolher apenas a primeira camada/um único GeoPackage.
+            bairros = todas
+        if area is not None or not validos.empty:
+            # Só enviar ao navegador as feições que cruzem o contexto da
+            # análise, mantendo o conjunto completo no cache do servidor.
+            bairros = [
+                b for b in todas
+                if not (
+                    b["limites"][2] < oeste or b["limites"][0] > leste
+                    or b["limites"][3] < sul or b["limites"][1] > norte
+                )
+            ]
 
     cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
     if area is not None and base_matriculas_disponivel:
@@ -1653,7 +1699,7 @@ def exibir_consulta_operacional() -> None:
     # A identidade do mapa inclui a versão das feições. Sem isso, o componente
     # Leaflet pode conservar a camada anterior mesmo após uma nova leitura GPKG.
     hash_bairros = hashlib.sha256(
-        repr(assinatura_bairros).encode("utf-8")
+        repr(assinaturas_bairros).encode("utf-8")
     ).hexdigest()[:12]
     chave_mapa = (
         f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}"
