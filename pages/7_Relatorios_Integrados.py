@@ -37,6 +37,9 @@ from auth import verificar_autenticacao, tem_acesso_modulo
 from farol_graficos_temporarios import chave_logger, filtrar_loggers, rotulo_logger
 from integracao_acompanhamento_producao import listar_vinculos, dados_acompanhamento
 from farol_acomp_supabase_backend import fonte_supabase
+from farol_vinculos_os_manuais import (
+    listar_vinculos_os_manuais, limpar_cache_vinculos_manuais, aplicar_vinculos_manuais,
+)
 from farol_mesclagem_operacional import listar_mesclas as listar_mesclas_farol, aplicar_mesclas as aplicar_mesclas_farol
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
@@ -2923,6 +2926,12 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
     pdf.setAuthor('COI — Centro de Operações Integradas')
     numero_de_paginas = 0
     indice_pressao_os = ri7_preparar_indice_pressao_os(pressao, pontos_todos)
+    # Mesmo registro persistido do Farol (Módulo 3), sem usar estado ou cache
+    # anterior ao clique de exportação do PDF.
+    limpar_cache_vinculos_manuais()
+    manuais_relatorio = listar_vinculos_os_manuais(
+        grupos.get("Nº da O.S", [])
+    )
 
     def terminar_pagina():
         nonlocal numero_de_paginas
@@ -2940,6 +2949,10 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
             grupo = ri7_rotular_status_os_grupo(grupo, indice_pressao_os)
             eventos = eventos_da_concentracao(conc,contexto,inicio,fim)
             vinculadas,nao = classificar_os_eventos(grupo,eventos)
+            vinculadas,nao = aplicar_vinculos_manuais(
+                vinculadas, nao, manuais_relatorio,
+                coluna_evento="Eventos vinculados", coluna_criterio=None,
+            )
             acompanhamento,_,_ = ficha_acompanhamento(
                 conc,grupo,contexto,incluir_movimentacoes=False)
             mapa = mapa_ficha_farol(conc,grupo,pressao.iloc[:0],contexto,raio_cluster)
