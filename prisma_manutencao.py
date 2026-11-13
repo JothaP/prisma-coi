@@ -133,18 +133,27 @@ def assinatura_avisos(*, agora=None):
     )
 
 
+@st.fragment(run_every=f"{ATUALIZACAO_SEGUNDOS}s")
 def renderizar_avisos_publicos(*, limite=8):
-    """Comunicados no login e no Hub, visíveis inclusive a administradores."""
-    avisos = avisos_publicos()
+    """Comunicados atualizados a cada 15 s no Hub e no login."""
+    agora = datetime.now(timezone.utc)
+    avisos = avisos_publicos(agora=agora)
     for estado, r in avisos[:limite]:
         inicio, fim = texto_inicio(r), texto_fim(r)
         area = descricao_abrangencia(r)
         detalhe = str(r.get("mensagem") or "").strip()
-        prefixo = (
-            "🛠️ Manutenção em andamento" if estado == "em_andamento" else
-            "⚠️ Manutenção próxima (menos de 30 minutos)" if estado == "iminente" else
-            "🛠️ Manutenção programada"
-        )
+        if estado == "iminente":
+            segundos = max(0, int((_horario(r["inicio"]) - agora).total_seconds()))
+            horas, resto = divmod(segundos, 3600)
+            minutos, segundos = divmod(resto, 60)
+            prefixo = (
+                f"⚠️ Manutenção em {horas:02d}:{minutos:02d}:{segundos:02d}"
+                " (contagem regressiva)"
+            )
+        elif estado == "em_andamento":
+            prefixo = "🛠️ Manutenção em andamento"
+        else:
+            prefixo = "🛠️ Manutenção programada"
         texto = (f"{prefixo} — {area}. Início: {inicio}. "
                  f"Retorno previsto: {fim}. Horário de Teresina (UTC−3).")
         if detalhe:
