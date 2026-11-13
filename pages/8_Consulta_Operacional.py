@@ -485,9 +485,35 @@ def _caminho_bairros_teresina() -> Path | None:
     return legado if legado.is_file() else None
 
 
-@st.cache_data(show_spinner=False, max_entries=2)
+@st.fragment(run_every="60s")
+def _m8_monitorar_novas_feicoes_bairros():
+    """Detecta novas feições publicadas sem refazer consultas de matrículas.
+
+    Analisa apenas nome, tamanho e data de modificação da fonte, evitando
+    percorrer o GeoPackage na checagem periódica.
+    """
+    arquivo = _caminho_bairros_teresina()
+    try:
+        versao = _assinatura(arquivo) if arquivo else None
+    except OSError:
+        versao = None
+    chave = "m8_versao_fonte_bairros"
+    anterior = st.session_state.get(chave, "__primeira_verificacao__")
+    st.session_state[chave] = versao
+    if anterior != "__primeira_verificacao__" and anterior != versao:
+        st.session_state["m8_integrado_versao_mapa"] = (
+            st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+        )
+        st.rerun(scope="app")
+
+
+@st.cache_data(show_spinner=False, ttl=300, max_entries=2)
 def _bairros_geograficos(assinatura: tuple[str, int, int]) -> list[dict]:
-    """Código anterior preservado para as feições de bairro, independente da influência."""
+    """Lê todas as feições, inclusive as novas e sem nome, do arquivo municipal.
+
+    A assinatura do arquivo invalida o cache quando o GPKG/KML/KMZ mudar;
+    o TTL de cinco minutos segue a política de geometrias do Módulo 3.
+    """
     from pyproj import CRS, Transformer
     from shapely import wkb
     from shapely.geometry import Polygon
@@ -1497,11 +1523,16 @@ def exibir_consulta_operacional() -> None:
         validos["_influencia"] = "Não disponível"
 
     bairros = []
+    assinatura_bairros = None
     if mostrar_bairros:
+        # A detecção leve permite atualizar novas feições mesmo que o usuário
+        # mantenha esta página aberta após substituir o arquivo no servidor.
+        _m8_monitorar_novas_feicoes_bairros()
         caminho_bairros = _caminho_bairros_teresina()
         if caminho_bairros:
             try:
-                todas = _bairros_geograficos(_assinatura(caminho_bairros))
+                assinatura_bairros = _assinatura(caminho_bairros)
+                todas = _bairros_geograficos(assinatura_bairros)
                 if area is not None:
                     bx = area.bounds
                     oeste, sul, leste, norte = bx[0]-.008, bx[1]-.008, bx[2]+.008, bx[3]+.008
@@ -1619,9 +1650,14 @@ def exibir_consulta_operacional() -> None:
     # Trocar a chave ao alternar rótulos força a reconstrução correta do
     # componente Leaflet. A consulta, a área desenhada e os filtros continuam
     # preservados em st.session_state, sem alterar a base de matrículas.
+    # A identidade do mapa inclui a versão das feições. Sem isso, o componente
+    # Leaflet pode conservar a camada anterior mesmo após uma nova leitura GPKG.
+    hash_bairros = hashlib.sha256(
+        repr(assinatura_bairros).encode("utf-8")
+    ).hexdigest()[:12]
     chave_mapa = (
         f"m8_mapa_integrado_{st.session_state.get('m8_integrado_versao_mapa', 0)}"
-        f"_rotulos_{int(rotulos)}"
+        f"_rotulos_{int(rotulos)}_bairros_{hash_bairros}"
     )
     retorno = st_folium(
         mapa, width=None, height=660, returned_objects=["all_drawings"],
