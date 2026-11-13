@@ -38,9 +38,13 @@ from farol_graficos_temporarios import chave_logger, filtrar_loggers, rotulo_log
 from integracao_acompanhamento_producao import listar_vinculos, dados_acompanhamento
 from farol_acomp_supabase_backend import fonte_supabase
 from farol_vinculos_os_manuais import (
-    listar_vinculos_os_manuais, limpar_cache_vinculos_manuais, aplicar_vinculos_manuais,
+    listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
+    aplicar_vinculos_manuais, eventos_manuais_do_grupo,
 )
-from farol_mesclagem_operacional import listar_mesclas as listar_mesclas_farol, aplicar_mesclas as aplicar_mesclas_farol
+from farol_mesclagem_operacional import (
+    listar_mesclas as listar_mesclas_farol, aplicar_mesclas as aplicar_mesclas_farol,
+    chave_evento as chave_evento_farol,
+)
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
 # usado para formar as concentrações ou associar medições do Módulo 1).
@@ -2953,6 +2957,15 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
                 vinculadas, nao, manuais_relatorio,
                 coluna_evento="Eventos vinculados", coluna_criterio=None,
             )
+            # Exibe os eventos manuais no resumo do PDF, mesmo que nenhum
+            # evento tenha coincidência territorial automática. Essa adição
+            # ocorre DEPOIS da classificação, para não criar falsos vínculos.
+            vistos = {chave_evento_farol(e) for e in eventos}
+            for manual in eventos_manuais_do_grupo(manuais_relatorio, grupo):
+                chave_manual = chave_evento_farol(manual)
+                if chave_manual not in vistos:
+                    vistos.add(chave_manual)
+                    eventos.append(manual)
             acompanhamento,_,_ = ficha_acompanhamento(
                 conc,grupo,contexto,incluir_movimentacoes=False)
             mapa = mapa_ficha_farol(conc,grupo,pressao.iloc[:0],contexto,raio_cluster)
