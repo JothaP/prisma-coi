@@ -3631,29 +3631,50 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
     vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
         vinculadas, nao_vinculadas, manuais
     )
+    # Explica por que as O.S. restantes não cumpriram território e horário,
+    # sem transformar ausência de polígono em vinculação municipal automática.
+    nao_vinculadas = diagnosticar_os_nao_vinculadas(
+        nao_vinculadas, eventos, bairros_geograficos
+    )
     colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Endereço",
                   "Status OS", "Dt. Emissão", "Serviço Executado",
                   "Evento(s) vinculado(s)", "Critério do vínculo"]
+    colunas_nao_vinculadas = colunas_os + ["Motivo da não vinculação"]
     st.markdown(f"#### Ordens vinculadas aos eventos ({len(vinculadas)})")
     st.dataframe(
         vinculadas.reindex(columns=colunas_os).fillna(""),
         width="stretch", hide_index=True,
     )
     st.markdown(f"#### Ordens não vinculadas ({len(nao_vinculadas)})")
+    if not nao_vinculadas.empty:
+        motivos = nao_vinculadas["Motivo da não vinculação"].value_counts()
+        with st.expander("🔎 Diagnóstico das O.S. sem vínculo", expanded=False):
+            st.caption(
+                "A ausência de polígonos não impede a vinculação por bairro, "
+                "endereço ou abrangência municipal explícita. O diagnóstico "
+                "identifica o motivo provável da não associação automática."
+            )
+            st.dataframe(
+                pd.DataFrame({
+                    "Motivo": motivos.index,
+                    "Quantidade de O.S.": motivos.values,
+                }),
+                width="stretch", hide_index=True,
+            )
     habilitar_manual = bool(PODE_EDITAR_FAROL and fonte_supabase())
     selecionadas_os = []
     if nao_vinculadas.empty or not habilitar_manual:
         st.dataframe(
-            nao_vinculadas.reindex(columns=colunas_os).fillna(""),
+            nao_vinculadas.reindex(columns=colunas_nao_vinculadas).fillna(""),
             width="stretch", hide_index=True,
         )
     else:
-        tabela = nao_vinculadas.reindex(columns=colunas_os).fillna("").copy()
+        tabela = nao_vinculadas.reindex(columns=colunas_nao_vinculadas).fillna("").copy()
         tabela.insert(0, "Selecionar", False)
         chave_editor = f"farol_os_manuais_editor_{codigo}"
         editado = st.data_editor(
             tabela, key=chave_editor, hide_index=True, width="stretch",
-            disabled=colunas_os,
+            disabled=colunas_nao_vinculadas,
             column_config={
                 "Selecionar": st.column_config.CheckboxColumn(
                     "Selecionar", help="Marque as O.S. que deseja vincular ao evento.",
