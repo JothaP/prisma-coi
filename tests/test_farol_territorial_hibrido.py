@@ -21,6 +21,7 @@ ARVORE = ast.parse(FONTE.read_text(encoding="utf-8"), filename=str(FONTE))
 FUNCOES = {
     "normalizar_texto", "normalizar_cabecalho", "limpar_valor", "parse_float",
     "normalizar_coordenada", "limpar_nome_bairro", "normalizar_localidade_busca",
+    "nomes_reconhecidos_feicao",
     "endereco_contem_localidade", "normalizar_municipio", "indice_nomes_bairros",
     "resolver_nome_bairro", "evento_abrange_municipio", "extrair_bairros_evento",
     "ponto_em_poligono", "ponto_em_bairro", "indexar_geometrias_evento",
@@ -91,6 +92,26 @@ class TesteVinculosTerritoriaisFarol(unittest.TestCase):
     def test_subarea_sobreposta_ao_bairro_oficial(self):
         area, metodo = self.criterio(os_exemplo(), "Dom Avelar", geometrias())
         self.assertEqual((area, metodo), ("DOM AVELAR", "Polígono"))
+
+    def test_subarea_com_rotulo_explicito_e_aliases_do_gpkg(self):
+        # Simula feição do PRISMA-GEO com NM_BAIRRO + name distinto.
+        exemplo = geometrias()[1].copy()
+        exemplo["nome"] = "Vila Inglesa"
+        exemplo["nome_normalizado"] = "VILA INGLESA"
+        exemplo["nomes_alternativos"] = ["Bairro Oficial", "Villa Inglesa"]
+        exemplo["tipo_area"] = "Subárea"
+        base = [exemplo]
+        catalogo = ambiente["indice_nomes_bairros"](base, "TERESINA")
+        self.assertIn("VILA INGLESA", catalogo)
+        self.assertIn("BAIRRO OFICIAL", catalogo)
+        locais = ambiente["extrair_bairros_evento"](
+            "Subáreas afetadas: Villa Inglesa", "TERESINA", base
+        )
+        self.assertEqual([x["bairro"] for x in locais], ["VILA INGLESA"])
+        local, criterio = ambiente["identificar_correspondencia_territorial_evento_os"](
+            os_exemplo(), "TERESINA", locais, base
+        )
+        self.assertEqual((local, criterio), ("VILA INGLESA", "Polígono"))
 
     def test_poligono_fora_impede_vinculo_por_endereco_ou_bairro(self):
         reg = os_exemplo(Latitude=-5.08, Longitude=-42.88,
