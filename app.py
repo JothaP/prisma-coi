@@ -16,6 +16,8 @@ from auth import (
 )
 from prisma_manutencao import (
     aviso_login, verificar_manutencao, monitorar_manutencao, situacao, texto_fim,
+    MODULOS as NOMES_MODULOS_MANUTENCAO, FUSO as FUSO_MANUTENCAO,
+    _horario as _horario_manutencao,
 )
 
 
@@ -675,17 +677,13 @@ if perfil_interno != "admin":
     avisos_exibidos = []
     for modulo_codigo, aviso in avisos_programados.items():
         if aviso and aviso.get("escopo") == "modulo":
-            nome = next((m["titulo"] for m in []), None)
-            titulo = {
-                "1": "Baixa Pressão", "2": "Mapeamento de Pressão",
-                "3": "Farol Operacional", "4": "Ferramentas Operacionais",
-                "5": "Cadastros e Consultas", "6": "Ferramentas Adicionais",
-                "7": "Relatórios Integrados", "8": "Consulta Operacional",
-                "9": "Gestão de Ativos", "teste": "Ambiente de Teste",
-            }.get(modulo_codigo, modulo_codigo)
-            avisos_exibidos.append(f"{titulo}: início "
-                + str(aviso.get("inicio", ""))[:16].replace("T", " ")
-                + " (horário da fonte); retorno: " + texto_fim(aviso))
+            titulo = NOMES_MODULOS_MANUTENCAO.get(modulo_codigo, modulo_codigo)
+            inicio_local = _horario_manutencao(aviso["inicio"]).astimezone(
+                FUSO_MANUTENCAO
+            ).strftime("%d/%m/%Y às %H:%M")
+            avisos_exibidos.append(
+                f"{titulo}: início {inicio_local}; retorno: {texto_fim(aviso)}"
+            )
     if avisos_exibidos:
         st.info("🛠️ Manutenções próximas — " + " | ".join(avisos_exibidos))
 
