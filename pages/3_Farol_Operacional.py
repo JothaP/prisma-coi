@@ -3689,6 +3689,7 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
     # Captura cartográfica apenas sob demanda; evita Chromium em cada rerun do Streamlit.
     if st.button("📸 Preparar PDF com mapa da concentração", key=f"preparar_pdf_{codigo}"):
         try:
+            limpar_cache_vinculos_manuais()
             with st.spinner("Capturando mapa aproximado e preparando relatório..."):
                 mapa_ficha = mapa_exclusivo_concentracao(concentracao, os_grupo, ativos)
                 imagem_ficha = capturar_mapa_folium(mapa_ficha, largura=800, altura=690)
@@ -4375,6 +4376,12 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
             Paragraph(f"Concentrações: {len(concentracoes)} · O.S., concentrações e equipamentos operacionais.", pequeno),
         ]))
         historia.append(PageBreak())
+        # Vínculos manuais de todas as concentrações consultados uma única vez.
+        # A exportação ignora caches anteriores para refletir o Supabase atual.
+        limpar_cache_vinculos_manuais()
+        manuais_relatorio = listar_vinculos_os_manuais(
+            pontos_cluster.get("Nº da O.S", [])
+        )
         # Imagens do dia: lidas uma única vez para todo o relatório operacional.
         indice_graficos = indice_do_dia(SPREADSHEET_ID, dia_graficos())
         for indice, (_, c) in enumerate(concentracoes.iterrows()):
@@ -4409,6 +4416,9 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
                           ) or "Nenhum evento relacionado"), pequeno),
             ])
             vinculadas, nao_vinculadas = classificar_os_por_evento(grupo, eventos_da_concentracao)
+            vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+                vinculadas, nao_vinculadas, manuais_relatorio
+            )
             # Distribuir as duas tabelas dentro da área cinza ao lado do mapa.
             # O espaço abaixo do mapa só recebe linhas que não couberem no painel.
             def linhas_pdf(base):
