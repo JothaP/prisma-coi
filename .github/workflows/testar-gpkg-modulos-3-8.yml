@@ -7,6 +7,7 @@ on:
       - 'pages/8_Consulta_Operacional.py'
       - 'geodados/municipios/*.gpkg'
       - 'tests/test_gpkg_modulos_3_8.py'
+      - 'tests/test_modulo8_rotulos_marcadores.py'
       - '.github/workflows/testar-gpkg-modulos-3-8.yml'
   workflow_dispatch:
 
