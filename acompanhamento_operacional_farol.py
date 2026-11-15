@@ -450,8 +450,12 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
             acao = st.radio(
                 "O que deseja fazer com esta concentração?",
                 ("Editar ficha compartilhada", "Criar ficha independente nesta concentração"),
+                index=None,
                 key=f"farol_acomp_acao_{chave_concentracao}",
             )
+            if acao is None:
+                st.info("Escolha uma ação para continuar. Nenhuma ficha será alterada automaticamente.")
+                return
             separar = acao == "Criar ficha independente nesta concentração"
             if separar:
                 copiar = st.checkbox(
@@ -559,6 +563,13 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
         if evento and not separar and not somente_leitura:
             movimentacao = st.text_area("Nova movimentação (opcional)", placeholder="Descreva a ação realizada ou pendência...", height=70)
         if not somente_leitura:
+            confirmar_edicao_compartilhada = (
+                st.checkbox(
+                    "Confirmo que desejo editar a ficha compartilhada, afetando todas as concentrações vinculadas.",
+                    key=f"farol_acomp_confirmar_compartilhada_{chave_concentracao}",
+                ) if evento and contexto.get("ficha_compartilhada") and not separar
+                else True
+            )
             if concluido and not criar_nova:
                 salvar = st.form_submit_button("💾 Salvar alterações / Reabrir",
                                               type="primary", use_container_width=True)
@@ -584,6 +595,8 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                 raise ValueError("Confirme o encerramento antes de concluir o acompanhamento.")
             if separar and not confirmar_separacao:
                 raise ValueError("Confirme a separação desta concentração.")
+            if evento and not separar and not confirmar_edicao_compartilhada:
+                raise ValueError("Confirme a edição da ficha compartilhada.")
             if salvar and status == "Concluído" and criar_nova:
                 raise ValueError("Para concluir a nova ficha, use 'Acompanhamento Concluído'.")
             if salvar and status == "Concluído" and not concluido:
