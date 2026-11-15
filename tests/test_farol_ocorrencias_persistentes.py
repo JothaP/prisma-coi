@@ -8,6 +8,7 @@ import pandas as pd
 
 from farol_ocorrencias_persistentes import (
     chaves_eventos_confirmados, resolver_ocorrencias,
+    preparar_lote_persistencia,
 )
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -191,6 +192,55 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
         self.assertEqual({r["evento_id"] for r in dados.values()},{"164"})
         self.assertEqual(len(lote),1)  # uma já estava vinculada, sem nova escrita
         self.assertEqual(lote[0]["os_evento_total"],["101","102","202","203"])
+
+    def test_evento_com_uma_os_confirmada_e_valido(self):
+        op={
+            "chave":"c"*32,"ficha_id":"164","municipio":"TERESINA",
+            "os":["101"],"motivo":"evento","evento_chave":self.evento,
+            "latitude":"-5.09","longitude":"-42.8",
+        }
+        validos,pendentes=preparar_lote_persistencia([op])
+        self.assertEqual(validos,[op])
+        self.assertFalse(pendentes)
+
+    def test_uma_os_sem_evento_nao_e_continuidade_segura(self):
+        op={
+            "chave":"c"*32,"ficha_id":"164","municipio":"TERESINA",
+            "os":["101"],"motivo":"continuidade","chave_anterior":"a"*32,
+            "latitude":"-5.09","longitude":"-42.8",
+        }
+        validos,pendentes=preparar_lote_persistencia([op])
+        self.assertEqual(validos,[])
+        self.assertEqual(pendentes,{"sobreposicao_insuficiente":1})
+
+    def test_registro_invalido_nao_impede_evento_independente(self):
+        invalido={
+            "chave":"x","ficha_id":"164","municipio":"TERESINA",
+            "os":["101"],"motivo":"evento","evento_chave":self.evento,
+        }
+        associado=dict(invalido,chave="a"*32,os=["102"])
+        valido=dict(invalido,chave="b"*32,evento_chave="f"*32)
+        validos,pendentes=preparar_lote_persistencia(
+            [invalido,associado,valido]
+        )
+        self.assertEqual(validos,[valido])
+        self.assertEqual(sum(pendentes.values()),2)
+
+    def test_chave_conflitante_bloqueia_evento_inteiro(self):
+        a={"chave":"a"*32,"ficha_id":"164","municipio":"TERESINA",
+           "os":["101"],"motivo":"evento","evento_chave":self.evento}
+        b=dict(a,ficha_id="168")
+        c=dict(a,chave="c"*32)
+        validos,pendentes=preparar_lote_persistencia([a,b,c])
+        self.assertEqual(validos,[])
+        self.assertEqual(sum(pendentes.values()),3)
+
+    def test_mesma_chave_identica_so_uma_gravacao(self):
+        a={"chave":"a"*32,"ficha_id":"164","municipio":"TERESINA",
+           "os":["101"],"motivo":"evento","evento_chave":self.evento}
+        validos,pendentes=preparar_lote_persistencia([a,dict(a)])
+        self.assertEqual(validos,[a])
+        self.assertFalse(pendentes)
 
     def test_integracao_nao_grava_uma_por_expander(self):
         pagina=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
