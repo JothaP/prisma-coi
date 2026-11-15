@@ -5693,22 +5693,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 todos_vinculos_acomp = listar_vinculos()
                 vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
-                # Índice único para sugerir cópias do mesmo bairro sem
-                # fazer varredura completa de fichas em cada concentração.
                 total_vinculos_por_ficha = {}
-                indice_fontes_por_bairro = {}
                 for vinculo in todos_vinculos_acomp:
                     ficha_id = str(vinculo.get("evento_id", ""))
                     total_vinculos_por_ficha[ficha_id] = (
                         total_vinculos_por_ficha.get(ficha_id, 0) + 1
                     )
-                    municipio_fonte = normalizar_municipio(vinculo.get("municipio", ""))
-                    for nome_bairro in re.split(r"[,;/]", str(vinculo.get("bairros") or "")):
-                        bairro_fonte = normalizar_texto(nome_bairro)
-                        if bairro_fonte and municipio_fonte:
-                            indice_fontes_por_bairro.setdefault(
-                                (municipio_fonte, bairro_fonte), set()
-                            ).add(ficha_id)
                 recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
@@ -5716,7 +5706,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
                 total_vinculos_por_ficha = {}
-                indice_fontes_por_bairro = {}
                 recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
@@ -5734,13 +5723,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 numeros_atuais = [
                     str(x).strip() for x in os_atuais.get("Nº da O.S", []) if str(x).strip()
                 ]
-                chave_mescla = c_atual.get("CHAVE_MESCLA")
-                chave_atual = (
-                    str(chave_mescla) if isinstance(chave_mescla, str) and chave_mescla
-                    else chave_concentracao(
-                        cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
-                        numeros_atuais,
-                    )
+                chave_atual = chave_concentracao(
+                    cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
+                    numeros_atuais,
                 )
                 contextos_ativos_acomp[str(c_atual["ID_CONCENTRACAO"])] = {
                     "chave": chave_atual,
@@ -5853,6 +5838,25 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 candidatos_acomp_por_codigo = {}
                 continuidades_automaticas = {}
 
+            # Opções de cópia são identificadas por concentrações ativas, não
+            # por coincidência de bairro/evento. Seleção e cópia sempre manuais.
+            fontes_copia_ativas = []
+            for codigo_origem, contexto_origem in contextos_ativos_acomp.items():
+                vinculo_origem = vinculos_acomp_visiveis.get(contexto_origem["chave"])
+                if not vinculo_origem:
+                    continue
+                id_origem = str(vinculo_origem.get("evento_id", ""))
+                ficha_origem = fichas_acomp_visiveis.get(id_origem)
+                if not ficha_origem:
+                    continue
+                fontes_copia_ativas.append({
+                    "id": id_origem,
+                    "codigo": codigo_origem,
+                    "titulo": str(ficha_origem.get("titulo", "") or ""),
+                    "municipio": contexto_origem.get("municipio", ""),
+                    "bairros": contexto_origem.get("bairros", ""),
+                })
+
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
@@ -5963,19 +5967,13 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     "Se já existia uma ficha, confira o histórico antes de criar outra."
                                 )
 
-                            municipio_indice = normalizar_municipio(municipio_acomp)
-                            fichas_copia = set()
-                            for nome_bairro in re.split(r"[,;/]", bairros_grupo):
-                                bairro_indice = normalizar_texto(nome_bairro)
-                                fichas_copia.update(indice_fontes_por_bairro.get(
-                                    (municipio_indice, bairro_indice), set()
-                                ))
-                            if vinculo_acomp:
-                                fichas_copia.discard(str(vinculo_acomp.get("evento_id", "")))
                             fontes_copia = [
-                                {"id": fid, "titulo": fichas_acomp_visiveis[fid].get("titulo", "")}
-                                for fid in sorted(fichas_copia)
-                                if fid in fichas_acomp_visiveis
+                                origem for origem in fontes_copia_ativas
+                                if origem["codigo"] != str(codigo)
+                                and origem["id"] != (
+                                    str(vinculo_acomp.get("evento_id", ""))
+                                    if vinculo_acomp else ""
+                                )
                             ]
                             contexto_popup = {
                                 "chave": chave_acomp, "codigo": str(codigo),
@@ -6077,6 +6075,15 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                 ):
                                     popup_acompanhamento_farol(
                                         contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                    )
+                            if fontes_copia and PODE_EDITAR_FAROL:
+                                if st.button(
+                                    "📋 Copiar dados de outra concentração",
+                                    key=f"farol_copiar_ficha_{abrangencia}_{codigo}",
+                                ):
+                                    popup_acompanhamento_farol(
+                                        dict(contexto_popup, abrir_copia=True),
+                                        pode_editar=PODE_EDITAR_FAROL,
                                     )
                             if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
                                          key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
