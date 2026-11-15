@@ -90,6 +90,14 @@ def preparar_lote_persistencia(operacoes, limite=500):
         anterior = chaves_vistas.setdefault(chave, destino)
         if anterior != destino:
             conflitos.add(chave)
+    # Um conflito de chave pode representar uma ficha errada no mesmo
+    # evento. Bloquear o grupo inteiro, nunca persistir uma fusão incompleta.
+    for item, _ in avaliados:
+        if (isinstance(item, dict) and item.get("chave") in conflitos
+                and item.get("motivo") == "evento"):
+            problemas_por_evento.add(item.get("evento_chave"))
+
+    chaves_aceitas = set()
     for item, erro in avaliados:
         if isinstance(item, dict) and item.get("chave") in conflitos:
             erro = "chave_duplicada_conflitante"
@@ -99,7 +107,10 @@ def preparar_lote_persistencia(operacoes, limite=500):
         if erro:
             rejeitados[erro] += 1
         elif isinstance(item, dict):
-            validos.append(item)
+            # Duplicação idêntica de um vínculo não exige segunda gravação.
+            if item["chave"] not in chaves_aceitas:
+                validos.append(item)
+                chaves_aceitas.add(item["chave"])
 
     # Preservar a atomicidade do conjunto de cada evento também no limite
     # operacional. Nunca dividir uma fusão em duas requisições diferentes.
