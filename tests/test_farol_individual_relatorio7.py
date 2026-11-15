@@ -45,7 +45,7 @@ class TesteConcentracoesIndividuais(unittest.TestCase):
         self.assertNotIn('status_para_interface(dados_iniciais.get("status", ""))', codigo)
         self.assertIn('contexto_independente = dict(contexto, evento_chave="")', codigo)
         self.assertIn("sb_separar(", codigo)
-        self.assertIn("historico anterior", codigo.lower().replace("histórico", "historico"))
+        self.assertIn("seu historico permanecem", codigo.lower().replace("histórico", "historico"))
 
     def test_resumo_evento_prioriza_descricao_e_ativo(self):
         resumo = _resumo_eventos()
