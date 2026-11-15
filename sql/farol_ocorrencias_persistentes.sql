@@ -319,13 +319,7 @@ AS $func$
  WHERE m.evento_id=p_ficha_id
     OR EXISTS(SELECT 1 FROM public.farol_acomp_incorporacoes i
               WHERE i.ficha_principal=p_ficha_id AND i.ficha_incorporada=m.evento_id)
- ORDER BY CASE WHEN m.id ~ '^[0-9]+
-$func$;
-REVOKE ALL ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
-  FROM PUBLIC,anon,authenticated;
-GRANT EXECUTE ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
-  TO service_role;
- THEN m.id::bigint END NULLS LAST,m.id;
+ ORDER BY CASE WHEN m.id ~ '^[0-9]+$' THEN m.id::bigint END NULLS LAST,m.id;
 $func$;
 REVOKE ALL ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
   FROM PUBLIC,anon,authenticated;
