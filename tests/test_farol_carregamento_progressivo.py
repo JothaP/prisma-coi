@@ -109,7 +109,9 @@ class TesteCarregamentoProgressivo(unittest.TestCase):
 
     def test_areas_sem_os_nao_geram_evento_no_grupo(self):
         os_grupo=pd.DataFrame([
-            os_exemplo(**{"Bairro":"BAIRRO INEXISTENTE","_grupo":9})
+            os_exemplo(**{"Bairro":"BAIRRO INEXISTENTE",
+                           "Endereço":"Rua Outra, 1 - Bairro Inexistente",
+                           "_grupo":9})
         ])
         ev=pd.DataFrame([{
             "Cidade":"Teresina","Áreas Impactadas":"DOM AVELAR",
