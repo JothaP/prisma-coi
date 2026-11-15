@@ -1,0 +1,29 @@
+name: Testar ocorrencias persistentes Farol M3
+on:
+  push:
+    paths:
+      - 'farol_ocorrencias_persistentes.py'
+      - 'farol_acomp_supabase_backend.py'
+      - 'acompanhamento_operacional_farol.py'
+      - 'pages/3_Farol_Operacional.py'
+      - 'sql/farol_ocorrencias_persistentes.sql'
+      - 'tests/test_farol_ocorrencias_persistentes.py'
+      - '.github/workflows/testar-farol-ocorrencias-persistentes.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias do teste
+        run: python -m pip install 'pandas>=2.2,<3'
+      - name: Validar sintaxe dos modulos
+        run: python -m py_compile pages/3_Farol_Operacional.py farol_ocorrencias_persistentes.py farol_acomp_supabase_backend.py acompanhamento_operacional_farol.py
+      - name: Testar persistencia e aglutinacao por evento
+        run: python -m unittest discover -s tests -p 'test_farol_ocorrencias_persistentes.py' -v
