@@ -539,7 +539,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                         status_para_interface(dados_iniciais.get("status", "")))
         status = col_status.selectbox("Status", STATUS, index=STATUS.index(status_atual), disabled=somente_leitura,
                                       help="Ao mudar um concluído para Pendente/Em Andamento e salvar, ele será reaberto.")
-        causa_atual = causa_para_interface(evento) if dados_iniciais else "Não"
+        causa_atual = causa_para_interface(dados_iniciais) if dados_iniciais else "Não"
         causa = col_causa.radio("Causa identificada?", SIM_NAO, horizontal=True,
                                 index=SIM_NAO.index(causa_atual), disabled=somente_leitura)
         descricao = st.text_area("Descrição / Relato Inicial", value=str(dados_iniciais.get("descricao", "")) if dados_iniciais else "",
@@ -556,7 +556,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                            index=1 if dados_iniciais and dados_iniciais.get("retorno_operacao") == "Sim" else 0,
                            disabled=somente_leitura)
         movimentacao = ""
-        if evento and not somente_leitura:
+        if evento and not separar and not somente_leitura:
             movimentacao = st.text_area("Nova movimentação (opcional)", placeholder="Descreva a ação realizada ou pendência...", height=70)
         if not somente_leitura:
             if concluido and not criar_nova:
