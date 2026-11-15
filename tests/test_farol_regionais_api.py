@@ -39,8 +39,8 @@ class TesteRegionaisAPI(unittest.TestCase):
             ["10", "Litoral", "Luís Correia", "Base Costa"],
         ]
         catalogo = mapa_regionais_de_linhas(linhas)
-        self.assertEqual(catalogo[chave_municipio("SAO JOAO DO PIAUI")], "Cerrado")
-        self.assertEqual(catalogo[chave_municipio("Luís-Correia")], "Litoral")
+        self.assertEqual(catalogo[chave_municipio("SAO JOAO DO PIAUI")], "CERRADO")
+        self.assertEqual(catalogo[chave_municipio("Luís-Correia")], "LITORAL")
 
     def test_linha_sem_regional_nao_inventa_classificacao(self):
         catalogo = mapa_regionais_de_linhas([
@@ -49,7 +49,7 @@ class TesteRegionaisAPI(unittest.TestCase):
             ["Picos", "Base", "Semiárido Sul", "X"],
         ])
         self.assertNotIn(chave_municipio("CAMPO MAIOR"), catalogo)
-        self.assertEqual(catalogo[chave_municipio("Picos")], "Semiárido Sul")
+        self.assertEqual(catalogo[chave_municipio("Picos")], "SEMIÁRIDO SUL")
 
     def test_conflito_de_cadastro_mesmo_municipio_nao_e_arbitrado(self):
         catalogo = mapa_regionais_de_linhas([
