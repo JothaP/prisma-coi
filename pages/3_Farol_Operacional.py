@@ -73,19 +73,6 @@ from farol_regionais_api import (
     mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
 )
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
-from farol_mesclagem_operacional import (
-    CHAVE_MODO as CHAVE_MODO_MESCLAGEM,
-    CHAVE_POLIGONO as CHAVE_POLIGONO_MESCLAGEM,
-    listar_mesclas as listar_mesclas_farol,
-    aplicar_mesclas as aplicar_mesclas_farol,
-    desenhar_areas_mescladas,
-    adicionar_desenho_mapa,
-    extrair_desenho_folium,
-    renderizar_painel_mescla,
-    renderizar_painel_desfazer_mesclas,
-)
-
-
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
@@ -2455,7 +2442,6 @@ def criar_mapa_panorama_v2(concentracoes, raio_m=RAIO_CONCENTRACAO_PADRAO, bairr
                       control_scale=True, tiles="OpenStreetMap", prefer_canvas=True)
     adicionar_limites_bairros(mapa, bairros or [])
     adicionar_camada_eventos(mapa, eventos_mapeados or [])
-    desenhar_areas_mescladas(mapa, concentracoes)
     limites = []
 
     # O.S. independentes: nunca dependem de pontos_cluster, que contém apenas
@@ -2529,7 +2515,6 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
         adicionar_limites_bairros(mapa, bairros)
 
     adicionar_camada_eventos(mapa, eventos_mapeados or [])
-    desenhar_areas_mescladas(mapa, concentracoes)
 
     fg_os = folium.FeatureGroup(name="O.S.", show=True)
     if not df_pontos.empty:
@@ -4543,7 +4528,6 @@ def mapa_relatorio_concentracoes(concentracoes, pontos_cluster, concentracao=Non
                       control_scale=True, zoom_control=False)
     selecionadas = (concentracoes if concentracao is None else
                     concentracoes[concentracoes["ID_CONCENTRACAO"] == concentracao["ID_CONCENTRACAO"]])
-    desenhar_areas_mescladas(mapa, selecionadas)
     coordenadas = []
     # No panorama, a camada de O.S. será desenhada uma única vez, incluindo
     # registros dentro e fora das concentrações.
@@ -5314,19 +5298,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
     st.caption("Eventos: vermelho = em andamento · amarelo = programado · verde = finalizado · cinza = outro status. "
                "As áreas destacadas representam os bairros inteiros dos arquivos geográficos, inclusive quando o evento informa impacto parcial.")
 
-    # A reversão não depende da data consultada nem da existência de O.S.
-    # no recorte: as mesclagens são persistentes e compartilhadas no Supabase.
-    try:
-        mesclas_ativas_farol = listar_mesclas_farol() if fonte_supabase() else []
-        erro_mesclagem_farol = None
-    except Exception as erro:
-        mesclas_ativas_farol = []
-        erro_mesclagem_farol = str(erro)
-    if erro_mesclagem_farol:
-        st.warning("Não foi possível carregar as mesclagens: " + erro_mesclagem_farol)
-    elif mesclas_ativas_farol:
-        renderizar_painel_desfazer_mesclas(mesclas_ativas_farol, PODE_EDITAR_FAROL)
-
     if df_pontos.empty:
         st.warning("A aba PONTOS ainda não possui dados.")
         ativos_pocos = ativos_pocos_cidade
@@ -5370,16 +5341,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             raio_m=raio_concentracao,
             minimo_os=int(minimo_os),
         )
-        # Mesclagens são aplicadas apenas à apresentação e à análise atuais:
-        # a base de PONTOS do Field/BI e a regra original dos 750 m não mudam.
-        concentracoes_originais = concentracoes.copy()
-        pontos_cluster_originais = pontos_cluster.copy()
-        try:
-            concentracoes, pontos_cluster = aplicar_mesclas_farol(
-                concentracoes, pontos_cluster, mesclas_ativas_farol
-            )
-        except Exception as erro:
-            erro_mesclagem_farol = str(erro)
         proximidades = pontos_proximos_concentracoes(
             concentracoes,
             df_pocos,
@@ -5620,71 +5581,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             + ", ".join(vizinhas)
                             + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
             else:
-                # O desenho é iniciado no próprio panorama, sem exigir que o
-                # analista desça até a lista de concentrações.
-                col_desenho, col_instrucao = st.columns([1, 3], vertical_alignment="center")
-                with col_desenho:
-                    if st.button(
-                        "✏️ Desenhar polígono" if not st.session_state.get(CHAVE_MODO_MESCLAGEM)
-                        else "✖ Encerrar desenho",
-                        key="farol_mescla_atalho_mapa",
-                        disabled=not PODE_EDITAR_FAROL,
-                        use_container_width=True,
-                    ):
-                        ativar_desenho = not bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                        st.session_state[CHAVE_MODO_MESCLAGEM] = ativar_desenho
-                        if not ativar_desenho:
-                            st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                        st.session_state["farol_v2_panorama_versao"] = (
-                            st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                        )
-                        st.rerun()
-                with col_instrucao:
-                    st.caption(
-                        "Desenhe a área das O.S. no mapa e confirme a união na seção "
-                        "**Análise das concentrações**. Somente concentrações do mesmo evento "
-                        "podem formar um único acompanhamento."
-                    )
+                # Panorama de consulta: nenhuma ferramenta de desenho ou união.
                 mapa = criar_mapa_panorama_v2(
                     concentracoes, raio_m=raio_concentracao,
                     bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
                     pontos_os=analise,
                 )
-                mesclagem_desenhando = bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                if mesclagem_desenhando:
-                    adicionar_desenho_mapa(
-                        mapa, st.session_state.get(CHAVE_POLIGONO_MESCLAGEM)
-                    )
                 estado_mapa = st_folium(
                     mapa, width=None, height=650,
-                    returned_objects=(
-                        ["last_active_drawing", "last_object_clicked", "last_object_clicked_tooltip"]
-                        if mesclagem_desenhando
-                        else ["last_object_clicked", "last_object_clicked_tooltip"]
-                    ),
-                    key=(f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}"
-                         f"_{int(mesclagem_desenhando)}_"
-                         f"{hashlib.md5(json.dumps(st.session_state.get(CHAVE_POLIGONO_MESCLAGEM), sort_keys=True).encode()).hexdigest()[:8]}"),
+                    returned_objects=["last_object_clicked", "last_object_clicked_tooltip"],
+                    key=f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}",
                 )
-                if mesclagem_desenhando and estado_mapa:
-                    desenho = estado_mapa.get("last_active_drawing")
-                    if desenho:
-                        try:
-                            geometria_nova = extrair_desenho_folium(desenho)
-                            if geometria_nova != st.session_state.get(CHAVE_POLIGONO_MESCLAGEM):
-                                st.session_state[CHAVE_POLIGONO_MESCLAGEM] = geometria_nova
-                                st.rerun()
-                        except ValueError as erro_desenho:
-                            st.warning(f"Polígono não aceito: {erro_desenho}")
-                if mesclagem_desenhando:
-                    st.caption(
-                        "Ferramenta Mesclar: clique no ícone de polígono à esquerda do mapa, "
-                        "desenhe a área que engloba as O.S. do evento e, abaixo, confirme "
-                        "quais concentrações pertencem à mesma ocorrência."
-                    )
                 clique = (estado_mapa or {}).get("last_object_clicked")
                 tooltip_clique = str((estado_mapa or {}).get("last_object_clicked_tooltip") or "")
-                if isinstance(clique, dict) and not mesclagem_desenhando:
+                if isinstance(clique, dict):
                     lat_clique = parse_float(clique.get("lat"))
                     lon_clique = parse_float(clique.get("lng"))
                     melhor_concentracao, menor_centro = "", float("inf")
@@ -5769,32 +5679,11 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         else:
             st.markdown("### 📋 Análise das Concentrações")
             st.caption("Expanda uma concentração e clique em **Carregar detalhes** para consultar O.S., equipamentos, eventos e PDFs. Apenas a ficha escolhida é processada.")
-            if erro_mesclagem_farol:
-                st.warning("As mesclagens compartilhadas estão temporariamente indisponíveis: "
-                           + erro_mesclagem_farol)
-            if st.button(
-                "🔗 Mesclar concentrações" if not st.session_state.get(CHAVE_MODO_MESCLAGEM)
-                else "✖ Encerrar mesclagem",
-                key="farol_abrir_mesclagem", disabled=not PODE_EDITAR_FAROL,
-            ):
-                ativar = not bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                st.session_state[CHAVE_MODO_MESCLAGEM] = ativar
-                st.session_state["farol_v2_concentracao"] = ""
-                st.session_state["farol_v2_detalhe_aberto"] = ""
-                st.session_state.pop("farol_v2_os_raio_aberto", None)
-                st.session_state["farol_v2_panorama_versao"] = (
-                    st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                )
-                if not ativar:
-                    st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                st.rerun()
-            if st.session_state.get(CHAVE_MODO_MESCLAGEM):
-                if st.button("Limpar polígono", key="farol_mescla_limpar_poligono"):
-                    st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                    st.session_state["farol_v2_panorama_versao"] = (
-                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                    )
-                    st.rerun()
+            st.caption(
+                "Cada concentração mantém seu próprio acompanhamento. "
+                "Use o botão de copiar dados para aproveitar informações de outra ficha, "
+                "sem compartilhar status nem histórico."
+            )
             observacoes_df = carregar_observacoes_concentracoes()
             resumo_pdf = concentracoes.copy()
             grupos_os = {chave: quadro for chave, quadro in pontos_cluster.groupby("_grupo", sort=False)} if not pontos_cluster.empty else {}
@@ -5964,44 +5853,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 candidatos_acomp_por_codigo = {}
                 continuidades_automaticas = {}
 
-            # Candidatas ambíguas ficam apenas para revisão humana.
-            if st.session_state.get(CHAVE_MODO_MESCLAGEM):
-                # O painel de seleção trabalha com as concentrações ANTES
-                # das mesclagens; reconstruir também suas chaves originais.
-                contextos_originais_mescla = {}
-                for _, original in concentracoes_originais.iterrows():
-                    codigo_original = str(original["ID_CONCENTRACAO"])
-                    grupo_original = pontos_cluster_originais.loc[
-                        pontos_cluster_originais["_grupo"] == original["GRUPO"]
-                    ]
-                    cidades_original = sorted({
-                        str(c).strip() for c in grupo_original.get("Cidade", [])
-                        if str(c).strip()
-                    })
-                    lista_os_original = sorted({
-                        str(os_id).strip() for os_id in grupo_original.get("Nº da O.S", [])
-                        if str(os_id).strip()
-                    })
-                    if len(cidades_original) != 1:
-                        continue
-                    contextos_originais_mescla[codigo_original] = {
-                        "chave": chave_concentracao(
-                            cidades_original[0], original["LATITUDE"],
-                            original["LONGITUDE"], lista_os_original,
-                        ),
-                        "municipio": cidades_original[0],
-                        "os": lista_os_original,
-                    }
-                st.divider()
-                renderizar_painel_mescla(
-                    concentracoes_originais, pontos_cluster_originais,
-                    proximidades, df_eventos, bairros,
-                    dados_relatorio_concentracao, classificar_os_por_evento,
-                    contextos_originais_mescla, vinculos_acomp_visiveis,
-                    fichas_acomp_visiveis, PODE_EDITAR_FAROL,
-                    conferir_data=evento_pertinente_data_analise,
-                )
-                st.divider()
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
