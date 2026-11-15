@@ -35,6 +35,104 @@ def distancia_metros(lat1, lon1, lat2, lon2):
         return None
 
 
+
+def resumir_eventos_concentracoes(
+    pontos_cluster, eventos, bairros, *,
+    normalizar_cidade, conferir_data, abrange_municipio, extrair_areas,
+    nomes_poligono, localizar_os, converter_data, classificar_status,
+    chave_evento, agora,
+):
+    """Resumo único e leve para TODOS os cartões, sem montar relatórios.
+
+    Indexa O.S. por município e geometrias por (município, localidade)
+    apenas uma vez. Os eventos são avaliados uma vez por município, e não
+    novamente para cada concentração. Preserva a janela e a prioridade da
+    geometria do Farol, sem consultar Supabase ou carregar ativos.
+    """
+    if (pontos_cluster is None or pontos_cluster.empty
+            or eventos is None or eventos.empty
+            or "_grupo" not in pontos_cluster):
+        return {}
+    if "Cidade" not in pontos_cluster or "Cidade" not in eventos:
+        return {}
+
+    os_por_cidade = defaultdict(list)
+    for indice, ordem in pontos_cluster.iterrows():
+        cidade = normalizar_cidade(ordem.get("Cidade", ""))
+        if not cidade:
+            continue
+        os_por_cidade[cidade].append((
+            indice, ordem, ordem["_grupo"],
+            converter_data(ordem.get("Dt. Emissão", "")),
+            str(ordem.get("Nº da O.S", "") or "").strip(),
+        ))
+
+    # Mesmo índice territorial adotado pela análise detalhada: se existir
+    # polígono da área, o texto do bairro não pode contrariar a geometria.
+    geometria_por_area = defaultdict(list)
+    for poligono in (bairros or []):
+        if poligono.get("sem_nome"):
+            continue
+        cidade = normalizar_cidade(poligono.get("municipio", ""))
+        if not cidade or cidade not in os_por_cidade:
+            continue
+        for nome in nomes_poligono(poligono):
+            geometria_por_area[(cidade, nome)].append(poligono)
+
+    contas_eventos = defaultdict(set)
+    contas_os = defaultdict(lambda: defaultdict(set))
+    for identificador, (_, evento) in enumerate(eventos.iterrows()):
+        cidade = normalizar_cidade(evento.get("Cidade", ""))
+        if not cidade or cidade not in os_por_cidade or not conferir_data(evento):
+            continue
+        area_texto = evento.get("Áreas Impactadas", "")
+        municipal = abrange_municipio(area_texto)
+        areas = extrair_areas(area_texto, evento.get("Cidade", ""), bairros)
+        indice_geometrias = (
+            {} if municipal else {
+                area["bairro"]: geometria_por_area.get((cidade, area["bairro"]), [])
+                for area in areas
+            }
+        )
+        inicio = converter_data(evento.get("Início", ""))
+        termino = converter_data(evento.get("Término Real", ""))
+        if pd.isna(inicio):
+            limite = None
+        elif pd.notna(termino):
+            limite = (
+                termino + pd.Timedelta(hours=3) if termino >= inicio else None
+            )
+        elif classificar_status(evento.get("Status", ""))[0] == "Finalizado":
+            limite = None
+        else:
+            limite = agora
+        identidade = chave_evento(evento) if limite is not None else None
+
+        for _, ordem, grupo, emissao, numero_os in os_por_cidade[cidade]:
+            area, _ = localizar_os(
+                ordem, cidade, areas, municipal=municipal,
+                indice_geometrias=indice_geometrias,
+            )
+            if area is None:
+                continue
+            contas_eventos[grupo].add(identificador)
+            if (identidade and numero_os and
+                    numero_os.lower() not in {"nan", "nat", "none"}
+                    and pd.notna(emissao) and
+                    inicio - pd.Timedelta(hours=1) <= emissao <= limite):
+                contas_os[grupo][identidade].add(numero_os)
+
+    return {
+        grupo: {
+            "eventos_relacionados": len(contas_eventos.get(grupo, ())),
+            "evento_os": {
+                chave: tuple(sorted(numeros))
+                for chave, numeros in contas_os.get(grupo, {}).items()
+            },
+        }
+        for grupo in set(contas_eventos) | set(contas_os)
+    }
+
 def os_por_evento_confirmado(os_grupo, eventos_relacionados, chave_evento,
                             converter_data, classificar_status, agora):
     """Retorna apenas números de O.S. efetivamente vinculados a cada evento.
