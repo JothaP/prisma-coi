@@ -35,42 +35,55 @@ def distancia_metros(lat1, lon1, lat2, lon2):
         return None
 
 
-def chaves_eventos_confirmados(os_grupo, eventos_relacionados, chave_evento,
-                               converter_data, classificar_status, agora):
-    """Somente eventos comprovados por O.S. + território + período.
+def os_por_evento_confirmado(os_grupo, eventos_relacionados, chave_evento,
+                            converter_data, classificar_status, agora):
+    """Retorna apenas números de O.S. efetivamente vinculados a cada evento.
 
-    Uma concentração pode possuir vários eventos; nesse caso a associação
-    automática a uma ficha de evento não é segura.
+    Área/município já foram verificados no Farol; aqui aplica a janela
+    temporal individual. Não amplia o evento a todas as O.S. da concentração.
     """
-    if os_grupo is None or os_grupo.empty or eventos_relacionados is None or eventos_relacionados.empty:
-        return ()
-    encontrados = set()
+    if (os_grupo is None or os_grupo.empty
+            or eventos_relacionados is None or eventos_relacionados.empty):
+        return {}
+    encontrados=defaultdict(set)
     for _, evento in eventos_relacionados.iterrows():
-        inicio = converter_data(evento.get("Início", ""))
-        fim = converter_data(evento.get("Término Real", ""))
+        inicio=converter_data(evento.get("Início", ""))
+        fim=converter_data(evento.get("Término Real", ""))
         if pd.isna(inicio):
             continue
         if pd.isna(fim):
             if classificar_status(evento.get("Status", ""))[0] == "Finalizado":
                 continue
-            limite = agora
+            limite=agora
         else:
-            if fim < inicio:
+            if fim<inicio:
                 continue
-            limite = fim + pd.Timedelta(hours=3)
-        ids = evento.get("_indices_os_correspondentes")
-        if not isinstance(ids, (tuple, list, set)):
-            # Nunca usar contagem apenas territorial como prova de vínculo.
+            limite=fim+pd.Timedelta(hours=3)
+        indices=evento.get("_indices_os_correspondentes")
+        if not isinstance(indices,(tuple,list,set)):
             continue
-        for idx in ids:
-            if idx not in os_grupo.index:
+        for indice in indices:
+            if indice not in os_grupo.index:
                 continue
-            ordem = os_grupo.loc[idx]
-            abertura = converter_data(ordem.get("Dt. Emissão", ""))
-            if pd.notna(abertura) and inicio - pd.Timedelta(hours=1) <= abertura <= limite:
-                encontrados.add(chave_evento(evento))
-                break
-    return tuple(sorted(encontrados))
+            ordem=os_grupo.loc[indice]
+            abertura=converter_data(ordem.get("Dt. Emissão", ""))
+            if pd.isna(abertura) or not (inicio-pd.Timedelta(hours=1)<=abertura<=limite):
+                continue
+            numero=str(ordem.get("Nº da O.S", "") or "").strip()
+            if numero and numero.lower() not in {"nan","none","nat"}:
+                encontrados[chave_evento(evento)].add(numero)
+    return {chave:tuple(sorted(valores)) for chave,valores in encontrados.items()}
+
+
+def chaves_eventos_confirmados(os_grupo, eventos_relacionados, chave_evento,
+                               converter_data, classificar_status, agora):
+    """Devolve identidades de eventos cuja vinculação territorial e temporal
+    foi comprovada para pelo menos uma O.S. numerada da concentração.
+    """
+    return tuple(sorted(os_por_evento_confirmado(
+        os_grupo,eventos_relacionados,chave_evento,
+        converter_data,classificar_status,agora,
+    )))
 
 
 def _os(valor):
@@ -222,7 +235,11 @@ def resolver_ocorrencias(contextos, vinculos, fichas, ancoras):
                 "chave": ctx["chave"], "ficha_id": fid_existente or principal,
                 "municipio": ctx["municipio"], "bairros": ctx.get("bairros", ""),
                 "latitude": str(ctx["latitude"]), "longitude": str(ctx["longitude"]),
-                "os": sorted(_os(ctx["os"])), "evento_chave": chave_evento,
+                "os": sorted(_os(ctx["os"])),
+                "os_evento": sorted(_os(
+                    (ctx.get("evento_os") or {}).get(chave_evento, ())
+                )),
+                "evento_chave": chave_evento,
                 "chave_anterior": antiga["chave_anterior"] if antiga else "",
                 "motivo": "evento",
             })
