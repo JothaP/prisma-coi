@@ -411,12 +411,15 @@ def renderizar_investigacao():
     mostrar_rotulos = st.checkbox("Exibir rótulos permanentes nas medições", value=True,
                                   key="inv_rotulos_medicoes")
 
-    try:
-        with st.spinner("Consultando a fonte histórica de pressões, somente leitura..."):
-            medicoes = _carregar_medicoes()
-    except Exception as exc:
-        st.warning(f"Medições temporariamente indisponíveis: {type(exc).__name__}: {exc}")
-        medicoes = pd.DataFrame(columns=COLUNAS_MEDICAO + ["lat", "lon", "mca", "dt"])
+    medicoes = pd.DataFrame(columns=COLUNAS_MEDICAO + ["lat", "lon", "mca", "dt"])
+    # Uma consulta ao histórico pode ser cara: só realizá-la depois da escolha
+    # do ativo; as visitas à tela inicial não devem carregar toda a base.
+    if selecionado:
+        try:
+            with st.spinner("Consultando a fonte histórica de pressões, somente leitura..."):
+                medicoes = _carregar_medicoes()
+        except Exception as exc:
+            st.warning(f"Medições temporariamente indisponíveis: {type(exc).__name__}: {exc}")
 
     if not medicoes.empty and medicoes["dt"].notna().any():
         minimo = medicoes["dt"].min().date()
