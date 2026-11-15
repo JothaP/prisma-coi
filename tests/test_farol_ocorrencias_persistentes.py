@@ -258,5 +258,43 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
         self.assertNotIn("DELETE FROM public.farol_acomp_",sql)
 
 
+    def test_integracao_usa_chave_hash_compativel_com_rpc(self):
+        pagina=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
+        sql=(ROOT/"sql"/"farol_ocorrencias_persistentes.sql").read_text(encoding="utf-8")
+        self.assertIn(
+            "from farol_mesclagem_operacional import chave_evento as chave_evento_persistente",
+            pagina,
+        )
+        self.assertIn("chave_evento=chave_evento_persistente,", pagina)
+        # A chave textual usada na gestão manual permanece separada.
+        self.assertIn("def chave_evento(row):", pagina)
+        self.assertIn("OCORRENCIAS_EVENTO_INVALIDO", sql)
+        # Executa somente as funcoes puras, sem importar Streamlit/Shapely no CI.
+        import ast
+        import hashlib
+        import re
+        import unicodedata
+        modulo=ast.parse(
+            (ROOT/"farol_mesclagem_operacional.py").read_text(encoding="utf-8")
+        )
+        funcoes=[
+            item for item in modulo.body
+            if isinstance(item, ast.FunctionDef)
+            and item.name in {"normalizar", "chave_evento"}
+        ]
+        self.assertEqual(len(funcoes), 2)
+        escopo={"md5": hashlib.md5, "re": re, "unicodedata": unicodedata}
+        exec(
+            compile(ast.Module(body=funcoes, type_ignores=[]), "<hash_evento>", "exec"),
+            escopo,
+        )
+        evento={
+            "Cidade":"Teresina","Protocolo":"EV-42",
+            "Início":"15/11/2026 10:00","Código do Ativo":"THE-001",
+            "Serviço":"Manutenção",
+        }
+        self.assertRegex(escopo["chave_evento"](evento), r"^[a-f0-9]{32}$")
+
+
 if __name__ == "__main__":
     unittest.main()
