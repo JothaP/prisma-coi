@@ -8,6 +8,7 @@ on:
       - 'pages/3_Farol_Operacional.py'
       - 'sql/farol_ocorrencias_persistentes.sql'
       - 'tests/test_farol_ocorrencias_persistentes.py'
+      - 'tests/test_farol_carregamento_progressivo.py'
       - '.github/workflows/testar-farol-ocorrencias-persistentes.yml'
   workflow_dispatch:
 permissions:
@@ -27,3 +28,5 @@ jobs:
         run: python -m py_compile pages/3_Farol_Operacional.py farol_ocorrencias_persistentes.py farol_acomp_supabase_backend.py acompanhamento_operacional_farol.py
       - name: Testar persistencia e aglutinacao por evento
         run: python -m unittest discover -s tests -p 'test_farol_ocorrencias_persistentes.py' -v
+      - name: Comparar resumo rápido com a análise territorial completa
+        run: python -m unittest discover -s tests -p 'test_farol_carregamento_progressivo.py' -v
