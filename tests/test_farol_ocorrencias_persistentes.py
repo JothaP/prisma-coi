@@ -258,5 +258,25 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
         self.assertNotIn("DELETE FROM public.farol_acomp_",sql)
 
 
+    def test_integracao_usa_chave_hash_compativel_com_rpc(self):
+        pagina=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
+        sql=(ROOT/"sql"/"farol_ocorrencias_persistentes.sql").read_text(encoding="utf-8")
+        self.assertIn(
+            "from farol_mesclagem_operacional import chave_evento as chave_evento_persistente",
+            pagina,
+        )
+        self.assertIn("chave_evento=chave_evento_persistente,", pagina)
+        # A chave textual usada na gestão manual permanece separada.
+        self.assertIn("def chave_evento(row):", pagina)
+        self.assertIn("OCORRENCIAS_EVENTO_INVALIDO", sql)
+        from farol_mesclagem_operacional import chave_evento as chave_estavel
+        evento={
+            "Cidade":"Teresina","Protocolo":"EV-42",
+            "Início":"15/11/2026 10:00","Código do Ativo":"THE-001",
+            "Serviço":"Manutenção",
+        }
+        self.assertRegex(chave_estavel(evento), r"^[a-f0-9]{32}$")
+
+
 if __name__ == "__main__":
     unittest.main()
