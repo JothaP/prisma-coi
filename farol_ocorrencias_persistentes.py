@@ -353,13 +353,37 @@ def _sugestoes(ctx, index, vinculos, fichas):
     return [x[1] for x in sorted(por_ficha.values(), key=lambda x: x[0], reverse=True)]
 
 
-def resolver_ocorrencias(contextos, vinculos, fichas, ancoras):
+def resolver_ocorrencias(contextos, vinculos, fichas, ancoras,
+                        *, associacao_automatica=True):
     """Resolve uma ficha por concentração e prepara UMA operação em lote.
 
     Prioridades: chave exata, identidade de evento confirmada, continuidade
     segura por O.S. e proximidade. Nunca cria fichas novas nem faz consultas.
     Fichas de eventos distintos não são fundidas.
     """
+    if not associacao_automatica:
+        # No Farol, outra concentração no mesmo bairro/evento não é prova de
+        # identidade compartilhada. Só chave exata abre ficha automaticamente.
+        # Possíveis continuidades são sugestões; nenhuma escrita é planejada.
+        por_chave_segura = {str(v.get("chave", "")): v for v in vinculos}
+        indice_seguro = defaultdict(set)
+        for pos, vinculo in enumerate(vinculos):
+            cidade = normalizar_municipio(vinculo.get("municipio"))
+            for numero in _os(vinculo.get("os_origem")):
+                indice_seguro[(cidade, numero)].add(pos)
+        exatos, sugestoes = {}, {}
+        for codigo, contexto in contextos.items():
+            atual = por_chave_segura.get(contexto.get("chave"))
+            if atual and str(atual.get("evento_id", "")) in fichas:
+                exatos[codigo] = {
+                    "evento_id": str(atual["evento_id"]), "motivo": "exato"
+                }
+                continue
+            candidatos = _sugestoes(contexto, indice_seguro, vinculos, fichas)
+            if candidatos:
+                sugestoes[codigo] = candidatos
+        return exatos, sugestoes, []
+
     por_chave = {str(v.get("chave", "")): v for v in vinculos}
     por_evento = {
         str(a.get("evento_chave", "")): str(a.get("ficha_id", ""))
