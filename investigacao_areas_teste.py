@@ -368,6 +368,8 @@ def renderizar_investigacao():
             buscar = st.form_submit_button("Pesquisar", type="primary", use_container_width=True)
     if buscar:
         st.session_state["inv_termo"] = termo.strip()
+        # A rede precisa seguir o novo ativo, não um enquadramento de busca anterior.
+        st.session_state.pop("inv_rede_limites", None)
     busca = _normalizar(st.session_state.get("inv_termo", ""))
     selecionado = None
     if busca:
@@ -431,13 +433,14 @@ def renderizar_investigacao():
         medicoes = medicoes.copy()
         # Classificação por distância APENAS para limitar a quantidade enviada ao navegador.
         # Nunca é aplicado um raio para decidir inclusão ou influência.
-        medicoes["_dist"] = (
-            12742000 * (
-                ( ( (pd.to_numeric(medicoes["lat"]) - centro[0]) * math.pi / 180) / 2 ) ** 2
-            ).pow(0.5)
-        ) if False else medicoes.apply(
-            lambda r: _haversine(centro[0], centro[1], r["lat"], r["lon"]), axis=1
-        )
+        # Haversine vetorizado: não executa um loop Python por medição.
+        import numpy as np
+        la1 = np.radians(centro[0])
+        la2 = np.radians(medicoes["lat"].to_numpy(dtype=float))
+        dlat = la2 - la1
+        dlon = np.radians(medicoes["lon"].to_numpy(dtype=float) - centro[1])
+        a = np.sin(dlat / 2) ** 2 + np.cos(la1) * np.cos(la2) * np.sin(dlon / 2) ** 2
+        medicoes["_dist"] = 12742000 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
         medicoes = medicoes.nsmallest(quantidade_medicoes, "_dist")
 
     posicoes = []
@@ -546,7 +549,7 @@ def renderizar_investigacao():
                "Rótulos podem ser ligados/desligados no controle de camadas.")
     evento = st_folium(mapa, height=670, width=None,
         returned_objects=["all_drawings", "last_active_drawing", "bounds"],
-        key="inv_mapa_investigacao")
+        key=f"inv_mapa_investigacao_{st.session_state.get('inv_mapa_versao', 0)}")
 
     if isinstance(evento, dict):
         desenhos = evento.get("all_drawings") or []
@@ -575,6 +578,7 @@ def renderizar_investigacao():
     with c2:
         if st.button("Desfazer último polígono", disabled=not salvos, use_container_width=True):
             salvos.pop()
+            st.session_state["inv_mapa_versao"] = st.session_state.get("inv_mapa_versao", 0) + 1
             st.rerun()
     with c3:
         if st.button("Limpar áreas", disabled=not salvos, use_container_width=True):
