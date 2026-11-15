@@ -88,6 +88,18 @@ def _request(method, caminho, *, params=None, dados=None):
                     + corpo.replace("OCORRENCIAS_", "").replace("_", " ").lower()
                     + ". Nenhuma alteração deste lote foi aplicada."
                 )
+            elif corpo.startswith("FAROL_SEPARACAO_"):
+                motivos = {
+                    "SEM_PERMISSAO": "Seu perfil não permite separar acompanhamentos.",
+                    "CONTEXTO_INVALIDO": "Identificação da concentração inválida. Reabra a ficha.",
+                    "VINCULO_ALTERADO": "O vínculo mudou. Atualize o Farol antes de tentar novamente.",
+                    "VERSAO_ALTERADA": "A ficha foi alterada por outra pessoa. Reabra antes de separar.",
+                    "FICHA_NAO_COMPARTILHADA": "Esta ficha já não está compartilhada.",
+                    "MUNICIPIO_DIVERGENTE": "A nova ficha deve manter o município da concentração.",
+                    "MESCLAGEM_ATIVA": "Desfaça a mesclagem operacional antes de separar a ficha.",
+                }
+                codigo = corpo.removeprefix("FAROL_SEPARACAO_")
+                mensagem = motivos.get(codigo, "Não foi possível separar a concentração.")
             elif "CONFLITO_DE_VERSAO" in corpo:
                 mensagem = ("Conflito de edição: outro analista alterou esta ficha. "
                             "Reabra-a antes de salvar.")
@@ -309,6 +321,35 @@ def editar(evento_id, versao_esperada, dados: dict, movimentacao: str) -> dict:
         raise FalhaAcompanhamentoSupabase("Edição sem confirmação da nova versão.")
     limpar_cache()
     return resultado
+
+
+def separar_concentracao(chave: str, ficha_atual: str, versao_esperada,
+                         dados: dict) -> str:
+    """Cria ficha independente e move somente o vínculo escolhido, por RPC."""
+    autor = _autor("editar")
+    chave = str(chave or "").strip()
+    atual = str(ficha_atual or "").strip()
+    if not re.fullmatch(r"[a-f0-9]{32}", chave) or not atual:
+        raise ValueError("Concentração ou ficha atual inválida para separação.")
+    try:
+        versao = int(versao_esperada)
+    except (TypeError, ValueError) as erro:
+        raise ValueError("Reabra a ficha antes de separar a concentração.") from erro
+    resultado = _request(
+        "POST", "/rest/v1/rpc/farol_acomp_separar_concentracao_tx",
+        dados={
+            "p_chave": chave, "p_ficha_atual": atual,
+            "p_versao_esperada": versao, "p_dados": dados,
+            "p_autor": autor,
+        },
+    )
+    if (not isinstance(resultado, dict) or not resultado.get("id")
+            or resultado.get("ficha_anterior") != atual
+            or resultado.get("chave") != chave
+            or resultado.get("historico_anterior_preservado") is not True):
+        raise FalhaAcompanhamentoSupabase("A separação da ficha não foi confirmada.")
+    limpar_cache()
+    return str(resultado["id"])
 
 
 def recuperar_vinculo(chave_anterior: str, evento_id: str, contexto: dict) -> dict:

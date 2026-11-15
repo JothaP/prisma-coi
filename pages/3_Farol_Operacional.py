@@ -5804,12 +5804,30 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 todos_vinculos_acomp = listar_vinculos()
                 vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
+                # Índice único para sugerir cópias do mesmo bairro sem
+                # fazer varredura completa de fichas em cada concentração.
+                total_vinculos_por_ficha = {}
+                indice_fontes_por_bairro = {}
+                for vinculo in todos_vinculos_acomp:
+                    ficha_id = str(vinculo.get("evento_id", ""))
+                    total_vinculos_por_ficha[ficha_id] = (
+                        total_vinculos_por_ficha.get(ficha_id, 0) + 1
+                    )
+                    municipio_fonte = normalizar_municipio(vinculo.get("municipio", ""))
+                    for nome_bairro in re.split(r"[,;/]", str(vinculo.get("bairros") or "")):
+                        bairro_fonte = normalizar_texto(nome_bairro)
+                        if bairro_fonte and municipio_fonte:
+                            indice_fontes_por_bairro.setdefault(
+                                (municipio_fonte, bairro_fonte), set()
+                            ).add(ficha_id)
                 recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
                 todos_vinculos_acomp = []
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
+                total_vinculos_por_ficha = {}
+                indice_fontes_por_bairro = {}
                 recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
@@ -5892,6 +5910,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     resolver_ocorrencias(
                         contextos_ativos_acomp, todos_vinculos_acomp,
                         fichas_acomp_visiveis, ancoras_evento,
+                        associacao_automatica=False,
                     )
                 )
                 # Uma concentração pode ter apenas uma O.S. efetivamente
@@ -6093,6 +6112,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     "Se já existia uma ficha, confira o histórico antes de criar outra."
                                 )
 
+                            municipio_indice = normalizar_municipio(municipio_acomp)
+                            fichas_copia = set()
+                            for nome_bairro in re.split(r"[,;/]", bairros_grupo):
+                                bairro_indice = normalizar_texto(nome_bairro)
+                                fichas_copia.update(indice_fontes_por_bairro.get(
+                                    (municipio_indice, bairro_indice), set()
+                                ))
+                            if vinculo_acomp:
+                                fichas_copia.discard(str(vinculo_acomp.get("evento_id", "")))
+                            fontes_copia = [
+                                {"id": fid, "titulo": fichas_acomp_visiveis[fid].get("titulo", "")}
+                                for fid in sorted(fichas_copia)
+                                if fid in fichas_acomp_visiveis
+                            ]
                             contexto_popup = {
                                 "chave": chave_acomp, "codigo": str(codigo),
                                 "municipio": municipio_acomp, "bairros": bairros_grupo,
@@ -6100,6 +6133,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                 "longitude": float(concentracao["LONGITUDE"]),
                                 "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
                                 "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
+                                "ficha_compartilhada": bool(
+                                    vinculo_acomp and total_vinculos_por_ficha.get(
+                                        str(vinculo_acomp["evento_id"]), 0
+                                    ) > 1
+                                ),
+                                "fontes_copia": fontes_copia,
                                 "evento_chave": (
                                     contexto_atual["evento_chaves"][0]
                                     if len(contexto_atual["evento_chaves"]) == 1 else ""
@@ -6167,6 +6206,14 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                                 st.rerun()
                                             except Exception as erro_recuperar:
                                                 st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
+                                if st.button(
+                                    "📝 Criar ficha independente ou copiar dados",
+                                    key=f"farol_criar_independente_{abrangencia}_{codigo}",
+                                    disabled=not PODE_EDITAR_FAROL,
+                                ):
+                                    popup_acompanhamento_farol(
+                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                    )
                             else:
                                 rotulo_acomp = (
                                     ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")

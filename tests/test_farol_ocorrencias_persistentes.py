@@ -296,5 +296,51 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
         self.assertRegex(escopo["chave_evento"](evento), r"^[a-f0-9]{32}$")
 
 
+    def test_modo_explicito_nao_une_concentracoes_mesmo_evento(self):
+        ctx={
+            "THE C001":contexto("a"*32,["101","102","103"],eventos=[self.evento]),
+            "THE C002":contexto("c"*32,["201","202","203"],eventos=[self.evento],
+                                 lat=-5.21,lon=-42.83),
+        }
+        dados,sugestoes,lote=resolver_ocorrencias(
+            ctx,self.historico,self.fichas,[],
+            associacao_automatica=False,
+        )
+        self.assertEqual(dados["THE C001"]["evento_id"],"164")
+        self.assertNotIn("THE C002",dados)
+        self.assertEqual(lote,[])
+        self.assertIsInstance(sugestoes,dict)
+
+    def test_continuidade_em_os_somente_sugerida_sem_gravacao(self):
+        ctx={
+            "THE C002":contexto("c"*32,["101","102","104"],lat=-5.09,lon=-42.80)
+        }
+        dados,sugestoes,lote=resolver_ocorrencias(
+            ctx,self.historico,self.fichas,[],
+            associacao_automatica=False,
+        )
+        self.assertEqual(dados,{})
+        self.assertEqual(len(sugestoes["THE C002"]),1)
+        self.assertEqual(sugestoes["THE C002"][0]["evento_id"],"164")
+        self.assertEqual(lote,[])
+
+    def test_fluxo_exige_escolha_para_ficha_independente(self):
+        pagina=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
+        interface=(ROOT/"acompanhamento_operacional_farol.py").read_text(encoding="utf-8")
+        backend=(ROOT/"farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
+        sql=(ROOT/"sql"/"farol_separar_concentracao_20261115.sql").read_text(encoding="utf-8")
+        self.assertIn("associacao_automatica=False",pagina)
+        self.assertIn("Criar ficha independente ou copiar dados",pagina)
+        self.assertIn("Copiar dados de outra ficha (criar ID independente)",interface)
+        self.assertIn("Criar ficha independente nesta concentração",interface)
+        self.assertIn("contexto_independente = dict(contexto, evento_chave=\"\")",interface)
+        self.assertIn("sb_separar(",interface)
+        self.assertIn("/rest/v1/rpc/farol_acomp_separar_concentracao_tx",backend)
+        self.assertIn("WHERE chave=p_chave AND evento_id=p_ficha_atual",sql)
+        self.assertIn("FOR UPDATE",sql)
+        self.assertIn("public.prisma_auditoria",sql)
+        self.assertNotIn("DELETE FROM public.farol_acomp_",sql)
+
+
 if __name__ == "__main__":
     unittest.main()
