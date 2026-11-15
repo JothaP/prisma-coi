@@ -41,6 +41,7 @@ DECLARE
     v_num integer := 0;
     v_incorporadas integer := 0;
     v_eventos integer := 0;
+    v_eventos_processados integer := 0;
     v_candidatos text[];
     v_tem_outros_eventos boolean;
     v_lat1 double precision;
@@ -119,6 +120,7 @@ BEGIN
         INTO v_eventos FROM jsonb_array_elements(p_itens) t
         WHERE t->>'evento_chave'=v_evento;
       IF v_eventos<>1 THEN RAISE EXCEPTION 'OCORRENCIAS_EVENTO_CIDADES_DIFERENTES'; END IF;
+      v_eventos_processados:=v_eventos_processados+1;
       SELECT btrim(t->>'municipio') INTO v_municipio
         FROM jsonb_array_elements(p_itens) t
         WHERE t->>'evento_chave'=v_evento LIMIT 1;
@@ -196,7 +198,7 @@ BEGIN
         WHERE evento_chave=v_evento;
         IF v_ficha IS NULL THEN RAISE EXCEPTION 'OCORRENCIAS_EVENTO_SEM_ANCORA'; END IF;
       ELSE
-        SELECT * INTO v_existe FROM public.farol_acomp_vinculos
+        SELECT evento_id INTO v_existe FROM public.farol_acomp_vinculos
           WHERE chave=v_chave_antiga AND evento_id=v_ficha;
         IF NOT FOUND THEN RAISE EXCEPTION 'OCORRENCIAS_CONTINUIDADE_NAO_LOCALIZADA'; END IF;
         SELECT array_agg(DISTINCT btrim(value)) INTO v_os_antigas
@@ -266,7 +268,7 @@ BEGIN
     END IF;
     RETURN jsonb_build_object(
       'vinculos',v_num,'incorporacoes',v_incorporadas,
-      'eventos',v_eventos,'preservou_historico',true
+      'eventos',v_eventos_processados,'preservou_historico',true
     );
 END;
 $func$;
@@ -317,7 +319,13 @@ AS $func$
  WHERE m.evento_id=p_ficha_id
     OR EXISTS(SELECT 1 FROM public.farol_acomp_incorporacoes i
               WHERE i.ficha_principal=p_ficha_id AND i.ficha_incorporada=m.evento_id)
- ORDER BY m.id::bigint NULLS LAST;
+ ORDER BY CASE WHEN m.id ~ '^[0-9]+
+$func$;
+REVOKE ALL ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
+  FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
+  TO service_role;
+ THEN m.id::bigint END NULLS LAST,m.id;
 $func$;
 REVOKE ALL ON FUNCTION public.farol_acomp_historico_ocorrencia(text)
   FROM PUBLIC,anon,authenticated;
