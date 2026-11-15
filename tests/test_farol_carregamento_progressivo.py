@@ -128,7 +128,7 @@ class TesteCarregamentoProgressivo(unittest.TestCase):
         fonte=FONTE.read_text(encoding="utf-8")
         trecho=fonte.split(
             "# Um resumo compartilhado, por evento e município,",1
-        )[1].split("# A ficha.id é permanente.",1)[0]
+        )[1].split("# Só as chaves exatas persistidas",1)[0]
         self.assertIn("resumir_eventos_concentracoes(",trecho)
         self.assertNotIn("dados_relatorio_concentracao(",trecho)
         inicio=fonte.index("for aba, abrangencia in ((aba_the")
@@ -139,12 +139,11 @@ class TesteCarregamentoProgressivo(unittest.TestCase):
         self.assertIn("dados_preparados=(os_eventos, ativos_eventos, eventos_do_grupo)",
                       fonte[chamada:])
 
-    def test_sincronizacao_depois_da_montagem_dos_cartoes(self):
+    def test_concentracoes_nao_gravam_sincronizacao_automatica(self):
         fonte=FONTE.read_text(encoding="utf-8")
-        idx_cartoes=fonte.index("for aba, abrangencia in ((aba_the")
-        idx_sincronia=fonte.index(
-            "retorno_ocorrencias = sincronizar_ocorrencias_lote(")
-        self.assertGreater(idx_sincronia,idx_cartoes)
+        self.assertIn("for aba, abrangencia in ((aba_the",fonte)
+        self.assertNotIn("sincronizar_ocorrencias_lote(",fonte)
+        self.assertNotIn("aplicar_mesclas_farol(",fonte)
         self.assertNotIn("gravacoes_nesta_interacao",fonte)
 
 
