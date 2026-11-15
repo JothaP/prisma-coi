@@ -59,7 +59,7 @@ from farol_acomp_supabase_backend import (
     sincronizar_ocorrencias_lote,
 )
 from farol_ocorrencias_persistentes import (
-    chaves_eventos_confirmados, os_por_evento_confirmado, resolver_ocorrencias,
+    resumir_eventos_concentracoes, resolver_ocorrencias,
 )
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
@@ -5848,22 +5848,27 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
 
             chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
 
-            # Calcular eventos por concentração UMA vez. Reutilizado no cartão
-            # e ao abrir detalhes: nenhuma consulta ao Supabase por expander.
-            dados_eventos_por_codigo = {}
+            # Um resumo compartilhado, por evento e município, substitui a
+            # preparação individual de relatórios para TODOS os cartões.
+            # As análises detalhadas são preparadas apenas quando solicitadas.
             agora_eventos = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+            resumo_eventos_por_grupo = resumir_eventos_concentracoes(
+                pontos_cluster, df_eventos, bairros,
+                normalizar_cidade=normalizar_municipio,
+                conferir_data=evento_pertinente_data_analise,
+                abrange_municipio=evento_abrange_municipio,
+                extrair_areas=extrair_bairros_evento,
+                nomes_poligono=nomes_reconhecidos_feicao,
+                localizar_os=identificar_correspondencia_territorial_evento_os,
+                converter_data=interpretar_data_operacional,
+                classificar_status=classificar_status_evento,
+                chave_evento=chave_evento,
+                agora=agora_eventos,
+            )
             for _, item_conc in concentracoes.iterrows():
                 codigo_atual = str(item_conc["ID_CONCENTRACAO"])
-                dados = dados_relatorio_concentracao(
-                    item_conc, pontos_cluster, proximidades, df_eventos, bairros
-                )
-                dados_eventos_por_codigo[codigo_atual] = dados
-                os_evento, _, relacionados = dados
-                os_por_evento = os_por_evento_confirmado(
-                    os_evento, relacionados, chave_evento,
-                    interpretar_data_operacional, classificar_status_evento,
-                    agora_eventos,
-                )
+                resumo = resumo_eventos_por_grupo.get(item_conc["GRUPO"], {})
+                os_por_evento = resumo.get("evento_os", {})
                 contextos_ativos_acomp[codigo_atual]["evento_os"] = os_por_evento
                 contextos_ativos_acomp[codigo_atual]["evento_chaves"] = tuple(
                     sorted(os_por_evento)
@@ -5876,6 +5881,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             candidatos_acomp_por_codigo = {}
             continuidades_automaticas = {}
             uso_candidato = {}
+            lote_ocorrencias_pendentes = []
             try:
                 ancoras_evento = (
                     listar_eventos_persistentes()
@@ -5887,55 +5893,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         fichas_acomp_visiveis, ancoras_evento,
                     )
                 )
-                if recuperar_supabase_ativo and PODE_EDITAR_FAROL and lote_ocorrencias:
-                    # Apenas quando a composição muda na sessão. Sem cron,
-                    # gravações sequenciais ou consultas individuais por ficha.
-                    assinatura = hashlib.sha256(json.dumps(
-                        [(cod, ctx["chave"], ctx["evento_chaves"])
-                         for cod, ctx in sorted(contextos_ativos_acomp.items())],
-                        sort_keys=True, ensure_ascii=False, default=str,
-                    ).encode("utf-8")).hexdigest()
-                    tentativas = st.session_state.setdefault(
-                        "farol_ocorrencias_sincronizacao_tentativas", {}
-                    )
-                    falha_recente = (
-                        tentativas.get("assinatura_falha") == assinatura
-                        and tempo_execucao.monotonic() - tentativas.get("falha_em", 0) < 90
-                    )
-                    if tentativas.get("assinatura_sucesso") != assinatura and not falha_recente:
-                        try:
-                            retorno_ocorrencias = sincronizar_ocorrencias_lote(
-                                lote_ocorrencias
-                            )
-                            tentativas["assinatura_sucesso"] = assinatura
-                            tentativas.pop("assinatura_falha", None)
-                            # Dados canônicos do banco, após unificações e
-                            # inclusão de chaves. Preserva metadados e histórico.
-                            todos_vinculos_acomp = listar_vinculos()
-                            vinculos_acomp_visiveis = {
-                                v["chave"]: v for v in todos_vinculos_acomp
-                            }
-                            fichas_acomp_visiveis = dados_acompanhamento()
-                            ancoras_evento = listar_eventos_persistentes()
-                            (
-                                resolvidos_persistentes, candidatos_acomp_por_codigo, _
-                            ) = resolver_ocorrencias(
-                                contextos_ativos_acomp, todos_vinculos_acomp,
-                                fichas_acomp_visiveis, ancoras_evento,
-                            )
-                            if int(retorno_ocorrencias.get("incorporacoes", 0)):
-                                st.toast(
-                                    "Concentrações do mesmo evento reunidas em uma "
-                                    "ficha de acompanhamento. Históricos preservados."
-                                )
-                        except Exception as erro:
-                            tentativas["assinatura_falha"] = assinatura
-                            tentativas["falha_em"] = tempo_execucao.monotonic()
-                            st.warning(
-                                "A conciliação persistente não foi gravada. As "
-                                "fichas permanecem intactas; a análise atual "
-                                f"continuará em modo de consulta: {erro}"
-                            )
+                lote_ocorrencias_pendentes = lote_ocorrencias
 
                 # Consultas podem mostrar imediatamente a ficha reconhecida,
                 # sem escrever no banco e sem esperar sincronizações por hora.
@@ -6038,12 +5996,15 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         cidades_grupo = sorted({str(v).strip() for v in os_grupo["Cidade"] if str(v).strip()})
                         qtd_ativos = (int((proximidades["Concentração"] == codigo).sum())
                                       if not proximidades.empty else 0)
-                        # Calcular o vínculo de eventos uma única vez por concentração.
-                        # A ficha detalhada reutiliza este resultado quando for aberta.
-                        os_eventos, ativos_eventos, eventos_do_grupo = dados_eventos_por_codigo[str(codigo)]
+                        # Resumo da passagem compartilhada; nenhum relatório
+                        # ou tabela individual é calculado na montagem do cartão.
+                        resumo_eventos = resumo_eventos_por_grupo.get(
+                            concentracao["GRUPO"], {}
+                        )
+                        total_eventos = int(resumo_eventos.get("eventos_relacionados", 0))
                         indicador_eventos = (
-                            f"⚡ {len(eventos_do_grupo)} evento(s) relacionado(s)"
-                            if not eventos_do_grupo.empty else "Sem evento relacionado"
+                            f"⚡ {total_eventos} evento(s) relacionado(s)"
+                            if total_eventos else "Sem evento relacionado"
                         )
                         municipio_nota = cidades_grupo[0] if cidades_grupo else ""
                         numeros_os = [str(x).strip() for x in os_grupo.get("Nº da O.S", []) if str(x).strip()]
@@ -6054,7 +6015,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         concentracoes.loc[concentracoes["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         vinculo_acomp = vinculos_acomp_visiveis.get(chave_acomp)
-                        resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "EVENTOS_RELACIONADOS"] = len(eventos_do_grupo)
+                        resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "EVENTOS_RELACIONADOS"] = total_eventos
                         ficha_acomp = fichas_acomp_visiveis.get(str(vinculo_acomp.get("evento_id", ""))) if vinculo_acomp else None
                         if ficha_acomp and (str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
                                              or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
@@ -6210,6 +6171,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             # Evita criar vários st.dataframe e executar uma consulta aos
                             # gráficos dos loggers para CADA expansor em todo rerun.
                             if detalhe_ativo:
+                                # Somente o código escolhido realiza o cálculo
+                                # completo de O.S., ativos e eventos para as tabelas.
+                                os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
+                                    concentracao, pontos_cluster, proximidades,
+                                    df_eventos, bairros,
+                                )
                                 if st.button("▴ Ocultar detalhes desta concentração",
                                              key=f"farol_v2_ocultar_detalhe_{abrangencia}_{codigo}"):
                                     # String vazia: não reabrir o detalhe apenas por haver
@@ -6227,6 +6194,43 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                              key=f"farol_v2_carregar_detalhe_{abrangencia}_{codigo}"):
                                     st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
                                     st.rerun()
+        # Os cartões já foram montados antes de qualquer escrita.
+        # Quando houver mudança segura, conciliar UMA vez por requisição.
+        # Nenhuma gravação é executada individualmente dentro de expansores.
+        if recuperar_supabase_ativo and PODE_EDITAR_FAROL and lote_ocorrencias_pendentes:
+            assinatura = hashlib.sha256(json.dumps(
+                [(cod, ctx["chave"], ctx["evento_chaves"])
+                 for cod, ctx in sorted(contextos_ativos_acomp.items())],
+                sort_keys=True, ensure_ascii=False, default=str,
+            ).encode("utf-8")).hexdigest()
+            tentativas = st.session_state.setdefault(
+                "farol_ocorrencias_sincronizacao_tentativas", {}
+            )
+            falha_recente = (
+                tentativas.get("assinatura_falha") == assinatura
+                and tempo_execucao.monotonic() - tentativas.get("falha_em", 0) < 90
+            )
+            if tentativas.get("assinatura_sucesso") != assinatura and not falha_recente:
+                try:
+                    retorno_ocorrencias = sincronizar_ocorrencias_lote(
+                        lote_ocorrencias_pendentes
+                    )
+                    tentativas["assinatura_sucesso"] = assinatura
+                    tentativas.pop("assinatura_falha", None)
+                    if int(retorno_ocorrencias.get("incorporacoes", 0)):
+                        st.toast(
+                            "Concentrações do mesmo evento compartilham uma ficha. "
+                            "Movimentações e históricos preservados."
+                        )
+                except Exception as erro:
+                    tentativas["assinatura_falha"] = assinatura
+                    tentativas["falha_em"] = tempo_execucao.monotonic()
+                    st.warning(
+                        "Não foi possível persistir a continuidade reconhecida. "
+                        "A ficha continua visível nesta análise, mas a gravação "
+                        f"precisa ser repetida: {erro}"
+                    )
+
         # Disponível também quando não há concentrações no filtro atual.
         if concentracoes.empty:
             resumo_pdf = concentracoes.copy()
