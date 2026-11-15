@@ -5895,12 +5895,17 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     tentativas = st.session_state.setdefault(
                         "farol_ocorrencias_sincronizacao_tentativas", {}
                     )
-                    if tentativas.get("assinatura") != assinatura:
-                        tentativas["assinatura"] = assinatura
+                    falha_recente = (
+                        tentativas.get("assinatura_falha") == assinatura
+                        and tempo_execucao.monotonic() - tentativas.get("falha_em", 0) < 90
+                    )
+                    if tentativas.get("assinatura_sucesso") != assinatura and not falha_recente:
                         try:
                             retorno_ocorrencias = sincronizar_ocorrencias_lote(
                                 lote_ocorrencias
                             )
+                            tentativas["assinatura_sucesso"] = assinatura
+                            tentativas.pop("assinatura_falha", None)
                             # Dados canônicos do banco, após unificações e
                             # inclusão de chaves. Preserva metadados e histórico.
                             todos_vinculos_acomp = listar_vinculos()
@@ -5921,6 +5926,8 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     "ficha de acompanhamento. Históricos preservados."
                                 )
                         except Exception as erro:
+                            tentativas["assinatura_falha"] = assinatura
+                            tentativas["falha_em"] = tempo_execucao.monotonic()
                             st.warning(
                                 "A conciliação persistente não foi gravada. As "
                                 "fichas permanecem intactas; a análise atual "
