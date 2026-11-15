@@ -284,4 +284,18 @@ def resolver_ocorrencias(contextos, vinculos, fichas, ancoras):
                 manual[codigo] = _sugestoes(contextos[codigo], indice, vinculos, fichas)
             operacoes = [o for o in operacoes
                          if o.get("chave") not in {contextos[c]["chave"] for c in lista}]
+    # O total operacional da ficha usa todas as concentrações do evento no
+    # período, inclusive aquelas que não precisaram de novo vínculo.
+    total_evento=defaultdict(set)
+    for ctx in contextos.values():
+        evts=tuple(ctx.get("evento_chaves") or ())
+        if len(evts)==1:
+            total_evento[evts[0]].update(_os(
+                (ctx.get("evento_os") or {}).get(evts[0], ())
+            ))
+    for operacao in operacoes:
+        if operacao.get("motivo")=="evento":
+            operacao["os_evento_total"]=sorted(
+                total_evento.get(operacao["evento_chave"], set())
+            )
     return resultado, manual, operacoes
