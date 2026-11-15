@@ -60,6 +60,22 @@ if str(st.session_state.get("perfil", "")).lower().strip() not in {"admin", "usu
 # Quando o Hub cadastrar uma permissão explícita para o módulo 7, respeitá-la.
 # Não exigir a permissão antes da configuração no Hub para não bloquear a implantação inicial.
 
+# A navegação do laboratório é anterior às leituras do Farol.
+# Isso permite investigar ativos sem depender da configuração de outras fontes.
+st.title("🧪 Ambiente de Teste — COI")
+modo_teste = st.radio(
+    "Ferramenta experimental",
+    ["Investigação de áreas de influência", "Mesclagem de concentrações por evento",
+     "Relatórios integrados (original)"],
+    horizontal=True,
+    key="ambiente_teste_ferramenta",
+)
+if modo_teste == "Investigação de áreas de influência":
+    from investigacao_areas_teste import renderizar_investigacao
+    renderizar_investigacao()
+    st.stop()
+
+
 ID_PRESSAO = str(st.secrets.get("modulo_1_spreadsheet_id", "15iN3YEGyxk3l1ZKaHJJp-BvTfVHqpd7gL1GX3RbAKUU")).strip()
 ID_FAROL = str(st.secrets.get("farol_producao_spreadsheet_id", "")).strip()
 if not ID_FAROL or ID_FAROL == ID_PRESSAO:
@@ -2727,13 +2743,6 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
 # Laboratório independente do Módulo 3: o piloto usa somente leituras
 # existentes e persiste seus registros em st.session_state. NÃO utiliza as
 # funções de escrita do acompanhamento operacional de produção.
-st.title("🧪 Ambiente de Teste — COI")
-modo_teste = st.radio(
-    "Ferramenta experimental",
-    ["Mesclagem de concentrações por evento", "Relatórios integrados (original)"],
-    horizontal=True,
-    key="ambiente_teste_ferramenta",
-)
 if modo_teste == "Mesclagem de concentrações por evento":
     from farol_mesclagem_teste import renderizar_mesclagem_teste
     if st.button("← Voltar ao Hub Central", key="retornar_hub_mesclagem"):
