@@ -50,6 +50,7 @@ DECLARE
     v_lon2 double precision;
     v_distancia double precision;
     v_comuns integer;
+    v_os_evento_total integer;
     v_hora text := to_char(clock_timestamp() AT TIME ZONE 'America/Fortaleza','DD/MM/YYYY HH24:MI');
 BEGIN
     IF p_itens IS NULL OR jsonb_typeof(p_itens)<>'array'
@@ -267,6 +268,34 @@ BEGIN
                     WHERE chave=v_chave AND evento_id=v_ficha)
       THEN RAISE EXCEPTION 'OCORRENCIAS_CONFLITO_SIMULTANEO'; END IF;
       v_num:=v_num+1;
+    END LOOP;
+
+    -- Atualiza SOMENTE o contador operacional da etiqueta principal.
+    -- O título, o relato e as movimentações redigidos pelo analista ficam
+    -- intactos. O total inclui as O.S. confirmadas de TODAS as concentrações
+    -- do evento, inclusive as que não precisaram gerar uma nova chave.
+    FOR v_evento IN
+      SELECT DISTINCT t->>'evento_chave'
+      FROM jsonb_array_elements(p_itens) t WHERE t->>'motivo'='evento'
+    LOOP
+      SELECT ficha_id INTO v_principal FROM public.farol_acomp_eventos_persistentes
+      WHERE evento_chave=v_evento;
+      SELECT count(DISTINCT trim(os.value)) INTO v_os_evento_total
+      FROM jsonb_array_elements(p_itens) AS t
+      CROSS JOIN LATERAL jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(t->'os_evento_total')='array'
+             THEN t->'os_evento_total' ELSE '[]'::jsonb END
+      ) AS os(value)
+      WHERE t->>'motivo'='evento' AND t->>'evento_chave'=v_evento
+        AND trim(os.value)<>'';
+      IF v_principal IS NOT NULL AND v_os_evento_total>0 THEN
+        UPDATE public.farol_acomp_fichas
+        SET qtd_reclamacoes=v_os_evento_total::text,
+            ultima_atualizacao=v_hora, versao=versao+1
+        WHERE id=v_principal AND qtd_reclamacoes IS DISTINCT FROM v_os_evento_total::text
+          AND lower(btrim(coalesce(finalizado,'')))<>'sim'
+          AND lower(btrim(coalesce(status,''))) NOT LIKE 'conclu%';
+      END IF;
     END LOOP;
 
     IF v_num>0 OR v_incorporadas>0 THEN
