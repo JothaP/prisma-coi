@@ -67,7 +67,7 @@ from farol_vinculos_os_manuais import (
     vincular_os_manual, desfazer_vinculo_os_manual,
     aplicar_vinculos_manuais, normalizar_os, eventos_manuais_do_grupo,
 )
-from farol_mesclagem_operacional import chave_evento
+from farol_mesclagem_operacional import chave_evento as chave_evento_persistente
 from farol_regionais_api import (
     PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
     mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
@@ -5863,7 +5863,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 localizar_os=identificar_correspondencia_territorial_evento_os,
                 converter_data=interpretar_data_operacional,
                 classificar_status=classificar_status_evento,
-                chave_evento=chave_evento,
+                chave_evento=chave_evento_persistente,
                 agora=agora_eventos,
             )
             for _, item_conc in concentracoes.iterrows():
