@@ -20,7 +20,8 @@ from integracao_acompanhamento_producao import (
 )
 from farol_acomp_supabase_backend import (
     fonte_supabase, listar as sb_listar, buscar_ficha as sb_ficha,
-    buscar_por_evento as sb_evento, criar as sb_criar,
+    buscar_por_evento as sb_evento, buscar_historico_ocorrencia as sb_historico,
+    criar as sb_criar,
     editar as sb_editar, dados_ficha as sb_dados_ficha,
 )
 
@@ -187,10 +188,20 @@ def obter_evento(eid):
     return next((r for r in ler_registros("eventos") if str(r["id"]) == str(eid)), None)
 
 def obter_movimentacoes(eid):
-    rows = (sb_evento("movimentacoes", eid) if fonte_supabase()
+    rows = (sb_historico(eid) if fonte_supabase()
             else [r for r in ler_registros("movimentacoes") if str(r["evento_id"]) == str(eid)])
     rows.sort(key=lambda r: int(r["id"]) if str(r["id"]).isdigit() else 0)
-    return [(r["data_hora"], r["descricao"], r["status_momento"]) for r in rows]
+    return [
+        (
+            r["data_hora"],
+            (
+                f"[Ficha incorporada #{r['origem_ficha_id']}] "
+                if str(r.get("origem_ficha_id", eid)) != str(eid) else ""
+            ) + str(r["descricao"]),
+            r["status_momento"],
+        )
+        for r in rows
+    ]
 
 def esta_concluido(evento):
     """Identifica a situação da ficha; não determina as permissões de edição."""
