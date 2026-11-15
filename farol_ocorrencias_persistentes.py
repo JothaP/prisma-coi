@@ -16,6 +16,98 @@ import pandas as pd
 NAO_CLASSIFICADO = "Sem vínculo exato identificado"
 
 
+
+def preparar_lote_persistencia(operacoes, limite=500):
+    """Valida o contrato do RPC ANTES de enviar qualquer gravação.
+
+    Um evento com uma única O.S. pode ser legítimo: sua identidade só é
+    formada após confirmação territorial e temporal. Para continuidade sem
+    evento, exige duas O.S., como a rotina SQL.
+
+    Erro em uma concentração bloqueia apenas o evento inteiro ao qual ela
+    pertence; não permite incorporar parcialmente fichas do mesmo evento.
+    Retorna (itens_validos, rejeitados_por_motivo) sem dados pessoais.
+    """
+    if not isinstance(operacoes, list):
+        raise ValueError("Lote de sincronização inválido.")
+    validos = []
+    rejeitados = defaultdict(int)
+    problemas_por_evento = set()
+    avaliados = []
+    chaves_vistas = {}
+
+    def md5(valor):
+        return isinstance(valor, str) and bool(re.fullmatch(r"[a-f0-9]{32}", valor))
+
+    for item in operacoes:
+        if not isinstance(item, dict):
+            avaliados.append((item, "formato_invalido"))
+            continue
+        motivo = item.get("motivo")
+        chave = item.get("chave")
+        fid = str(item.get("ficha_id") or "").strip()
+        municipio = str(item.get("municipio") or "").strip()
+        os_reg = item.get("os")
+        evento = item.get("evento_chave") if motivo == "evento" else None
+        anterior = item.get("chave_anterior") if motivo == "continuidade" else None
+
+        erro = None
+        if motivo not in {"evento", "continuidade"}:
+            erro = "motivo_invalido"
+        elif not md5(chave):
+            erro = "chave_invalida"
+        elif not fid or not municipio:
+            erro = "identificacao_incompleta"
+        elif not isinstance(os_reg, list) or not os_reg or len(os_reg) > 1000:
+            erro = "lista_os_invalida"
+        elif any(not isinstance(o, str) or not o.strip() for o in os_reg):
+            erro = "numero_os_invalido"
+        elif motivo == "evento" and not md5(evento):
+            erro = "evento_invalido"
+        elif motivo == "continuidade" and not md5(anterior):
+            erro = "vinculo_anterior_invalido"
+        elif motivo == "continuidade" and len(set(os_reg)) < 2:
+            erro = "sobreposicao_insuficiente"
+        elif motivo == "continuidade" and (
+            distancia_metros(
+                item.get("latitude"), item.get("longitude"),
+                item.get("latitude"), item.get("longitude")
+            ) is None
+        ):
+            erro = "coordenadas_invalidas"
+        avaliados.append((item, erro))
+        if erro and motivo == "evento" and isinstance(evento, str):
+            problemas_por_evento.add(evento)
+
+    # Chaves duplicadas com destinos diferentes bloqueiam a transação
+    # original; retirá-las juntas permite sincronizar os demais registros.
+    conflitos = set()
+    for item, erro in avaliados:
+        if erro or not isinstance(item, dict):
+            continue
+        chave = item["chave"]
+        destino = (item["motivo"], item.get("evento_chave"), item["ficha_id"])
+        anterior = chaves_vistas.setdefault(chave, destino)
+        if anterior != destino:
+            conflitos.add(chave)
+    for item, erro in avaliados:
+        if isinstance(item, dict) and item.get("chave") in conflitos:
+            erro = "chave_duplicada_conflitante"
+        if isinstance(item, dict) and item.get("motivo") == "evento":
+            if item.get("evento_chave") in problemas_por_evento:
+                erro = erro or "evento_com_item_invalido"
+        if erro:
+            rejeitados[erro] += 1
+        elif isinstance(item, dict):
+            validos.append(item)
+
+    # Preservar a atomicidade do conjunto de cada evento também no limite
+    # operacional. Nunca dividir uma fusão em duas requisições diferentes.
+    if len(validos) > limite:
+        rejeitados["lote_acima_do_limite"] = len(validos)
+        validos = []
+    return validos, dict(rejeitados)
+
 def normalizar_municipio(valor):
     x = unicodedata.normalize("NFKD", str(valor or "").strip().upper())
     return re.sub(r"[^A-Z0-9]", "", "".join(c for c in x if not unicodedata.combining(c)))
