@@ -383,6 +383,17 @@ def renderizar_investigacao():
     else:
         st.info("Pesquise um ativo para centralizar o mapa e ordenar os equipamentos mais próximos.")
 
+    ativo_referencia = (
+        (selecionado["tipo"], selecionado["codigo"], selecionado["lat"], selecionado["lon"])
+        if selecionado else None
+    )
+    if st.session_state.get("inv_ativo_referencia") != ativo_referencia:
+        st.session_state["inv_ativo_referencia"] = ativo_referencia
+        st.session_state.pop("inv_mapa_centro", None)
+        st.session_state.pop("inv_mapa_zoom", None)
+        st.session_state.pop("inv_rede_limites", None)
+        st.session_state["inv_mapa_versao"] = st.session_state.get("inv_mapa_versao", 0) + 1
+
     c1, c2, c3 = st.columns([1, 1, 1])
     with c1:
         quantidade_ativos = st.select_slider(
@@ -454,7 +465,9 @@ def renderizar_investigacao():
         cotas = {}
         st.warning(f"Modelo de elevação não pôde ser amostrado: {exc}")
 
-    mapa = folium.Map(location=centro, zoom_start=13 if selecionado else 12,
+    centro_visual = st.session_state.get("inv_mapa_centro") or centro
+    zoom_visual = st.session_state.get("inv_mapa_zoom") or (13 if selecionado else 12)
+    mapa = folium.Map(location=centro_visual, zoom_start=zoom_visual,
                       tiles="OpenStreetMap", control_scale=True, prefer_canvas=True)
     folium.TileLayer("CartoDB positron", name="Mapa claro").add_to(mapa)
     Fullscreen(position="topright").add_to(mapa)
@@ -548,10 +561,21 @@ def renderizar_investigacao():
     st.caption("Desenhe um polígono ou retângulo pelo controle à esquerda do mapa. "
                "Rótulos podem ser ligados/desligados no controle de camadas.")
     evento = st_folium(mapa, height=670, width=None,
-        returned_objects=["all_drawings", "last_active_drawing", "bounds"],
+        returned_objects=["all_drawings", "last_active_drawing", "bounds", "center", "zoom"],
         key=f"inv_mapa_investigacao_{st.session_state.get('inv_mapa_versao', 0)}")
 
     if isinstance(evento, dict):
+        visao = evento.get("center")
+        if isinstance(visao, dict):
+            try:
+                clat, clon = float(visao["lat"]), float(visao["lng"])
+                if _coords_validas(clat, clon):
+                    st.session_state["inv_mapa_centro"] = (clat, clon)
+            except (ValueError, TypeError, KeyError):
+                pass
+        zoom = evento.get("zoom")
+        if isinstance(zoom, (int, float)) and 1 <= zoom <= 19:
+            st.session_state["inv_mapa_zoom"] = int(zoom)
         desenhos = evento.get("all_drawings") or []
         conhecidos = {json.dumps(x, sort_keys=True) for x in salvos}
         for item in desenhos:
