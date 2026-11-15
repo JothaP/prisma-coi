@@ -157,6 +157,57 @@ def listar(tipo: str) -> list[dict]:
     return _buscar(tipo)
 
 
+@st.cache_data(ttl=30, max_entries=4, show_spinner=False)
+def listar_eventos_persistentes() -> list[dict]:
+    """Mapeamento evento -> ficha permanente, sem baixar movimentações."""
+    if not fonte_supabase():
+        return []
+    resultado = _request(
+        "GET", "/rest/v1/farol_acomp_eventos_persistentes",
+        params={
+            "select": "evento_chave,ficha_id,municipio",
+            "order": "evento_chave.asc",
+            "limit": "1000",
+        },
+    )
+    if not isinstance(resultado, list):
+        raise FalhaAcompanhamentoSupabase("Âncoras de eventos inválidas.")
+    return resultado
+
+
+def sincronizar_ocorrencias_lote(registros: list[dict]) -> dict:
+    """Uma única chamada transacional; sem gravar uma ficha por cartão."""
+    if not fonte_supabase():
+        raise RuntimeError("Ocorrências persistentes exigem Supabase.")
+    if not isinstance(registros, list) or len(registros)>500:
+        raise ValueError("Lote de continuidade inválido.")
+    if not registros:
+        return {"vinculos": 0, "incorporacoes": 0, "eventos": 0}
+    autor = _autor("editar")
+    resultado = _request(
+        "POST", "/rest/v1/rpc/farol_acomp_sincronizar_ocorrencias_tx",
+        dados={"p_itens": registros, "p_autor": autor},
+    )
+    if not isinstance(resultado, dict) or resultado.get("preservou_historico") is not True:
+        raise FalhaAcompanhamentoSupabase("Sincronização não confirmada pelo Supabase.")
+    limpar_cache()
+    listar_eventos_persistentes.clear()
+    return resultado
+
+
+def buscar_historico_ocorrencia(ficha_id) -> list[dict]:
+    """Histórico da ficha principal + incorporadas, sem excluir a origem."""
+    if not fonte_supabase():
+        return buscar_por_evento("movimentacoes", ficha_id)
+    retorno = _request(
+        "GET", "/rest/v1/rpc/farol_acomp_historico_ocorrencia",
+        params={"p_ficha_id": str(ficha_id)},
+    )
+    if not isinstance(retorno, list):
+        raise FalhaAcompanhamentoSupabase("Histórico consolidado inválido.")
+    return retorno
+
+
 def buscar_ficha(evento_id) -> dict | None:
     dados = _buscar("fichas", {"id": str(evento_id)}, limite=2)
     if len(dados) > 1:
@@ -172,6 +223,7 @@ def buscar_por_evento(tipo: str, evento_id) -> list[dict]:
 
 def limpar_cache():
     listar.clear()
+    listar_eventos_persistentes.clear()
 
 
 def _autor(acao):
@@ -213,9 +265,17 @@ def criar(dados: dict, contexto: dict) -> str:
         "os_origem": str(os_origem),
         "criado_em": hora_operacional(),
     }
-    resultado = _request("POST", "/rest/v1/rpc/farol_acomp_criar_tx",
-                         dados={"p_dados": dados, "p_contexto": contexto_sql,
-                                "p_autor": autor})
+    chave_evento = str(contexto.get("evento_chave", "") or "").strip()
+    # Primeiro acompanhamento de evento: a chave fica vinculada à ficha
+    # na MESMA transação, impedindo duas criações simultâneas para o evento.
+    rotina = (
+        "/rest/v1/rpc/farol_acomp_criar_ocorrencia_tx"
+        if chave_evento else "/rest/v1/rpc/farol_acomp_criar_tx"
+    )
+    parametros = {"p_dados": dados, "p_contexto": contexto_sql, "p_autor": autor}
+    if chave_evento:
+        parametros["p_evento_chave"] = chave_evento
+    resultado = _request("POST", rotina, dados=parametros)
     if not isinstance(resultado, dict) or not resultado.get("id"):
         raise FalhaAcompanhamentoSupabase("Gravação sem confirmação de identificador.")
     limpar_cache()
