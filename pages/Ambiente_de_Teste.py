@@ -47,7 +47,7 @@ FUSO_LOGGERS = ZoneInfo("America/Fortaleza")
 ABA_GRAFICOS_DIA = "FAROL_GRAFICOS_DIA"
 
 
-st.set_page_config(page_title="Relatórios Integrados — COI", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Ambiente de Teste — COI", page_icon="🧪", layout="wide")
 
 from auth import exigir_acesso_modulo as _prisma_exigir_acesso
 _prisma_exigir_acesso("7")
