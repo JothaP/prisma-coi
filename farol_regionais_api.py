@@ -46,7 +46,7 @@ def mapa_regionais_de_linhas(linhas):
         if len(linha) <= max(indice_municipio, indice_regional):
             continue
         municipio = chave_municipio(linha[indice_municipio])
-        regional = " ".join(str(linha[indice_regional] or "").strip().split())
+        regional = " ".join(str(linha[indice_regional] or "").strip().upper().split())
         if not municipio or not regional or municipio in ambiguos:
             continue
         if municipio in mapa and chave_municipio(mapa[municipio]) != chave_municipio(regional):
