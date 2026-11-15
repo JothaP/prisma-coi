@@ -70,12 +70,14 @@ def resumir_eventos_concentracoes(
     # Mesmo índice territorial adotado pela análise detalhada: se existir
     # polígono da área, o texto do bairro não pode contrariar a geometria.
     geometria_por_area = defaultdict(list)
+    bairros_por_cidade = defaultdict(list)
     for poligono in (bairros or []):
         if poligono.get("sem_nome"):
             continue
         cidade = normalizar_cidade(poligono.get("municipio", ""))
         if not cidade or cidade not in os_por_cidade:
             continue
+        bairros_por_cidade[cidade].append(poligono)
         for nome in nomes_poligono(poligono):
             geometria_por_area[(cidade, nome)].append(poligono)
 
@@ -87,7 +89,10 @@ def resumir_eventos_concentracoes(
             continue
         area_texto = evento.get("Áreas Impactadas", "")
         municipal = abrange_municipio(area_texto)
-        areas = extrair_areas(area_texto, evento.get("Cidade", ""), bairros)
+        areas = extrair_areas(
+            area_texto, evento.get("Cidade", ""),
+            bairros_por_cidade.get(cidade, []),
+        )
         indice_geometrias = (
             {} if municipal else {
                 area["bairro"]: geometria_por_area.get((cidade, area["bairro"]), [])
