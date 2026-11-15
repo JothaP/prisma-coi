@@ -61,6 +61,10 @@ from farol_vinculos_os_manuais import (
     aplicar_vinculos_manuais, normalizar_os, eventos_manuais_do_grupo,
 )
 from farol_mesclagem_operacional import chave_evento
+from farol_regionais_api import (
+    PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
+    mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
+)
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 from farol_mesclagem_operacional import (
     CHAVE_MODO as CHAVE_MODO_MESCLAGEM,
@@ -479,6 +483,25 @@ def obter_cliente_google():
         ],
     )
     return gspread.authorize(credenciais)
+
+
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def carregar_regionais_api_modulo5():
+    """Uma leitura leve e em cache do cadastro do Módulo 5 (não lê O.S.).
+
+    Se a consulta falhar, todas as concentrações ainda aparecem, sob
+    'Regional não cadastrada', sem afetar o restante do Farol.
+    """
+    try:
+        planilha = obter_cliente_google().open_by_key(PLANILHA_CADASTROS_COI)
+        aba = planilha.worksheet(ABA_MUNICIPIOS_REGIONAIS)
+        return mapa_regionais_de_linhas(aba.get_all_values()), ""
+    except Exception:
+        return {}, (
+            "Cadastro de regionais do Módulo 5 indisponível. "
+            "As concentrações API serão exibidas em 'Regional não cadastrada' "
+            "até a consulta ser restabelecida."
+        )
 
 
 @st.cache_resource(show_spinner=False)
@@ -5958,7 +5981,22 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     st.caption(f"{len(concentracoes_abrangencia)} concentração(ões) em {abrangencia}.")
                     if concentracoes_abrangencia.empty:
                         st.info("Nenhuma concentração encontrada nesta abrangência.")
-                    for _, concentracao in concentracoes_abrangencia.iterrows():
+                    if abrangencia == "API" and not concentracoes_abrangencia.empty:
+                        mapa_regionais_api, aviso_regionais = carregar_regionais_api_modulo5()
+                        if aviso_regionais:
+                            st.warning(aviso_regionais)
+                        exibicao_concentracoes = ordenar_concentracoes_api_por_regional(
+                            concentracoes_abrangencia, grupos_os, mapa_regionais_api
+                        )
+                    else:
+                        exibicao_concentracoes = [
+                            (None, conc) for _, conc in concentracoes_abrangencia.iterrows()
+                        ]
+                    regional_anterior = None
+                    for regional_atual, concentracao in exibicao_concentracoes:
+                        if abrangencia == "API" and regional_atual != regional_anterior:
+                            st.markdown(f"#### {html_escape(regional_atual).upper()}")
+                            regional_anterior = regional_atual
                         codigo = concentracao["ID_CONCENTRACAO"]
                         os_grupo = grupos_os.get(concentracao["GRUPO"], pontos_cluster.iloc[0:0])
                         cidades_grupo = sorted({str(v).strip() for v in os_grupo["Cidade"] if str(v).strip()})
