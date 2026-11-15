@@ -104,6 +104,17 @@ BEGIN
         OR (v_item->>'motivo'='evento' AND EXISTS(
           SELECT 1 FROM public.farol_acomp_eventos_persistentes
           WHERE evento_chave=v_evento AND ficha_id=v_ficha))
+        OR (v_item->>'motivo'='evento' AND EXISTS(
+          SELECT 1 FROM jsonb_array_elements(p_itens) fonte
+          JOIN public.farol_acomp_vinculos atual
+            ON atual.chave=fonte->>'chave' AND atual.evento_id=v_ficha
+          WHERE fonte->>'evento_chave'=v_evento))
+        OR (v_item->>'motivo'='evento' AND EXISTS(
+          SELECT 1 FROM jsonb_array_elements(p_itens) fonte
+          JOIN public.farol_acomp_vinculos historico
+            ON historico.chave=fonte->>'chave_anterior'
+               AND historico.evento_id=v_ficha
+          WHERE fonte->>'evento_chave'=v_evento))
       ) THEN
         RAISE EXCEPTION 'OCORRENCIAS_SEM_EVIDENCIA_PERSISTENTE';
       END IF;
