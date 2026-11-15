@@ -60,6 +60,7 @@ from farol_acomp_supabase_backend import (
 )
 from farol_ocorrencias_persistentes import (
     resumir_eventos_concentracoes, resolver_ocorrencias,
+    preparar_lote_persistencia,
 )
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
@@ -5893,7 +5894,26 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         fichas_acomp_visiveis, ancoras_evento,
                     )
                 )
-                lote_ocorrencias_pendentes = lote_ocorrencias
+                # Uma concentração pode ter apenas uma O.S. efetivamente
+                # associada a um evento. Uma falha de formato não deve impedir
+                # outros eventos independentes de persistir; nunca processar
+                # parcialmente um mesmo evento.
+                lote_ocorrencias_pendentes, rejeitadas_acomp = (
+                    preparar_lote_persistencia(lote_ocorrencias)
+                )
+                if rejeitadas_acomp:
+                    total_rejeitado = sum(rejeitadas_acomp.values())
+                    motivos_rejeitados = ", ".join(
+                        f"{motivo}: {qtd}"
+                        for motivo, qtd in sorted(rejeitadas_acomp.items())
+                    )
+                    st.warning(
+                        f"{total_rejeitado} vínculo(s) não foram incluídos na "
+                        "sincronização por inconsistência de dados "
+                        f"({motivos_rejeitados}). "
+                        "Esses acompanhamentos continuam disponíveis para "
+                        "revisão; os demais vínculos válidos serão gravados em lote."
+                    )
 
                 # Consultas podem mostrar imediatamente a ficha reconhecida,
                 # sem escrever no banco e sem esperar sincronizações por hora.
