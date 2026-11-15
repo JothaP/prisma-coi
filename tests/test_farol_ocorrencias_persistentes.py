@@ -156,8 +156,8 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
             "Protocolo":"EVENTO X",
         }
         os=pd.DataFrame([
-            {"Dt. Emissão":"13/11/2026 09:00"},
-            {"Dt. Emissão":"13/11/2026 10:00"},
+            {"Dt. Emissão":"13/11/2026 09:00","Nº da O.S":"101"},
+            {"Dt. Emissão":"13/11/2026 10:00","Nº da O.S":"102"},
         ],index=[5,8])
         ev=pd.DataFrame([evento])
         f=lambda x:pd.to_datetime(x,dayfirst=True,errors="coerce")
@@ -173,6 +173,24 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
             lambda x:("Em andamento","#f00"),pd.Timestamp("2026-11-13 12:00"),
         )
         self.assertFalse(ch)
+
+    def test_soma_os_confirmadas_entre_todas_as_concentracoes(self):
+        ctx={
+            "THE C001":dict(
+                contexto("a"*32,["101","102","103"],eventos=[self.evento]),
+                evento_os={self.evento:("101","102")},
+            ),
+            "THE C002":dict(
+                contexto("c"*32,["201","202","203"],eventos=[self.evento],
+                         lat=-5.22,lon=-42.88),
+                evento_os={self.evento:("202","203")},
+            ),
+        }
+        ancora=[{"evento_chave":self.evento,"ficha_id":"164","municipio":"Teresina"}]
+        dados,_,lote=self.resolver(ctx,ancoras=ancora)
+        self.assertEqual({r["evento_id"] for r in dados.values()},{"164"})
+        self.assertEqual(len(lote),1)  # uma já estava vinculada, sem nova escrita
+        self.assertEqual(lote[0]["os_evento_total"],["101","102","202","203"])
 
     def test_integracao_nao_grava_uma_por_expander(self):
         pagina=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
