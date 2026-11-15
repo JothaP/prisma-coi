@@ -2527,7 +2527,10 @@ def ri7_resumo_eventos_relacionados(eventos):
         if not descricao or descricao.casefold() in {"nan", "none"}:
             descricao = str(evento.get("Serviço", "") or "").strip()
         ativo = str(evento.get("Código do Ativo", "") or "").strip()
-        if ativo.casefold() in {"nan", "none", "não informado", "nao informado"}:
+        if ativo.casefold() in {
+            "nan", "none", "não informado", "nao informado",
+            "ativo não informado", "ativo nao informado", "sem ativo", "n/a", "-"
+        }:
             ativo = ""
         texto = " / ".join(v for v in (descricao, ativo) if v)
         if texto and texto not in descricoes:
