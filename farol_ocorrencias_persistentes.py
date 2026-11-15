@@ -215,6 +215,9 @@ def resolver_ocorrencias(contextos, vinculos, fichas, ancoras):
                 "incorporacoes": sorted(candidatos-{principal}),
             }
             processados.add(codigo)
+            # Evento já ancorado e vínculo atual correto: não gravar novamente.
+            if fid_existente == principal and ancora == principal and len(candidatos) == 1:
+                continue
             operacoes.append({
                 "chave": ctx["chave"], "ficha_id": fid_existente or principal,
                 "municipio": ctx["municipio"], "bairros": ctx.get("bairros", ""),
