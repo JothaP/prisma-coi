@@ -99,7 +99,7 @@ class TestesOcorrenciasPersistentes(unittest.TestCase):
 
     def test_eventos_sobrepostos_na_mesma_concentracao_impedem_uniao(self):
         ctx={"THE C001":contexto("a"*32,["101","102","103"],
-             eventos=["e"*32,"d"*32)}
+             eventos=["e"*32,"d"*32])}
         dados,_,lote=self.resolver(ctx)
         self.assertEqual(dados["THE C001"]["motivo"],"exato")
         self.assertFalse(lote)
