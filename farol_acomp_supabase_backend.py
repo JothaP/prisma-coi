@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import re
 import requests
 import streamlit as st
 from auth import pode_executar_acao, verificar_autenticacao
@@ -78,7 +79,16 @@ def _request(method, caminho, *, params=None, dados=None):
                 corpo = str(res.json().get("message", ""))
             except (ValueError, TypeError, AttributeError):
                 corpo = ""
-            if "CONFLITO_DE_VERSAO" in corpo:
+            if re.fullmatch(r"OCORRENCIAS_[A-Z0-9_]{2,100}", corpo):
+                # Mensagens próprias do RPC (sem dados ou IDs sensíveis)
+                # ajudam o operador a diferenciar um lote incompatível de
+                # uma indisponibilidade de rede. O banco permanece atômico.
+                mensagem = (
+                    "Sincronização de acompanhamentos rejeitada: "
+                    + corpo.replace("OCORRENCIAS_", "").replace("_", " ").lower()
+                    + ". Nenhuma alteração deste lote foi aplicada."
+                )
+            elif "CONFLITO_DE_VERSAO" in corpo:
                 mensagem = ("Conflito de edição: outro analista alterou esta ficha. "
                             "Reabra-a antes de salvar.")
             elif "Concentração já vinculada" in corpo:
