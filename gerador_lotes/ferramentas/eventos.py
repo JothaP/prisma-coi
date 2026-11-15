@@ -982,6 +982,61 @@ def montar_observacao(servico, codigo_ativo=""):
 
 
 # ============================================================
+# CONSOLIDAÇÃO DAS LINHAS EXPORTADAS NO LOTE DE EVENTOS
+# ============================================================
+
+def limpar_bairro_lote_eventos(valor):
+    """Remove apenas o qualificador 'Parcial' do nome exportado.
+
+    A validação territorial já é feita pelo nome do bairro no cruzamento;
+    esta limpeza altera somente a apresentação na prévia e no Excel.
+    """
+    texto = normalizar_texto(valor)
+    partes = texto.split()
+    while partes and partes[-1] in {"PARCIAL", "PARCIALMENTE"}:
+        partes.pop()
+    return " ".join(partes)
+
+
+def consolidar_linhas_lote_eventos(linhas):
+    """Reúne bairros do mesmo evento em uma linha e evita contar O.S. repetida.
+
+    Um grupo exige município, observação, início e término iguais (datas
+    completas e horários). A estrutura do Excel permanece COLUNAS_LOTE.
+    Os identificadores de O.S. são apenas metadados internos, não exportados.
+    """
+    agrupados = {}
+    for origem in linhas:
+        chave = (
+            origem["Cidade"],
+            origem["_inicio_evento"],
+            origem["_fim_evento"],
+            origem["Observação"],
+        )
+        if chave not in agrupados:
+            agrupados[chave] = {
+                "linha": {coluna: origem[coluna] for coluna in COLUNAS_LOTE},
+                "bairros": [],
+                "bairros_vistos": set(),
+                "chaves_os": set(),
+            }
+        grupo = agrupados[chave]
+        nome_bairro = limpar_bairro_lote_eventos(origem["Bairro"])
+        if nome_bairro and nome_bairro not in grupo["bairros_vistos"]:
+            grupo["bairros"].append(nome_bairro)
+            grupo["bairros_vistos"].add(nome_bairro)
+        grupo["chaves_os"].update(origem["_chaves_os"])
+
+    resultado = []
+    for grupo in agrupados.values():
+        linha = grupo["linha"]
+        linha["Bairro"] = ", ".join(grupo["bairros"])
+        linha["Quant. de O.S"] = len(grupo["chaves_os"])
+        resultado.append(linha)
+    return pd.DataFrame(resultado, columns=COLUNAS_LOTE)
+
+
+# ============================================================
 # CRUZAMENTO EVENTOS x BACKLOG
 # ============================================================
 
@@ -1299,17 +1354,21 @@ def cruzar_eventos_com_backlog(
                             fim_previsto.strftime("%H:%M")
                         ),
                         "Observação": observacao_evento,
+                        # Datas completas para não unir eventos distintos cujo
+                        # dia/hora apenas aparenta ser igual na exportação.
+                        "_inicio_evento": inicio_evento,
+                        "_fim_evento": fim_previsto,
+                        # União de O.S. evita dupla contagem quando o mesmo
+                        # registro aparece em duas áreas do mesmo evento.
+                        "_chaves_os": chaves_os_evento,
                     }
                 )
 
     # ========================================================
-    # RESULTADO FINAL
+    # RESULTADO FINAL (mesma observação, datas, horários e cidade)
     # ========================================================
 
-    resultado = pd.DataFrame(
-        resultado,
-        columns=COLUNAS_LOTE,
-    )
+    resultado = consolidar_linhas_lote_eventos(resultado)
 
     total_os = (
         int(resultado["Quant. de O.S"].sum())
@@ -1548,9 +1607,11 @@ def render_eventos():
             - Eventos que abrangem todo o município têm correspondência automática.
             - Nos demais eventos, o bairro é comparado com as **Áreas Impactadas**.
             - Qualificadores como **(parcial)**, **(parcialmente)** e **(total)** não são considerados parte do nome do bairro.
-            - A mesma O.S. é contabilizada uma única vez por área do evento.
+            - A mesma O.S. é contabilizada uma única vez por evento consolidado.
             - A coluna **Data** não é utilizada.
-            - O resultado é consolidado por evento e área impactada.
+            - Linhas da mesma cidade, observação, data de início e término e horários
+              são reunidas em um único registro, com os bairros separados por vírgula.
+            - O qualificador **Parcial** é removido do nome dos bairros na prévia e no Excel.
             - Áreas sem nenhuma O.S. não são incluídas no resultado.
             """
         )
