@@ -536,7 +536,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                                   disabled=somente_leitura)
         quantidade = topo_b.number_input("Nº de Reclamações", min_value=0, step=1,
                             value=(int(contexto.get("qtd", 0)) if criar_nova else
-                                    int(float(dados_iniciais.get("qtd_reclamacoes") or 0))),
+                                    int(float(evento.get("qtd_reclamacoes") or 0))),
                             disabled=somente_leitura)
         col_u, col_r, col_m = st.columns(3)
         unidade_atual = str(evento.get("unidade", "")) if evento else "Águas do Piauí"
@@ -548,12 +548,12 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                       index=REGIONAIS.index(regional_atual) if regional_atual in REGIONAIS else 0,
                       disabled=somente_leitura)
         municipio = col_m.text_input("Município", value=(str(contexto.get("municipio", "")) if criar_nova
-                                                  else str(dados_iniciais.get("municipio", ""))),
+                                                  else str(evento.get("municipio", ""))),
                                    disabled=somente_leitura)
 
         col_status, col_causa = st.columns(2)
         status_atual = ("Em Andamento" if criar_nova else
-                        status_para_interface(dados_iniciais.get("status", "")))
+                        status_para_interface(evento.get("status", "")))
         status = col_status.selectbox("Status", STATUS, index=STATUS.index(status_atual), disabled=somente_leitura,
                                       help="Ao mudar um concluído para Pendente/Em Andamento e salvar, ele será reaberto.")
         causa_atual = causa_para_interface(dados_iniciais) if dados_iniciais else "Não"
@@ -651,7 +651,11 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                 st.caption("Se o registro foi criado, confira a planilha antes de tentar novamente para evitar duplicação.")
 
     if evento:
-        with st.expander("🕓 Histórico de movimentações", expanded=False):
+        nome_historico = (
+            "🕓 Histórico da ficha compartilhada anterior (não será copiado)"
+            if separar else "🕓 Histórico de movimentações"
+        )
+        with st.expander(nome_historico, expanded=False):
             try:
                 registros = obter_movimentacoes(eid)
                 for data_mov, descricao_mov, status_mov in registros:
