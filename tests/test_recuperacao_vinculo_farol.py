@@ -109,7 +109,10 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertIn("if not confirmado:", pagina)
         self.assertIn("recuperar_vinculo_confirmado(", pagina)
         self.assertIn("possível divisão/fusão", pagina)
-        self.assertIn("chaves_ativas=chaves_ativas", pagina)
+        # No fluxo novo, a correspondência em memória usa índice invertido
+        # e somente a ambiguidades são enviadas para confirmação humana.
+        self.assertIn("resolver_ocorrencias(", pagina)
+        self.assertIn("uso_candidato.get(", pagina)
         backend = (RAIZ / "farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
         self.assertIn("/rest/v1/rpc/farol_acomp_recuperar_vinculo_tx", backend)
 
@@ -208,8 +211,8 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertIn("v_distancia>750", sql)
         self.assertIn("INSERT INTO public.prisma_auditoria", sql)
         self.assertIn("REVOKE ALL ON FUNCTION", sql)
-        self.assertIn("identificar_continuidades_automaticas(", pag)
-        self.assertIn("continuar_vinculo_automaticamente(", pag)
+        self.assertIn("resolver_ocorrencias(", pag)
+        self.assertIn("sincronizar_ocorrencias_lote(", pag)
         self.assertIn("PODE_EDITAR_FAROL", pag)
 
 
