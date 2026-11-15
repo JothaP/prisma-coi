@@ -41,10 +41,7 @@ from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
     aplicar_vinculos_manuais, eventos_manuais_do_grupo,
 )
-from farol_mesclagem_operacional import (
-    listar_mesclas as listar_mesclas_farol, aplicar_mesclas as aplicar_mesclas_farol,
-    chave_evento as chave_evento_farol,
-)
+from farol_mesclagem_operacional import chave_evento as chave_evento_farol
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
 # usado para formar as concentrações ou associar medições do Módulo 1).
@@ -288,60 +285,6 @@ def concentracoes_farol(df, raio_m, minimo):
     cdf.insert(0,"Concentração",ids)
     return cdf,df
 
-
-
-def aplicar_mesclagens_do_modulo_3(concentracoes, grupos):
-    """Reaproveita as mesclagens confirmadas no Farol sem alterar O.S. originais.
-
-    Converte o esquema de exibição do Módulo 7 para o do Módulo 3, executa a
-    mesma regra de identificação pelas O.S. e restaura as colunas do relatório.
-    """
-    if concentracoes.empty or grupos.empty or not fonte_supabase():
-        return concentracoes, grupos
-    mesclas = listar_mesclas_farol()
-    if not mesclas:
-        return concentracoes, grupos
-    compat = concentracoes.rename(columns={
-        "Concentração": "ID_CONCENTRACAO", "_grupo": "GRUPO",
-        "Latitude": "LATITUDE", "Longitude": "LONGITUDE",
-        "O.S.": "QTD_OS", "Matrículas": "QTD_MATRICULAS",
-        "Bairros": "BAIRROS",
-    })
-    compat, grupos_mesclados = aplicar_mesclas_farol(compat, grupos, mesclas)
-    if not any(str(g).startswith("MESCLA_") for g in compat["GRUPO"]):
-        return concentracoes, grupos
-    saida = []
-    por_grupo = {
-        grupo: dados for grupo, dados in grupos_mesclados.groupby("_grupo", sort=False)
-    }
-    for _, c in compat.iterrows():
-        dados = por_grupo.get(c["GRUPO"])
-        if dados is None or dados.empty:
-            continue
-        cidades = sorted(set(dados["_municipio"]) - {""})
-        bairros = sorted(set(dados["_bairro"]) - {""})
-        pares = sorted({
-            (str(r["_municipio"]), str(r["_bairro"]))
-            for _, r in dados.iterrows() if r["_municipio"] and r["_bairro"]
-        })
-        registro = {
-            "Concentração": str(c["ID_CONCENTRACAO"]),
-            "_grupo": c["GRUPO"],
-            "Latitude": float(c["LATITUDE"]),
-            "Longitude": float(c["LONGITUDE"]),
-            "O.S.": int(c["QTD_OS"]),
-            "Matrículas": int(c["QTD_MATRICULAS"]),
-            "Município": ", ".join(cidades),
-            "Bairros": ", ".join(bairros),
-            "_unidade": str(dados["_unidade"].iloc[0]),
-            "_pares_bairro": pares,
-        }
-        for campo in ("CHAVE_MESCLA", "AREA_MESCLADA", "EVENTO_MESCLA", "CODIGOS_ORIGEM"):
-            valor = c.get(campo)
-            if isinstance(valor, (str, dict, list)) and valor:
-                registro[campo] = valor
-        saida.append(registro)
-    return pd.DataFrame(saida), grupos_mesclados
 
 
 def relacionar(concs, os_cluster, pressao, raio, inicio, fim):
@@ -1330,23 +1273,6 @@ def adicionar_ativos_eventos_mapa(mapa, contexto, municipio=None, centros=None, 
             camada.add_to(mapa)
 
 
-def ri7_desenhar_area_mesclada(mapa, concentracao):
-    """Respeita a área real desenhada no Módulo 3, sem círculo hidráulico fictício."""
-    geometria = concentracao.get("AREA_MESCLADA")
-    if not isinstance(geometria, dict):
-        return False
-    folium.GeoJson(
-        geometria,
-        name="Área mesclada",
-        style_function=lambda _: {
-            "color": "#8b5cf6", "weight": 3,
-            "fillColor": "#a78bfa", "fillOpacity": 0.12,
-        },
-        tooltip=f"Concentração mesclada: {concentracao.get('Concentração', '')}",
-    ).add_to(mapa)
-    return True
-
-
 def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pontos_todos=None):
     """Panorama do Farol com TODAS as O.S. do período, alvos, ativos e aferições.
 
@@ -1390,9 +1316,8 @@ def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pon
     pontos_bp=adicionar_pontos_pressao(mapa,pressao)
     for _,c in (concs if concs is not None else pd.DataFrame()).iterrows():
         y,x=float(c["Latitude"]),float(c["Longitude"])
-        if not ri7_desenhar_area_mesclada(mapa, c):
-            folium.Circle([y,x],radius=raio_cluster,color="#8522a5",weight=3,
-                          fill=True,fill_color="#8522a5",fill_opacity=.05).add_to(mapa)
+        folium.Circle([y,x],radius=raio_cluster,color="#8522a5",weight=3,
+                      fill=True,fill_color="#8522a5",fill_opacity=.05).add_to(mapa)
         marcador_concentracao(c).add_to(mapa)
         posicoes.append([y,x])
     # Todas as medições válidas selecionadas entram no enquadramento, inclusive
@@ -1408,9 +1333,8 @@ def mapa_integrado_farol(concs, os_cluster, pressao, contexto, raio_cluster, pon
 def mapa_ficha_farol(c, grupo, pressao, contexto, raio_cluster):
     centro=[float(c["Latitude"]),float(c["Longitude"])]
     mapa=folium.Map(location=centro,zoom_start=15,tiles="OpenStreetMap",control_scale=True,zoom_control=False)
-    if not ri7_desenhar_area_mesclada(mapa, c):
-        folium.Circle(centro,radius=raio_cluster,color="#8522a5",weight=3,
-                      fill=True,fill_color="#8522a5",fill_opacity=.06).add_to(mapa)
+    folium.Circle(centro,radius=raio_cluster,color="#8522a5",weight=3,
+                  fill=True,fill_color="#8522a5",fill_opacity=.06).add_to(mapa)
     pontos_os=[]
     os_fg=folium.FeatureGroup(name="O.S. — Concentração",show=True)
     for _,p in grupo.iterrows():
@@ -1617,11 +1541,8 @@ def ficha_acompanhamento(c, grupo, contexto, incluir_movimentacoes=True):
                             key=normalizar)
         if not municipios:
             return None, [], None
-        chave_mescla = c.get("CHAVE_MESCLA")
-        chave = (
-            str(chave_mescla) if isinstance(chave_mescla, str) and chave_mescla
-            else chave_concentracao(municipios[0], float(c["Latitude"]),
-                                    float(c["Longitude"]), numeros)
+        chave = chave_concentracao(
+            municipios[0], float(c["Latitude"]), float(c["Longitude"]), numeros
         )
     except (KeyError, TypeError, ValueError, ImportError):
         return None, [], None
@@ -2592,6 +2513,30 @@ def ri7_rotular_status_os_grupo(grupo, indice):
     return grupo
 
 
+def ri7_resumo_eventos_relacionados(eventos):
+    """Descrição do serviço e código do ativo, sem exibir protocolo ou páginas extras.
+
+    O evento pode ter sido associado manualmente; nesses casos, o campo
+    Descrição do Serviço pode estar vazio, e Serviço é o fallback legítimo.
+    """
+    if not eventos:
+        return "Nenhum evento relacionado"
+    descricoes = []
+    for evento in eventos:
+        descricao = str(evento.get("Descrição do Serviço", "") or "").strip()
+        if not descricao or descricao.casefold() in {"nan", "none"}:
+            descricao = str(evento.get("Serviço", "") or "").strip()
+        ativo = str(evento.get("Código do Ativo", "") or "").strip()
+        if ativo.casefold() in {"nan", "none", "não informado", "nao informado"}:
+            ativo = ""
+        texto = " / ".join(v for v in (descricao, ativo) if v)
+        if texto and texto not in descricoes:
+            descricoes.append(texto)
+    if not descricoes:
+        return f"{len(eventos)} evento(s) sem descrição informada"
+    return f"{len(eventos)} — " + "; ".join(descricoes)
+
+
 def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculadas,
                             acompanhamento, contexto, pressao, inicio, fim,
                             raio_cluster, imagem_mapa=None):
@@ -2607,10 +2552,7 @@ def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculada
                    str(int(conc.get('Matrículas',0))),tamanho=18)
     ri7_retangulo(pdf, 631, 396, 186, 53, '#EAF3FD', '#CBDFF2')
     ri7_escrever(pdf, 'Eventos relacionados:', 640, 428, 9.2, RI7_AZUL,negrito=True)
-    nome_evento = 'Nenhum evento relacionado'
-    if eventos:
-        ativos = [str(e.get('Serviço','') or e.get('Protocolo','') or '') for e in eventos]
-        nome_evento = f'{len(eventos)} — ' + '; '.join(ativos)
+    nome_evento = ri7_resumo_eventos_relacionados(eventos)
     ri7_paragrafo(pdf, nome_evento, 640, 415, 166, tamanho=7.2,
                   entrelinha=9, max_linhas=2)
     ri7_tarja(pdf,'Ordens de Serviço vinculadas à concentração',357,356,460,30,tamanho=10.8)
@@ -2863,32 +2805,6 @@ def ri7_pagina_sanear_continuacao(pdf, restante, inicio, fim, municipio, num):
 
 
 
-def ri7_pagina_eventos_continuacao(pdf, conc, eventos, inicio, fim, pagina):
-    """Todos os detalhes operacionais dos eventos, sem truncar o registro-fonte."""
-    ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
-                  inicio,fim,ri7_descrever_unidade(pd.DataFrame([conc])),
-                  'Eventos relacionados')
-    ri7_tarja(pdf,f"{conc.get('Concentração','')} — Eventos relacionados "
-                  f"({pagina})",25,458,792,31,tamanho=12)
-    for k,evento in enumerate(eventos):
-        # Um bloco por evento com 90 pt de altura. Cinco blocos cabem na pagina.
-        topo = 441-k*75
-        ri7_retangulo(pdf,26,topo-70,790,68,'#F4F8FC','#BFD4EA',raio=5)
-        ri7_escrever(pdf,f"Evento {k+1+5*(pagina-1)} · "
-                         f"{evento.get('Protocolo','') or 'Protocolo não informado'}",
-                     37,topo-16,9.2,RI7_AZUL,negrito=True,largura=750)
-        servico=str(evento.get('Serviço','') or '')
-        ativo=str(evento.get('Código do Ativo','') or '')
-        ri7_escrever(pdf,f"Serviço: {servico}  |  Ativo: {ativo or 'Não informado'}",
-                     37,topo-32,8.4,largura=754)
-        ri7_escrever(pdf,f"Status: {evento.get('Status','')}  |  "
-                         f"Início: {evento.get('Início','')}  |  "
-                         f"Término: {evento.get('Término Real','') or 'Em andamento'}",
-                     37,topo-47,8.1,largura=754)
-        ri7_escrever(pdf,f"Áreas: {evento.get('Bairros coincidentes','') or 'Não informado'}",
-                     37,topo-61,8.1,largura=754)
-
-
 def ri7_pagina_descricao_continuacao(pdf, conc, linhas, inicio, fim, numero):
     ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
                   inicio,fim,ri7_descrever_unidade(pd.DataFrame([conc])),
@@ -2979,11 +2895,6 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
                 ri7_pagina_os_continuacao(pdf,conc,restantes[i:i+19],
                                          inicio,fim,i//19+1)
                 terminar_pagina()
-            # Os detalhes dos eventos nao cabem no card executivo. Preservar
-            # protocolo, ativo, servico, status, janela e bairros em paginas proprias.
-            for i in range(0,len(eventos),5):
-                ri7_pagina_eventos_continuacao(pdf,conc,eventos[i:i+5],inicio,fim,i//5+1)
-                terminar_pagina()
             if descricao_continua:
                 # O cartão usa a menor fonte permitida e sinaliza a continuação.
                 # A página seguinte contém a descrição INTEGRAL, preservando
@@ -3066,9 +2977,6 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
     # não pode apresentar dados anteriores às últimas edições do Farol/Pressões.
     ler_base.clear()
     carregar_contexto_farol.clear()
-    if fonte_supabase():
-        listar_mesclas_farol.clear()
-
     os_df = preparar_os(ler_base(ID_FAROL, "PONTOS"))
     contexto = carregar_contexto_farol()
     bp_todas = preparar_pressao(ler_base(ID_PRESSAO, "baixa_pressao"))
@@ -3093,9 +3001,6 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
     concs, grupos = concentracoes_farol(os_df, int(RAIO_CONCENTRACOES_M),
                                          int(MINIMO_OS_CONCENTRACAO))
     if not concs.empty:
-        # O Módulo 3 mantém suas mesclagens no Supabase; o Módulo 7 deve
-        # aplicá-las ANTES dos cruzamentos e da emissão de PDFs.
-        concs, grupos = aplicar_mesclagens_do_modulo_3(concs, grupos)
         resumo, associados, territoriais = relacionar(
             concs, grupos, bp, int(RAIO_MEDICOES_M), inicio, fim
         )
