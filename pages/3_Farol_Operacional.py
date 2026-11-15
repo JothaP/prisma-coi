@@ -59,7 +59,7 @@ from farol_acomp_supabase_backend import (
     sincronizar_ocorrencias_lote,
 )
 from farol_ocorrencias_persistentes import (
-    chaves_eventos_confirmados, resolver_ocorrencias,
+    chaves_eventos_confirmados, os_por_evento_confirmado, resolver_ocorrencias,
 )
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
@@ -5843,6 +5843,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     "latitude": float(c_atual["LATITUDE"]),
                     "longitude": float(c_atual["LONGITUDE"]),
                     "evento_chaves": (),
+                    "evento_os": {},
                 }
 
             chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
@@ -5858,12 +5859,14 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 )
                 dados_eventos_por_codigo[codigo_atual] = dados
                 os_evento, _, relacionados = dados
-                contextos_ativos_acomp[codigo_atual]["evento_chaves"] = (
-                    chaves_eventos_confirmados(
-                        os_evento, relacionados, chave_evento,
-                        interpretar_data_operacional, classificar_status_evento,
-                        agora_eventos,
-                    )
+                os_por_evento = os_por_evento_confirmado(
+                    os_evento, relacionados, chave_evento,
+                    interpretar_data_operacional, classificar_status_evento,
+                    agora_eventos,
+                )
+                contextos_ativos_acomp[codigo_atual]["evento_os"] = os_por_evento
+                contextos_ativos_acomp[codigo_atual]["evento_chaves"] = tuple(
+                    sorted(os_por_evento)
                 )
 
             # A ficha.id é permanente. Chaves por conjunto de O.S. são
