@@ -211,8 +211,10 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertIn("v_distancia>750", sql)
         self.assertIn("INSERT INTO public.prisma_auditoria", sql)
         self.assertIn("REVOKE ALL ON FUNCTION", sql)
-        self.assertIn("resolver_ocorrencias(", pag)
-        self.assertIn("sincronizar_ocorrencias_lote(", pag)
+        # RPC legada permanece para integridade histórica, mas não se usa
+        # automaticamente na visualização de concentrações individuais.
+        self.assertNotIn("resolver_ocorrencias(", pag)
+        self.assertNotIn("sincronizar_ocorrencias_lote(", pag)
         self.assertIn("PODE_EDITAR_FAROL", pag)
 
 
