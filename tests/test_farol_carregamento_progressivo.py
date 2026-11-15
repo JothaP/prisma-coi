@@ -128,7 +128,7 @@ class TesteCarregamentoProgressivo(unittest.TestCase):
         fonte=FONTE.read_text(encoding="utf-8")
         trecho=fonte.split(
             "# Um resumo compartilhado, por evento e município,",1
-        )[1].split("# Só as chaves exatas persistidas",1)[0]
+        )[1].split("for _, item_conc in concentracoes.iterrows():",1)[0]
         self.assertIn("resumir_eventos_concentracoes(",trecho)
         self.assertNotIn("dados_relatorio_concentracao(",trecho)
         inicio=fonte.index("for aba, abrangencia in ((aba_the")
