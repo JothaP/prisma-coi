@@ -74,8 +74,16 @@ BEGIN
         OR coalesce(t->>'ficha_id','')=''
         OR coalesce(t->>'municipio','')=''
         OR jsonb_typeof(t->'os')<>'array'
-        OR jsonb_array_length(t->'os')<2
-        OR jsonb_array_length(t->'os')>1000
+        OR (
+          CASE WHEN jsonb_typeof(t->'os')='array'
+          THEN jsonb_array_length(t->'os')
+          ELSE 0 END
+        ) < (CASE WHEN t->>'motivo'='evento' THEN 1 ELSE 2 END)
+        OR (
+          CASE WHEN jsonb_typeof(t->'os')='array'
+          THEN jsonb_array_length(t->'os')
+          ELSE 0 END
+        ) > 1000
         OR coalesce(t->>'motivo','') NOT IN ('evento','continuidade')
         OR (t->>'motivo'='evento' AND coalesce(t->>'evento_chave','') !~ '^[a-f0-9]{32}$')
         OR (t->>'motivo'='continuidade'
@@ -253,7 +261,8 @@ BEGIN
       END IF;
       SELECT array_agg(DISTINCT btrim(value)) INTO v_os
       FROM jsonb_array_elements_text(v_item->'os') AS value WHERE btrim(value)<>'';
-      IF coalesce(cardinality(v_os),0)<2
+      IF coalesce(cardinality(v_os),0) <
+         (CASE WHEN v_origem='evento' THEN 1 ELSE 2 END)
       THEN RAISE EXCEPTION 'OCORRENCIAS_OS_INSUFICIENTES'; END IF;
 
       INSERT INTO public.farol_acomp_vinculos
