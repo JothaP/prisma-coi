@@ -54,7 +54,13 @@ from farol_graficos_temporarios import (
     chave_logger, rotulo_logger, filtrar_loggers,
 )
 from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
-from farol_acomp_supabase_backend import fonte_supabase
+from farol_acomp_supabase_backend import (
+    fonte_supabase, listar_eventos_persistentes,
+    sincronizar_ocorrencias_lote,
+)
+from farol_ocorrencias_persistentes import (
+    chaves_eventos_confirmados, resolver_ocorrencias,
+)
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
     vincular_os_manual, desfazer_vinculo_os_manual,
@@ -5836,102 +5842,122 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     "multiplos_municipios": len(cidades_atuais) != 1,
                     "latitude": float(c_atual["LATITUDE"]),
                     "longitude": float(c_atual["LONGITUDE"]),
+                    "evento_chaves": (),
                 }
 
             chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
 
-            # Continuidade automática SOMENTE quando as O.S. anteriores
-            # permanecem integralmente na concentração, novas O.S. são
-            # acrescentadas e a correspondência é única e geograficamente segura.
-            # O mapeamento em memória permite CONSULTA imediata também ao
-            # operador; a gravação persistente só ocorre sob perfil com edição.
-            continuidades_automaticas = {}
-            continuidades_persistidas = set()
-            continuidades_pendentes = set()
-            if recuperar_supabase_ativo and not erro_acomp_visivel:
-                continuidades_automaticas = identificar_continuidades_automaticas(
-                    contextos_ativos_acomp, todos_vinculos_acomp,
-                    fichas_acomp_visiveis,
+            # Calcular eventos por concentração UMA vez. Reutilizado no cartão
+            # e ao abrir detalhes: nenhuma consulta ao Supabase por expander.
+            dados_eventos_por_codigo = {}
+            agora_eventos = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+            for _, item_conc in concentracoes.iterrows():
+                codigo_atual = str(item_conc["ID_CONCENTRACAO"])
+                dados = dados_relatorio_concentracao(
+                    item_conc, pontos_cluster, proximidades, df_eventos, bairros
                 )
-                tentativas_auto = st.session_state.setdefault(
-                    "farol_auto_vinculo_tentativas", {}
-                )
-                agora_tentativa = tempo_execucao.monotonic()
-                # Não repetir chamadas de gravação em reruns simultâneos após
-                # falhas temporárias, nem sobrecarregar o banco num único rerun.
-                gravacoes_nesta_interacao = 0
-                for codigo_auto, candidato_auto in continuidades_automaticas.items():
-                    ctx_auto = contextos_ativos_acomp[codigo_auto]
-                    chave_auto = ctx_auto["chave"]
-                    vinculo_virtual = {
-                        "chave": chave_auto,
-                        "evento_id": candidato_auto["evento_id"],
-                        "municipio": ctx_auto["municipio"],
-                        "bairros": ctx_auto["bairros"],
-                        "latitude": str(ctx_auto["latitude"]),
-                        "longitude": str(ctx_auto["longitude"]),
-                        "os_origem": ";".join(ctx_auto["os"]),
-                        "continuidade_automatica": True,
-                    }
-                    vinculos_acomp_visiveis[chave_auto] = vinculo_virtual
-                    if not PODE_EDITAR_FAROL:
-                        continuidades_pendentes.add(codigo_auto)
-                        continue
-                    ultima = tentativas_auto.get(chave_auto)
-                    if (ultima is not None and agora_tentativa - ultima < 600
-                            or gravacoes_nesta_interacao >= 12):
-                        continuidades_pendentes.add(codigo_auto)
-                        continue
-                    tentativas_auto[chave_auto] = agora_tentativa
-                    gravacoes_nesta_interacao += 1
-                    try:
-                        continuar_vinculo_automaticamente(
-                            ctx_auto, candidato_auto["chave_anterior"],
-                            candidato_auto["evento_id"],
-                        )
-                        continuidades_persistidas.add(codigo_auto)
-                        tentativas_auto.pop(chave_auto, None)
-                    except Exception:
-                        # Nunca inventar ficha nova nem perder a continuidade
-                        # reconhecida para consulta se o banco ficar indisponível.
-                        continuidades_pendentes.add(codigo_auto)
-                if continuidades_pendentes and PODE_EDITAR_FAROL:
-                    st.warning(
-                        "Algumas continuidades de acompanhamento foram reconhecidas, "
-                        "mas ainda não tiveram o novo vínculo gravado no Supabase. "
-                        "A associação pode ser consultada nesta sessão; "
-                        "a gravação será tentada novamente após alguns minutos."
+                dados_eventos_por_codigo[codigo_atual] = dados
+                os_evento, _, relacionados = dados
+                contextos_ativos_acomp[codigo_atual]["evento_chaves"] = (
+                    chaves_eventos_confirmados(
+                        os_evento, relacionados, chave_evento,
+                        interpretar_data_operacional, classificar_status_evento,
+                        agora_eventos,
                     )
+                )
 
-            ids_fichas_ativas = {
-                str(vinculos_acomp_visiveis[chave]["evento_id"])
-                for chave in chaves_ativas if chave in vinculos_acomp_visiveis
-            }
+            # A ficha.id é permanente. Chaves por conjunto de O.S. são
+            # instantâneos históricos; um evento confirmado pode agregar
+            # concentrações distantes na MESMA ficha, sem alterar o raio espacial.
+            resolvidos_persistentes = {}
             candidatos_acomp_por_codigo = {}
-            if recuperar_supabase_ativo and not erro_acomp_visivel:
-                for codigo_atual, ctx in contextos_ativos_acomp.items():
-                    if (ctx["chave"] in vinculos_acomp_visiveis
-                            or ctx["multiplos_municipios"]):
-                        continue
-                    opcoes = sugerir_recuperacoes(
-                        todos_vinculos_acomp, ctx["municipio"],
-                        ctx["latitude"], ctx["longitude"], ctx["os"],
-                        chaves_ativas=chaves_ativas,
-                    )
-                    opcoes = [
-                        op for op in opcoes
-                        if op["evento_id"] in fichas_acomp_visiveis
-                        and op["evento_id"] not in ids_fichas_ativas
-                    ]
-                    if opcoes:
-                        candidatos_acomp_por_codigo[codigo_atual] = opcoes
-            # Uma ficha que combina com duas concentrações atuais pode
-            # indicar divisão/fusão: bloquear a recuperação até revisão.
+            continuidades_automaticas = {}
             uso_candidato = {}
-            for opcoes in candidatos_acomp_por_codigo.values():
-                for opcao in opcoes:
-                    eid = opcao["evento_id"]
-                    uso_candidato[eid] = uso_candidato.get(eid, 0) + 1
+            try:
+                ancoras_evento = (
+                    listar_eventos_persistentes()
+                    if recuperar_supabase_ativo and not erro_acomp_visivel else []
+                )
+                resolvidos_persistentes, candidatos_acomp_por_codigo, lote_ocorrencias = (
+                    resolver_ocorrencias(
+                        contextos_ativos_acomp, todos_vinculos_acomp,
+                        fichas_acomp_visiveis, ancoras_evento,
+                    )
+                )
+                if recuperar_supabase_ativo and PODE_EDITAR_FAROL and lote_ocorrencias:
+                    # Apenas quando a composição muda na sessão. Sem cron,
+                    # gravações sequenciais ou consultas individuais por ficha.
+                    assinatura = hashlib.sha256(json.dumps(
+                        [(cod, ctx["chave"], ctx["evento_chaves"])
+                         for cod, ctx in sorted(contextos_ativos_acomp.items())],
+                        sort_keys=True, ensure_ascii=False, default=str,
+                    ).encode("utf-8")).hexdigest()
+                    tentativas = st.session_state.setdefault(
+                        "farol_ocorrencias_sincronizacao_tentativas", {}
+                    )
+                    if tentativas.get("assinatura") != assinatura:
+                        tentativas["assinatura"] = assinatura
+                        try:
+                            retorno_ocorrencias = sincronizar_ocorrencias_lote(
+                                lote_ocorrencias
+                            )
+                            # Dados canônicos do banco, após unificações e
+                            # inclusão de chaves. Preserva metadados e histórico.
+                            todos_vinculos_acomp = listar_vinculos()
+                            vinculos_acomp_visiveis = {
+                                v["chave"]: v for v in todos_vinculos_acomp
+                            }
+                            fichas_acomp_visiveis = dados_acompanhamento()
+                            ancoras_evento = listar_eventos_persistentes()
+                            (
+                                resolvidos_persistentes, candidatos_acomp_por_codigo, _
+                            ) = resolver_ocorrencias(
+                                contextos_ativos_acomp, todos_vinculos_acomp,
+                                fichas_acomp_visiveis, ancoras_evento,
+                            )
+                            if int(retorno_ocorrencias.get("incorporacoes", 0)):
+                                st.toast(
+                                    "Concentrações do mesmo evento reunidas em uma "
+                                    "ficha de acompanhamento. Históricos preservados."
+                                )
+                        except Exception as erro:
+                            st.warning(
+                                "A conciliação persistente não foi gravada. As "
+                                "fichas permanecem intactas; a análise atual "
+                                f"continuará em modo de consulta: {erro}"
+                            )
+
+                # Consultas podem mostrar imediatamente a ficha reconhecida,
+                # sem escrever no banco e sem esperar sincronizações por hora.
+                for codigo_atual, resolucao in resolvidos_persistentes.items():
+                    contexto_atual = contextos_ativos_acomp[codigo_atual]
+                    chave_atual = contexto_atual["chave"]
+                    if chave_atual not in vinculos_acomp_visiveis:
+                        vinculos_acomp_visiveis[chave_atual] = {
+                            "chave": chave_atual, "evento_id": resolucao["evento_id"],
+                            "municipio": contexto_atual["municipio"],
+                            "os_origem": ";".join(contexto_atual["os"]),
+                            "continuidade_automatica": True,
+                        }
+                    if resolucao.get("motivo") == "continuidade":
+                        continuidades_automaticas[codigo_atual] = resolucao
+
+                # Em caso de ambiguidade, conservar o formulário de recuperação
+                # explícita e bloquear utilização da mesma candidata em duas
+                # concentrações sem confirmação.
+                for opcoes in candidatos_acomp_por_codigo.values():
+                    for opcao in opcoes:
+                        fid = opcao["evento_id"]
+                        uso_candidato[fid] = uso_candidato.get(fid, 0) + 1
+            except Exception as erro:
+                st.warning(
+                    "Não foi possível avaliar a identidade persistente dos "
+                    f"acompanhamentos: {erro}"
+                )
+                candidatos_acomp_por_codigo = {}
+                continuidades_automaticas = {}
+
+            # Candidatas ambíguas ficam apenas para revisão humana.
             if st.session_state.get(CHAVE_MODO_MESCLAGEM):
                 # O painel de seleção trabalha com as concentrações ANTES
                 # das mesclagens; reconstruir também suas chaves originais.
@@ -6004,9 +6030,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                       if not proximidades.empty else 0)
                         # Calcular o vínculo de eventos uma única vez por concentração.
                         # A ficha detalhada reutiliza este resultado quando for aberta.
-                        os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
-                            concentracao, pontos_cluster, proximidades, df_eventos, bairros
-                        )
+                        os_eventos, ativos_eventos, eventos_do_grupo = dados_eventos_por_codigo[str(codigo)]
                         indicador_eventos = (
                             f"⚡ {len(eventos_do_grupo)} evento(s) relacionado(s)"
                             if not eventos_do_grupo.empty else "Sem evento relacionado"
@@ -6026,7 +6050,13 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                              or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
                             indicador_nota = "✅ Acompanhamento concluído"
                         elif vinculo_acomp and ficha_acomp:
-                            indicador_nota = "🔄 Acompanhamento em andamento"
+                            agrupadas = resolvidos_persistentes.get(str(codigo), {}).get("agrupados", 1)
+                            indicador_nota = (
+                                f"🔗 Ficha #{ficha_acomp['id']} compartilhada "
+                                f"por {agrupadas} concentrações"
+                                if agrupadas > 1 else
+                                f"🔄 Acompanhamento em andamento — Ficha #{ficha_acomp['id']}"
+                            )
                         elif vinculo_acomp:
                             indicador_nota = "Acompanhamento vinculado — ficha indisponível"
                         elif opcoes_recuperar:
@@ -6079,6 +6109,10 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                 "longitude": float(concentracao["LONGITUDE"]),
                                 "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
                                 "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
+                                "evento_chave": (
+                                    contexto_atual["evento_chaves"][0]
+                                    if len(contexto_atual["evento_chaves"]) == 1 else ""
+                                ),
                                 "origem": "producao",
                             }
                             if opcoes_recuperar and not vinculo_acomp:
