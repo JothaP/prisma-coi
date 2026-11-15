@@ -5,6 +5,7 @@ on:
     paths:
       - 'farol_mesclagem_teste.py'
       - 'pages/Ambiente_de_Teste.py'
+      - 'investigacao_areas_teste.py'
       - 'tests/test_farol_mesclagem_teste.py'
       - '.github/workflows/testar-farol-mesclagem-ambiente-teste.yml'
   workflow_dispatch:
@@ -27,5 +28,6 @@ jobs:
         run: |
           python -m py_compile farol_mesclagem_teste.py
           python -m py_compile pages/Ambiente_de_Teste.py
+          python -m py_compile investigacao_areas_teste.py
       - name: Testar elegibilidade, uniao, mapa e isolamento
         run: python -m unittest discover -s tests -p 'test_farol_mesclagem_teste.py' -v
