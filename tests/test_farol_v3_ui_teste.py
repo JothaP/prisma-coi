@@ -13,7 +13,7 @@ class TesteInterfaceFarolV3(unittest.TestCase):
         app.run()
         self.assertFalse(app.exception, str(app.exception))
         self.assertTrue(any(
-            "Farol Operacional V3" in str(x.message)
+            "Farol Operacional V3" in str(x.value)
             for x in app.subheader
         ))
         demo = next(b for b in app.button if "Carregar exemplo fictício" in b.label)
