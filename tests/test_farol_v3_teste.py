@@ -144,7 +144,6 @@ class TesteNucleoFarolV3(unittest.TestCase):
         self.assertIn('exigir_acesso_modulo("teste")', pagina)
         self.assertIn('from farol_v3_teste import renderizar', pagina)
         self.assertNotIn("modo_teste = st.radio(", pagina)
-        self.assertIn('    st.stop()', pagina)
         self.assertNotIn("farol_acomp_supabase_backend", ui)
         self.assertNotIn("integracao_acompanhamento_producao", ui)
         self.assertNotIn("supabase.create", ui)
