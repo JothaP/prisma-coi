@@ -21,7 +21,7 @@ def _javascript_pontestatus():
     if not trecho:
         raise AssertionError("Ponte do popup de status não encontrada")
     corpo = trecho.group(1).split("{% macro script(this, kwargs) %}", 1)[1]
-    return corpo.split("{% endmacro %}", 1)[0].replace("{{this._parent.get_name()}}", "mapa")
+    return corpo.split("{% endmacro %}", 1)[0].replace("{{this._parent.get_name()}}", "globalThis.mapa")
 
 
 JS_TESTE = r"""
@@ -68,7 +68,7 @@ assert.deepEqual(Object.keys(chamados[0]).sort(), [
 ]);
 assert.equal(chamados[0].last_object_clicked_count, 3);
 assert.match(chamados[0].last_object_clicked_tooltip,
-  /^PRISMA_STATUS=12345678-1234-1234-1234-123456789012\\|parado\\|[0-9]{10,16}_[a-z0-9]{4,12}$/);
+  /^PRISMA_STATUS=12345678-1234-1234-1234-123456789012\|parado\|[0-9]{10,16}_[a-z0-9]{4,12}$/);
 assert.equal(botao.disabled, true);
 assert.equal(fallback, 0);
 handleSubmit(evt);
