@@ -32,6 +32,15 @@ class TesteConcentracoesIndividuais(unittest.TestCase):
         )
         self.assertIn("recuperar_supabase_ativo = fonte_supabase()", codigo)
 
+    def test_aviso_acompanhamento_nao_exibe_objeto_streamlit(self):
+        fonte = FAROL.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "st.info(indicador_nota) if compartilhada_antiga else st.success(indicador_nota)",
+            fonte,
+        )
+        self.assertIn("if compartilhada_antiga:\n                                    st.info(indicador_nota)", fonte)
+        self.assertIn("else:\n                                    st.success(indicador_nota)", fonte)
+
     def test_painel_farol_sem_mesclagem_nem_desenho(self):
         codigo = FAROL.read_text(encoding="utf-8")
         for trecho in (

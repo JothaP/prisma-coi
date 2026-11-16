@@ -5874,7 +5874,10 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         mapa_ativo = codigo_texto == str(st.session_state.get("farol_v2_concentracao", ""))
                         with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
-                                st.info(indicador_nota) if compartilhada_antiga else st.success(indicador_nota)
+                                if compartilhada_antiga:
+                                    st.info(indicador_nota)
+                                else:
+                                    st.success(indicador_nota)
                             else:
                                 st.caption(
                                     "Esta concentração ainda não possui acompanhamento. "
