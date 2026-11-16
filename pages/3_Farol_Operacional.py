@@ -57,6 +57,7 @@ from integracao_acompanhamento_producao import (
     chave_concentracao, localizar_vinculo, listar_vinculos,
     dados_acompanhamento, historico_evento, texto_pdf,
 )
+from farol_acomp_supabase_backend import fonte_supabase
 from farol_ocorrencias_persistentes import resumir_eventos_concentracoes
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
