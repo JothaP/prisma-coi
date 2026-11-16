@@ -316,7 +316,9 @@ def _visao_investigacao(op):
                 st.caption("Nenhuma medição informada ou encontrada para o dia.")
     if st.button("Abrir acompanhamento desta concentração", key="farol_v3_teste_abrir_ficha"):
         st.session_state["farol_v3_teste_alvo"] = chave
-        st.session_state["farol_v3_teste_visao"] = "Acompanhamentos"
+        # A navegação é aplicada no próximo rerun: não editar chave do
+        # widget radio depois que ele já foi instanciado nesta execução.
+        st.session_state["farol_v3_teste_navegar"] = "Acompanhamentos"
         st.rerun()
 
 
@@ -585,8 +587,16 @@ def renderizar():
 
     op = st.session_state.get(CHAVE_OPERACAO)
     if not op:
-        st.info("Carregue uma exportação do dia para iniciar o Farol V3.")
-        _fichas_backup()
+        st.info(
+            "Não há reclamações do dia carregadas. Você ainda pode consultar "
+            "as fichas experimentais existentes nesta sessão, sem reprocessar O.S."
+        )
+        if st.session_state[CHAVE_FICHAS]:
+            _visao_acompanhamentos({
+                "concentracoes": pd.DataFrame(), "dia": dia.isoformat(),
+            })
+        else:
+            _fichas_backup()
         return
     if op["demonstracao"]:
         st.warning("DADOS FICTÍCIOS: os registros desta análise são apenas demonstrativos.")
@@ -594,6 +604,9 @@ def renderizar():
         f"Último processamento: {op['processado_em']}. "
         "A análise usa apenas a data corrente, não uma janela de oito dias."
     )
+    navegar = st.session_state.pop("farol_v3_teste_navegar", None)
+    if navegar in {"Panorama do dia", "Investigação", "Acompanhamentos"}:
+        st.session_state["farol_v3_teste_visao"] = navegar
     visao = st.radio(
         "Área do Farol V3",
         ["Panorama do dia", "Investigação", "Acompanhamentos"],
