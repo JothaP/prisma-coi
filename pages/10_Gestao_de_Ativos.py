@@ -152,6 +152,9 @@ def _campos_formulario(registro, prefixo, *, novo=False, coords=None, municipio_
 def _limpar_cache():
     _listar.clear()
     _municipios.clear()
+    # O st_folium preserva o mapa antigo entre reruns. Reconstrói os marcadores
+    # somente após uma gravação confirmada, para refletir status e cores novos.
+    st.session_state["ga_versao_mapa"] = st.session_state.get("ga_versao_mapa", 0) + 1
 
 
 def _auditar(acao, registro):
@@ -313,9 +316,9 @@ ESTILO_STATUS_NO_MAPA = """
 
 
 class PonteStatusFolium(MacroElement):
-    """O popup sinaliza uma escolha ao st_folium via evento de marcador.
+    """Entrega a seleção do popup ao componente Streamlit sem chamadas REST no navegador.
 
-    A operação real usa editar_ativo, que valida permissão e versão no servidor.
+    O servidor continua responsável por validar permissão, versão e gravação.
     """
     def __init__(self):
         super().__init__()
@@ -330,7 +333,7 @@ class PonteStatusFolium(MacroElement):
         if (!form || form.dataset.conectado === "1") return;
         form.dataset.conectado = "1";
         var marcador = e.popup._source;
-        if (!marcador || !marcador.getTooltip || !marcador.getTooltip()) return;
+        if (!marcador || !marcador.getLatLng) return;
         L.DomEvent.disableClickPropagation(el);
         L.DomEvent.disableScrollPropagation(el);
         form.addEventListener("submit", function(evento) {
@@ -343,18 +346,41 @@ class PonteStatusFolium(MacroElement):
                 msg.textContent = "O status selecionado já é o atual.";
                 return;
             }
-            if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) return;
-            // Capturado pelo last_object_clicked_tooltip do streamlit-folium.
-            // Sem chamada REST e sem segredos no navegador.
-            var tooltip = marcador.getTooltip().getContent();
+            if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) {
+                msg.textContent = "Status inválido.";
+                return;
+            }
+            if (form.dataset.enviando === "1") return;
             var token = String(Date.now())+"_"+Math.random().toString(36).slice(2,10);
-            marcador.setTooltipContent("PRISMA_STATUS="+form.dataset.ativo+
-                "|"+radio.value+"|"+token);
-            marcador.fire("click", {latlng:marcador.getLatLng(),sourceTarget:marcador});
-            marcador.setTooltipContent(tooltip);
+            var comando = "PRISMA_STATUS="+form.dataset.ativo+"|"+radio.value+"|"+token;
+            var dados = window.__GLOBAL_DATA__;
+            var ponte = window.Streamlit;
+            // A emissão direta evita a perda do comando quando o tooltip é
+            // restaurado ou o popup é fechado antes do evento ser serializado.
+            if (dados && ponte && typeof ponte.setComponentValue === "function") {
+                dados.last_object_clicked = marcador.getLatLng();
+                dados.last_object_clicked_count = (Number(dados.last_object_clicked_count) || 0) + 1;
+                dados.last_object_clicked_tooltip = comando;
+                var retorno = {
+                    last_clicked: dados.lat_lng_clicked || null,
+                    last_object_clicked_count: dados.last_object_clicked_count,
+                    last_object_clicked_tooltip: comando
+                };
+                dados.previous_data = retorno;
+                ponte.setComponentValue(retorno);
+            } else if (marcador.getTooltip && marcador.getTooltip()) {
+                // Compatibilidade: reutiliza o evento nativo, sem restaurar o
+                // tooltip antes da captura pela versão atual do componente.
+                marcador.setTooltipContent(comando);
+                marcador.fire("click", {latlng: marcador.getLatLng(), sourceTarget: marcador});
+            } else {
+                msg.textContent = "Não foi possível comunicar com o mapa. Reabra o marcador.";
+                return;
+            }
+            form.dataset.enviando = "1";
             var botao = form.querySelector(".ga-status-salvar");
             if (botao) botao.disabled = true;
-            msg.textContent = "Salvando no PRISMA...";
+            msg.textContent = "Enviando atualização ao PRISMA...";
         });
     });
 })();
@@ -604,7 +630,8 @@ if len(coordenadas) > 1:
     mapa.fit_bounds(coordenadas, padding=(30, 30), max_zoom=14)
 
 resultado = st_folium(
-    mapa, width="100%", height=600, key="ga_mapa_interativo",
+    mapa, width="100%", height=600,
+    key=f"ga_mapa_interativo_{st.session_state.get('ga_versao_mapa', 0)}",
     returned_objects=["last_clicked", "last_object_clicked_count",
                       "last_object_clicked_tooltip"],
 )
