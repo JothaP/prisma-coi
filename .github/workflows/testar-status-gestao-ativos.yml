@@ -1,0 +1,29 @@
+name: Validar status no mapa da Gestao de Ativos
+
+on:
+  push:
+    paths:
+      - 'pages/10_Gestao_de_Ativos.py'
+      - 'tests/test_gestao_ativos_status_mapa.py'
+      - '.github/workflows/testar-status-gestao-ativos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validar sintaxe
+        run: python -m py_compile pages/10_Gestao_de_Ativos.py
+      - name: Validar envio do status pelo popup
+        run: python -m unittest discover -s tests -p 'test_gestao_ativos_status_mapa.py' -v
