@@ -316,6 +316,7 @@ def _visao_investigacao(op):
                 st.caption("Nenhuma medição informada ou encontrada para o dia.")
     if st.button("Abrir acompanhamento desta concentração", key="farol_v3_teste_abrir_ficha"):
         st.session_state["farol_v3_teste_alvo"] = chave
+        st.session_state.pop("farol_v3_teste_ficha_selecionada", None)
         # A navegação é aplicada no próximo rerun: não editar chave do
         # widget radio depois que ele já foi instanciado nesta execução.
         st.session_state["farol_v3_teste_navegar"] = "Acompanhamentos"
