@@ -74,23 +74,33 @@ def _linhas_com_cabecalho(valores):
 
 def filtrar_registros_do_m3(valores, dia: date):
     """Recorta a data antes de criar DataFrame e devolve contagens verificáveis."""
-    cabecalho, linhas = _linhas_com_cabecalho(valores)
-    if not cabecalho:
+    if not valores:
         return pd.DataFrame(), {"lidos": 0, "do_dia": 0, "fora_do_dia": 0}
+    cabecalho = [str(c).strip() for c in valores[0]]
     coluna_data = coluna(
         pd.DataFrame(columns=cabecalho),
         ["Dt. Emissão", "Data Emissão", "Dt Emissao", "Data de Abertura", "Data"],
     )
     indice_data = cabecalho.index(coluna_data)
     somente_dia = []
-    for linha in linhas:
-        data_emissao = data_valida(linha[indice_data])
+    total_lidos = 0
+    # Percorre a resposta do Sheets sem montar uma segunda cópia completa
+    # dos oito dias. Só as linhas de hoje viram DataFrame/cache.
+    for linha in valores[1:]:
+        if not any(str(c).strip() for c in linha):
+            continue
+        total_lidos += 1
+        valor_data = linha[indice_data] if len(linha) > indice_data else ""
+        data_emissao = data_valida(valor_data)
         if pd.notna(data_emissao) and data_emissao.date() == dia:
-            somente_dia.append(linha)
+            somente_dia.append(
+                list(linha[:len(cabecalho)]) +
+                [""] * max(0, len(cabecalho)-len(linha))
+            )
     estatisticas = {
-        "lidos": len(linhas),
+        "lidos": total_lidos,
         "do_dia": len(somente_dia),
-        "fora_do_dia": len(linhas) - len(somente_dia),
+        "fora_do_dia": total_lidos - len(somente_dia),
     }
     return pd.DataFrame(somente_dia, columns=cabecalho), estatisticas
 
