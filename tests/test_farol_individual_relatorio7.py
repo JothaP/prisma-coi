@@ -24,6 +24,14 @@ def _resumo_eventos():
 
 
 class TesteConcentracoesIndividuais(unittest.TestCase):
+    def test_farol_importa_fonte_supabase(self):
+        codigo = FAROL.read_text(encoding="utf-8")
+        self.assertIn(
+            "from farol_acomp_supabase_backend import fonte_supabase",
+            codigo,
+        )
+        self.assertIn("recuperar_supabase_ativo = fonte_supabase()", codigo)
+
     def test_painel_farol_sem_mesclagem_nem_desenho(self):
         codigo = FAROL.read_text(encoding="utf-8")
         for trecho in (
