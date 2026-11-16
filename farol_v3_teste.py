@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from io import BytesIO
+from html import escape as escape_html
 import json
+import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -91,13 +93,18 @@ def exemplo_do_dia(dia):
 
 
 def processar(base: pd.DataFrame, dia, demonstracao=False):
+    inicio_filtro = time.perf_counter()
     os_dia, estat = preparar_os_do_dia(base, dia)
+    duracao_filtro = time.perf_counter() - inicio_filtro
     if os_dia.empty:
         raise ValueError(
             f"Nenhuma O.S. da data {dia:%d/%m/%Y} foi encontrada no arquivo. "
             "O V3 não aceita dados de outros dias."
         )
+    inicio_agrupamento = time.perf_counter()
     concentracoes, pontos = concentracoes_do_dia(os_dia, dia, RAIO_PADRAO, MINIMO_OS)
+    estat["tempo_filtro_s"] = round(duracao_filtro, 3)
+    estat["tempo_agrupamento_s"] = round(time.perf_counter() - inicio_agrupamento, 3)
     return {
         "dia": dia.isoformat(), "demonstracao": demonstracao,
         "concentracoes": concentracoes, "pontos": pontos, "estatisticas": estat,
@@ -119,7 +126,7 @@ def _mapa(concentracoes, pontos):
         folium.CircleMarker(
             [float(reg.lat), float(reg.lon)], radius=4,
             color="#2563eb", weight=1, fill=True, fill_opacity=.75,
-            tooltip=f"O.S. {reg.os} · {reg.bairro} · {reg.status or 'Sem status'}",
+            tooltip=escape_html(f"O.S. {reg.os} · {reg.bairro} · {reg.status or 'Sem status'}"),
         ).add_to(fg_os)
     fg_os.add_to(mapa)
     fg_conc = folium.FeatureGroup(name="Concentrações", show=True)
@@ -131,9 +138,10 @@ def _mapa(concentracoes, pontos):
         ).add_to(fg_conc)
         folium.Marker(
             [lat, lon],
-            tooltip=f"{item['codigo']} — {item['qtd_os']} O.S.",
+            tooltip=escape_html(f"{item['codigo']} — {item['qtd_os']} O.S."),
             popup=folium.Popup(
-                f"<b>{item['codigo']}</b><p>{item['municipio']} — "
+                f"<b>{escape_html(item['codigo'])}</b>"
+                f"<p>{escape_html(item['municipio'])} — "
                 f"{item['qtd_os']} O.S.</p>",
                 max_width=240,
             ),
@@ -168,6 +176,10 @@ def _visao_panorama(op):
         )
     if estat["duplicados"]:
         st.caption(f"{estat['duplicados']} O.S. duplicada(s) desconsiderada(s).")
+    st.caption(
+        f"Tempo medido: filtro de data e validação {estat.get('tempo_filtro_s', 0):.3f} s; "
+        f"agrupamento espacial {estat.get('tempo_agrupamento_s', 0):.3f} s."
+    )
     st.markdown("#### Panorama operacional")
     if len(pontos) > 3500:
         st.warning(
