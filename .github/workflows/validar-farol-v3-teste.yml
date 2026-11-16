@@ -6,6 +6,7 @@ on:
       - 'farol_v3_teste.py'
       - 'pages/Ambiente_de_Teste.py'
       - 'tests/test_farol_v3_teste.py'
+      - 'tests/test_farol_v3_ui_teste.py'
       - '.github/workflows/validar-farol-v3-teste.yml'
   workflow_dispatch:
 permissions:
@@ -19,9 +20,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Instalar pandas para os testes de regras operacionais
-        run: python -m pip install 'pandas>=2.2,<3'
+      - name: Instalar dependências mínimas de processamento e interface
+        run: python -m pip install 'pandas>=2.2,<3' 'streamlit==1.66.1' 'streamlit-folium==0.27.4' 'folium'
       - name: Validar sintaxe dos arquivos (sem iniciar Streamlit)
         run: python -m py_compile farol_v3_nucleo_teste.py farol_v3_teste.py pages/Ambiente_de_Teste.py
       - name: Validar recorte de um dia, agrupamentos e isolamento de fichas
         run: python -m unittest discover -s tests -p 'test_farol_v3_teste.py' -v
+      - name: Testar interface Streamlit com dados fictícios
+        run: python -m unittest discover -s tests -p 'test_farol_v3_ui_teste.py' -v
