@@ -141,8 +141,9 @@ class TesteNucleoFarolV3(unittest.TestCase):
     def test_ambiente_de_teste_isolado_do_modulo_3(self):
         pagina = (ROOT / "pages" / "Ambiente_de_Teste.py").read_text("utf-8")
         ui = (ROOT / "farol_v3_teste.py").read_text("utf-8")
-        self.assertIn('if modo_teste == "Farol Operacional V3 — Diário":', pagina)
+        self.assertIn('exigir_acesso_modulo("teste")', pagina)
         self.assertIn('from farol_v3_teste import renderizar', pagina)
+        self.assertNotIn("modo_teste = st.radio(", pagina)
         self.assertIn('    st.stop()', pagina)
         self.assertNotIn("farol_acomp_supabase_backend", ui)
         self.assertNotIn("integracao_acompanhamento_producao", ui)
