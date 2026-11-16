@@ -102,17 +102,13 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         registro = dict(self.mais_cedo, latitude="")
         self.assertEqual(self.opcoes(vinculos=[registro]), [])
 
-    def test_recuperacao_ambigua_ainda_exige_confirmacao(self):
+    def test_interface_deixa_de_reutilizar_ficha_de_outra_concentracao(self):
         pagina = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
-        self.assertIn("Confirmar recuperação do vínculo", pagina)
-        self.assertIn("if recuperar:", pagina)
-        self.assertIn("if not confirmado:", pagina)
-        self.assertIn("recuperar_vinculo_confirmado(", pagina)
-        self.assertIn("possível divisão/fusão", pagina)
-        # No fluxo novo, a correspondência em memória usa índice invertido
-        # e somente a ambiguidades são enviadas para confirmação humana.
-        self.assertIn("resolver_ocorrencias(", pagina)
-        self.assertIn("uso_candidato.get(", pagina)
+        self.assertNotIn("Confirmar recuperação do vínculo", pagina)
+        self.assertNotIn("recuperar_vinculo_confirmado(", pagina)
+        self.assertNotIn("resolver_ocorrencias(", pagina)
+        self.assertIn("📋 Copiar dados de outra concentração", pagina)
+        # A rotina legada permanece no banco para não perder referências históricas.
         backend = (RAIZ / "farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
         self.assertIn("/rest/v1/rpc/farol_acomp_recuperar_vinculo_tx", backend)
 
@@ -211,8 +207,10 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertIn("v_distancia>750", sql)
         self.assertIn("INSERT INTO public.prisma_auditoria", sql)
         self.assertIn("REVOKE ALL ON FUNCTION", sql)
-        self.assertIn("resolver_ocorrencias(", pag)
-        self.assertIn("sincronizar_ocorrencias_lote(", pag)
+        # RPC legada permanece para integridade histórica, mas não se usa
+        # automaticamente na visualização de concentrações individuais.
+        self.assertNotIn("resolver_ocorrencias(", pag)
+        self.assertNotIn("sincronizar_ocorrencias_lote(", pag)
         self.assertIn("PODE_EDITAR_FAROL", pag)
 
 

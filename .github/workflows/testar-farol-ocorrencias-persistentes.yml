@@ -6,6 +6,8 @@ on:
       - 'farol_acomp_supabase_backend.py'
       - 'acompanhamento_operacional_farol.py'
       - 'pages/3_Farol_Operacional.py'
+      - 'pages/7_Relatorios_Integrados.py'
+      - 'tests/test_farol_individual_relatorio7.py'
       - 'sql/farol_ocorrencias_persistentes.sql'
       - 'tests/test_farol_ocorrencias_persistentes.py'
       - 'tests/test_farol_carregamento_progressivo.py'
@@ -25,8 +27,10 @@ jobs:
       - name: Instalar dependencias do teste
         run: python -m pip install 'pandas>=2.2,<3'
       - name: Validar sintaxe dos modulos
-        run: python -m py_compile pages/3_Farol_Operacional.py farol_ocorrencias_persistentes.py farol_acomp_supabase_backend.py acompanhamento_operacional_farol.py
+        run: python -m py_compile pages/3_Farol_Operacional.py pages/7_Relatorios_Integrados.py farol_ocorrencias_persistentes.py farol_acomp_supabase_backend.py acompanhamento_operacional_farol.py
       - name: Testar persistencia e aglutinacao por evento
         run: python -m unittest discover -s tests -p 'test_farol_ocorrencias_persistentes.py' -v
       - name: Comparar resumo rápido com a análise territorial completa
         run: python -m unittest discover -s tests -p 'test_farol_carregamento_progressivo.py' -v
+      - name: Validar concentrações individuais e relatório integrado
+        run: python -m unittest discover -s tests -p 'test_farol_individual_relatorio7.py' -v

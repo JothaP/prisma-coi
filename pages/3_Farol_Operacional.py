@@ -53,15 +53,11 @@ from farol_graficos_temporarios import (
     data_hoje as dia_graficos, indice_do_dia, salvar_grafico, excluir_grafico,
     chave_logger, rotulo_logger, filtrar_loggers,
 )
-from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
-from farol_acomp_supabase_backend import (
-    fonte_supabase, listar_eventos_persistentes,
-    sincronizar_ocorrencias_lote,
+from integracao_acompanhamento_producao import (
+    chave_concentracao, localizar_vinculo, listar_vinculos,
+    dados_acompanhamento, historico_evento, texto_pdf,
 )
-from farol_ocorrencias_persistentes import (
-    resumir_eventos_concentracoes, resolver_ocorrencias,
-    preparar_lote_persistencia,
-)
+from farol_ocorrencias_persistentes import resumir_eventos_concentracoes
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
     vincular_os_manual, desfazer_vinculo_os_manual,
@@ -73,19 +69,6 @@ from farol_regionais_api import (
     mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
 )
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
-from farol_mesclagem_operacional import (
-    CHAVE_MODO as CHAVE_MODO_MESCLAGEM,
-    CHAVE_POLIGONO as CHAVE_POLIGONO_MESCLAGEM,
-    listar_mesclas as listar_mesclas_farol,
-    aplicar_mesclas as aplicar_mesclas_farol,
-    desenhar_areas_mescladas,
-    adicionar_desenho_mapa,
-    extrair_desenho_folium,
-    renderizar_painel_mescla,
-    renderizar_painel_desfazer_mesclas,
-)
-
-
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
@@ -2455,7 +2438,6 @@ def criar_mapa_panorama_v2(concentracoes, raio_m=RAIO_CONCENTRACAO_PADRAO, bairr
                       control_scale=True, tiles="OpenStreetMap", prefer_canvas=True)
     adicionar_limites_bairros(mapa, bairros or [])
     adicionar_camada_eventos(mapa, eventos_mapeados or [])
-    desenhar_areas_mescladas(mapa, concentracoes)
     limites = []
 
     # O.S. independentes: nunca dependem de pontos_cluster, que contém apenas
@@ -2504,10 +2486,9 @@ def criar_mapa_panorama_v2(concentracoes, raio_m=RAIO_CONCENTRACAO_PADRAO, bairr
         resumo = (f"<b>{codigo}</b><br>{bairros_txt}<br>"
                   f"{int(c['QTD_OS'])} O.S. · {int(c['QTD_MATRICULAS'])} matrículas<br>"
                   "<small>Clique no ponto central para abrir a análise detalhada.</small>")
-        if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
-            folium.Circle([lat, lon], radius=float(raio_m), color="#7c3aed",
-                          weight=2, fill=True, fill_opacity=.07,
-                          interactive=False).add_to(mapa)
+        folium.Circle([lat, lon], radius=float(raio_m), color="#7c3aed",
+                      weight=2, fill=True, fill_opacity=.07,
+                      interactive=False).add_to(mapa)
         folium.Marker([lat, lon], icon=icone_alvo_concentracao_panorama(),
                       popup=folium.Popup(resumo, max_width=320),
                       tooltip=f"{codigo} — Abrir concentração").add_to(mapa)
@@ -2529,7 +2510,6 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
         adicionar_limites_bairros(mapa, bairros)
 
     adicionar_camada_eventos(mapa, eventos_mapeados or [])
-    desenhar_areas_mescladas(mapa, concentracoes)
 
     fg_os = folium.FeatureGroup(name="O.S.", show=True)
     if not df_pontos.empty:
@@ -2670,12 +2650,11 @@ def criar_mapa(bairros, df_pontos, df_pocos, df_loggers, concentracoes, proximid
             "</div>"
         )
         popup_concentracao = folium.Popup(conteudo_popup, max_width=370)
-        if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
-            folium.Circle(
-                [lat, lon], radius=(raio_circulo if raio_circulo is not None else RAIO_CONCENTRACAO_PADRAO),
-                color="purple", fill=True, fill_opacity=0.08,
-                popup=popup_concentracao,
-            ).add_to(fg_conc)
+        folium.Circle(
+            [lat, lon], radius=(raio_circulo if raio_circulo is not None else RAIO_CONCENTRACAO_PADRAO),
+            color="purple", fill=True, fill_opacity=0.08,
+            popup=popup_concentracao,
+        ).add_to(fg_conc)
         # Ponto central discreto e clicável; sem código, contagens ou texto sobre o mapa.
         folium.Marker(
             [lat, lon], icon=icone_bandeira_concentracao(),
@@ -4543,7 +4522,6 @@ def mapa_relatorio_concentracoes(concentracoes, pontos_cluster, concentracao=Non
                       control_scale=True, zoom_control=False)
     selecionadas = (concentracoes if concentracao is None else
                     concentracoes[concentracoes["ID_CONCENTRACAO"] == concentracao["ID_CONCENTRACAO"]])
-    desenhar_areas_mescladas(mapa, selecionadas)
     coordenadas = []
     # No panorama, a camada de O.S. será desenhada uma única vez, incluindo
     # registros dentro e fora das concentrações.
@@ -4564,9 +4542,8 @@ def mapa_relatorio_concentracoes(concentracoes, pontos_cluster, concentracao=Non
         lat, lon = float(c["LATITUDE"]), float(c["LONGITUDE"])
         raio = RAIO_CONCENTRACAO_PADRAO
         if not panoramico:
-            if not (isinstance(c.get("CHAVE_MESCLA"), str) and c.get("CHAVE_MESCLA")):
-                folium.Circle([lat, lon], radius=raio, color="#8522A5", weight=2.5,
-                              fill=True, fill_color="#8522A5", fill_opacity=.09).add_to(mapa)
+            folium.Circle([lat, lon], radius=raio, color="#8522A5", weight=2.5,
+                          fill=True, fill_color="#8522A5", fill_opacity=.09).add_to(mapa)
             folium.Marker([lat, lon], icon=icone_alvo_concentracao_panorama()).add_to(mapa)
         coordenadas.append((lat, lon))
         if "_grupo" not in pontos_cluster.columns:
@@ -5314,19 +5291,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
     st.caption("Eventos: vermelho = em andamento · amarelo = programado · verde = finalizado · cinza = outro status. "
                "As áreas destacadas representam os bairros inteiros dos arquivos geográficos, inclusive quando o evento informa impacto parcial.")
 
-    # A reversão não depende da data consultada nem da existência de O.S.
-    # no recorte: as mesclagens são persistentes e compartilhadas no Supabase.
-    try:
-        mesclas_ativas_farol = listar_mesclas_farol() if fonte_supabase() else []
-        erro_mesclagem_farol = None
-    except Exception as erro:
-        mesclas_ativas_farol = []
-        erro_mesclagem_farol = str(erro)
-    if erro_mesclagem_farol:
-        st.warning("Não foi possível carregar as mesclagens: " + erro_mesclagem_farol)
-    elif mesclas_ativas_farol:
-        renderizar_painel_desfazer_mesclas(mesclas_ativas_farol, PODE_EDITAR_FAROL)
-
     if df_pontos.empty:
         st.warning("A aba PONTOS ainda não possui dados.")
         ativos_pocos = ativos_pocos_cidade
@@ -5370,16 +5334,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
             raio_m=raio_concentracao,
             minimo_os=int(minimo_os),
         )
-        # Mesclagens são aplicadas apenas à apresentação e à análise atuais:
-        # a base de PONTOS do Field/BI e a regra original dos 750 m não mudam.
-        concentracoes_originais = concentracoes.copy()
-        pontos_cluster_originais = pontos_cluster.copy()
-        try:
-            concentracoes, pontos_cluster = aplicar_mesclas_farol(
-                concentracoes, pontos_cluster, mesclas_ativas_farol
-            )
-        except Exception as erro:
-            erro_mesclagem_farol = str(erro)
         proximidades = pontos_proximos_concentracoes(
             concentracoes,
             df_pocos,
@@ -5620,71 +5574,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             + ", ".join(vizinhas)
                             + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
             else:
-                # O desenho é iniciado no próprio panorama, sem exigir que o
-                # analista desça até a lista de concentrações.
-                col_desenho, col_instrucao = st.columns([1, 3], vertical_alignment="center")
-                with col_desenho:
-                    if st.button(
-                        "✏️ Desenhar polígono" if not st.session_state.get(CHAVE_MODO_MESCLAGEM)
-                        else "✖ Encerrar desenho",
-                        key="farol_mescla_atalho_mapa",
-                        disabled=not PODE_EDITAR_FAROL,
-                        use_container_width=True,
-                    ):
-                        ativar_desenho = not bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                        st.session_state[CHAVE_MODO_MESCLAGEM] = ativar_desenho
-                        if not ativar_desenho:
-                            st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                        st.session_state["farol_v2_panorama_versao"] = (
-                            st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                        )
-                        st.rerun()
-                with col_instrucao:
-                    st.caption(
-                        "Desenhe a área das O.S. no mapa e confirme a união na seção "
-                        "**Análise das concentrações**. Somente concentrações do mesmo evento "
-                        "podem formar um único acompanhamento."
-                    )
+                # Panorama de consulta: nenhuma ferramenta de desenho ou união.
                 mapa = criar_mapa_panorama_v2(
                     concentracoes, raio_m=raio_concentracao,
                     bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
                     pontos_os=analise,
                 )
-                mesclagem_desenhando = bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                if mesclagem_desenhando:
-                    adicionar_desenho_mapa(
-                        mapa, st.session_state.get(CHAVE_POLIGONO_MESCLAGEM)
-                    )
                 estado_mapa = st_folium(
                     mapa, width=None, height=650,
-                    returned_objects=(
-                        ["last_active_drawing", "last_object_clicked", "last_object_clicked_tooltip"]
-                        if mesclagem_desenhando
-                        else ["last_object_clicked", "last_object_clicked_tooltip"]
-                    ),
-                    key=(f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}"
-                         f"_{int(mesclagem_desenhando)}_"
-                         f"{hashlib.md5(json.dumps(st.session_state.get(CHAVE_POLIGONO_MESCLAGEM), sort_keys=True).encode()).hexdigest()[:8]}"),
+                    returned_objects=["last_object_clicked", "last_object_clicked_tooltip"],
+                    key=f"farol_v2_mapa_panorama_{st.session_state.get('farol_v2_panorama_versao', 0)}",
                 )
-                if mesclagem_desenhando and estado_mapa:
-                    desenho = estado_mapa.get("last_active_drawing")
-                    if desenho:
-                        try:
-                            geometria_nova = extrair_desenho_folium(desenho)
-                            if geometria_nova != st.session_state.get(CHAVE_POLIGONO_MESCLAGEM):
-                                st.session_state[CHAVE_POLIGONO_MESCLAGEM] = geometria_nova
-                                st.rerun()
-                        except ValueError as erro_desenho:
-                            st.warning(f"Polígono não aceito: {erro_desenho}")
-                if mesclagem_desenhando:
-                    st.caption(
-                        "Ferramenta Mesclar: clique no ícone de polígono à esquerda do mapa, "
-                        "desenhe a área que engloba as O.S. do evento e, abaixo, confirme "
-                        "quais concentrações pertencem à mesma ocorrência."
-                    )
                 clique = (estado_mapa or {}).get("last_object_clicked")
                 tooltip_clique = str((estado_mapa or {}).get("last_object_clicked_tooltip") or "")
-                if isinstance(clique, dict) and not mesclagem_desenhando:
+                if isinstance(clique, dict):
                     lat_clique = parse_float(clique.get("lat"))
                     lon_clique = parse_float(clique.get("lng"))
                     melhor_concentracao, menor_centro = "", float("inf")
@@ -5769,32 +5672,11 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         else:
             st.markdown("### 📋 Análise das Concentrações")
             st.caption("Expanda uma concentração e clique em **Carregar detalhes** para consultar O.S., equipamentos, eventos e PDFs. Apenas a ficha escolhida é processada.")
-            if erro_mesclagem_farol:
-                st.warning("As mesclagens compartilhadas estão temporariamente indisponíveis: "
-                           + erro_mesclagem_farol)
-            if st.button(
-                "🔗 Mesclar concentrações" if not st.session_state.get(CHAVE_MODO_MESCLAGEM)
-                else "✖ Encerrar mesclagem",
-                key="farol_abrir_mesclagem", disabled=not PODE_EDITAR_FAROL,
-            ):
-                ativar = not bool(st.session_state.get(CHAVE_MODO_MESCLAGEM))
-                st.session_state[CHAVE_MODO_MESCLAGEM] = ativar
-                st.session_state["farol_v2_concentracao"] = ""
-                st.session_state["farol_v2_detalhe_aberto"] = ""
-                st.session_state.pop("farol_v2_os_raio_aberto", None)
-                st.session_state["farol_v2_panorama_versao"] = (
-                    st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                )
-                if not ativar:
-                    st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                st.rerun()
-            if st.session_state.get(CHAVE_MODO_MESCLAGEM):
-                if st.button("Limpar polígono", key="farol_mescla_limpar_poligono"):
-                    st.session_state.pop(CHAVE_POLIGONO_MESCLAGEM, None)
-                    st.session_state["farol_v2_panorama_versao"] = (
-                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
-                    )
-                    st.rerun()
+            st.caption(
+                "Cada concentração mantém seu próprio acompanhamento. "
+                "Use o botão de copiar dados para aproveitar informações de outra ficha, "
+                "sem compartilhar status nem histórico."
+            )
             observacoes_df = carregar_observacoes_concentracoes()
             resumo_pdf = concentracoes.copy()
             grupos_os = {chave: quadro for chave, quadro in pontos_cluster.groupby("_grupo", sort=False)} if not pontos_cluster.empty else {}
@@ -5804,22 +5686,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 todos_vinculos_acomp = listar_vinculos()
                 vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
-                # Índice único para sugerir cópias do mesmo bairro sem
-                # fazer varredura completa de fichas em cada concentração.
                 total_vinculos_por_ficha = {}
-                indice_fontes_por_bairro = {}
                 for vinculo in todos_vinculos_acomp:
                     ficha_id = str(vinculo.get("evento_id", ""))
                     total_vinculos_por_ficha[ficha_id] = (
                         total_vinculos_por_ficha.get(ficha_id, 0) + 1
                     )
-                    municipio_fonte = normalizar_municipio(vinculo.get("municipio", ""))
-                    for nome_bairro in re.split(r"[,;/]", str(vinculo.get("bairros") or "")):
-                        bairro_fonte = normalizar_texto(nome_bairro)
-                        if bairro_fonte and municipio_fonte:
-                            indice_fontes_por_bairro.setdefault(
-                                (municipio_fonte, bairro_fonte), set()
-                            ).add(ficha_id)
                 recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
@@ -5827,7 +5699,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
                 total_vinculos_por_ficha = {}
-                indice_fontes_por_bairro = {}
                 recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
@@ -5845,13 +5716,9 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 numeros_atuais = [
                     str(x).strip() for x in os_atuais.get("Nº da O.S", []) if str(x).strip()
                 ]
-                chave_mescla = c_atual.get("CHAVE_MESCLA")
-                chave_atual = (
-                    str(chave_mescla) if isinstance(chave_mescla, str) and chave_mescla
-                    else chave_concentracao(
-                        cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
-                        numeros_atuais,
-                    )
+                chave_atual = chave_concentracao(
+                    cidade_atual, c_atual["LATITUDE"], c_atual["LONGITUDE"],
+                    numeros_atuais,
                 )
                 contextos_ativos_acomp[str(c_atual["ID_CONCENTRACAO"])] = {
                     "chave": chave_atual,
@@ -5893,115 +5760,27 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     sorted(os_por_evento)
                 )
 
-            # A ficha.id é permanente. Chaves por conjunto de O.S. são
-            # instantâneos históricos; um evento confirmado pode agregar
-            # concentrações distantes na MESMA ficha, sem alterar o raio espacial.
-            resolvidos_persistentes = {}
-            candidatos_acomp_por_codigo = {}
-            continuidades_automaticas = {}
-            uso_candidato = {}
-            lote_ocorrencias_pendentes = []
-            try:
-                ancoras_evento = (
-                    listar_eventos_persistentes()
-                    if recuperar_supabase_ativo and not erro_acomp_visivel else []
-                )
-                resolvidos_persistentes, candidatos_acomp_por_codigo, lote_ocorrencias = (
-                    resolver_ocorrencias(
-                        contextos_ativos_acomp, todos_vinculos_acomp,
-                        fichas_acomp_visiveis, ancoras_evento,
-                        associacao_automatica=False,
-                    )
-                )
-                # Uma concentração pode ter apenas uma O.S. efetivamente
-                # associada a um evento. Uma falha de formato não deve impedir
-                # outros eventos independentes de persistir; nunca processar
-                # parcialmente um mesmo evento.
-                lote_ocorrencias_pendentes, rejeitadas_acomp = (
-                    preparar_lote_persistencia(lote_ocorrencias)
-                )
-                if rejeitadas_acomp:
-                    total_rejeitado = sum(rejeitadas_acomp.values())
-                    motivos_rejeitados = ", ".join(
-                        f"{motivo}: {qtd}"
-                        for motivo, qtd in sorted(rejeitadas_acomp.items())
-                    )
-                    st.warning(
-                        f"{total_rejeitado} vínculo(s) não foram incluídos na "
-                        "sincronização por inconsistência de dados "
-                        f"({motivos_rejeitados}). "
-                        "Esses acompanhamentos continuam disponíveis para "
-                        "revisão; os demais vínculos válidos serão gravados em lote."
-                    )
+            # Só as chaves exatas persistidas vinculam concentração e ficha.
+            # O usuário escolhe o que copiar, sem sincronização/união implícita.
+            # Opções de cópia são identificadas por concentrações ativas, não
+            # por coincidência de bairro/evento. Seleção e cópia sempre manuais.
+            fontes_copia_ativas = []
+            for codigo_origem, contexto_origem in contextos_ativos_acomp.items():
+                vinculo_origem = vinculos_acomp_visiveis.get(contexto_origem["chave"])
+                if not vinculo_origem:
+                    continue
+                id_origem = str(vinculo_origem.get("evento_id", ""))
+                ficha_origem = fichas_acomp_visiveis.get(id_origem)
+                if not ficha_origem:
+                    continue
+                fontes_copia_ativas.append({
+                    "id": id_origem,
+                    "codigo": codigo_origem,
+                    "titulo": str(ficha_origem.get("titulo", "") or ""),
+                    "municipio": contexto_origem.get("municipio", ""),
+                    "bairros": contexto_origem.get("bairros", ""),
+                })
 
-                # Consultas podem mostrar imediatamente a ficha reconhecida,
-                # sem escrever no banco e sem esperar sincronizações por hora.
-                for codigo_atual, resolucao in resolvidos_persistentes.items():
-                    contexto_atual = contextos_ativos_acomp[codigo_atual]
-                    chave_atual = contexto_atual["chave"]
-                    if chave_atual not in vinculos_acomp_visiveis:
-                        vinculos_acomp_visiveis[chave_atual] = {
-                            "chave": chave_atual, "evento_id": resolucao["evento_id"],
-                            "municipio": contexto_atual["municipio"],
-                            "os_origem": ";".join(contexto_atual["os"]),
-                            "continuidade_automatica": True,
-                        }
-                    if resolucao.get("motivo") == "continuidade":
-                        continuidades_automaticas[codigo_atual] = resolucao
-
-                # Em caso de ambiguidade, conservar o formulário de recuperação
-                # explícita e bloquear utilização da mesma candidata em duas
-                # concentrações sem confirmação.
-                for opcoes in candidatos_acomp_por_codigo.values():
-                    for opcao in opcoes:
-                        fid = opcao["evento_id"]
-                        uso_candidato[fid] = uso_candidato.get(fid, 0) + 1
-            except Exception as erro:
-                st.warning(
-                    "Não foi possível avaliar a identidade persistente dos "
-                    f"acompanhamentos: {erro}"
-                )
-                candidatos_acomp_por_codigo = {}
-                continuidades_automaticas = {}
-
-            # Candidatas ambíguas ficam apenas para revisão humana.
-            if st.session_state.get(CHAVE_MODO_MESCLAGEM):
-                # O painel de seleção trabalha com as concentrações ANTES
-                # das mesclagens; reconstruir também suas chaves originais.
-                contextos_originais_mescla = {}
-                for _, original in concentracoes_originais.iterrows():
-                    codigo_original = str(original["ID_CONCENTRACAO"])
-                    grupo_original = pontos_cluster_originais.loc[
-                        pontos_cluster_originais["_grupo"] == original["GRUPO"]
-                    ]
-                    cidades_original = sorted({
-                        str(c).strip() for c in grupo_original.get("Cidade", [])
-                        if str(c).strip()
-                    })
-                    lista_os_original = sorted({
-                        str(os_id).strip() for os_id in grupo_original.get("Nº da O.S", [])
-                        if str(os_id).strip()
-                    })
-                    if len(cidades_original) != 1:
-                        continue
-                    contextos_originais_mescla[codigo_original] = {
-                        "chave": chave_concentracao(
-                            cidades_original[0], original["LATITUDE"],
-                            original["LONGITUDE"], lista_os_original,
-                        ),
-                        "municipio": cidades_original[0],
-                        "os": lista_os_original,
-                    }
-                st.divider()
-                renderizar_painel_mescla(
-                    concentracoes_originais, pontos_cluster_originais,
-                    proximidades, df_eventos, bairros,
-                    dados_relatorio_concentracao, classificar_os_por_evento,
-                    contextos_originais_mescla, vinculos_acomp_visiveis,
-                    fichas_acomp_visiveis, PODE_EDITAR_FAROL,
-                    conferir_data=evento_pertinente_data_analise,
-                )
-                st.divider()
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
@@ -6050,29 +5829,29 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         municipio_acomp = cidades_grupo[0] if cidades_grupo else municipio_nota
                         contexto_atual = contextos_ativos_acomp[str(codigo)]
                         chave_acomp = contexto_atual["chave"]
-                        opcoes_recuperar = candidatos_acomp_por_codigo.get(str(codigo), [])
                         concentracoes.loc[concentracoes["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         vinculo_acomp = vinculos_acomp_visiveis.get(chave_acomp)
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "EVENTOS_RELACIONADOS"] = total_eventos
                         ficha_acomp = fichas_acomp_visiveis.get(str(vinculo_acomp.get("evento_id", ""))) if vinculo_acomp else None
-                        if ficha_acomp and (str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
-                                             or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
+                        compartilhada_antiga = bool(
+                            vinculo_acomp and total_vinculos_por_ficha.get(
+                                str(vinculo_acomp.get("evento_id", "")), 0
+                            ) > 1
+                        )
+                        if compartilhada_antiga:
+                            indicador_nota = "⚠️ Ficha antiga compartilhada — separar ao editar"
+                        elif ficha_acomp and (
+                            str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
+                            or str(ficha_acomp.get("status", "")).strip().casefold().startswith("conclu")
+                        ):
                             indicador_nota = "✅ Acompanhamento concluído"
                         elif vinculo_acomp and ficha_acomp:
-                            agrupadas = resolvidos_persistentes.get(str(codigo), {}).get("agrupados", 1)
-                            indicador_nota = (
-                                f"🔗 Ficha #{ficha_acomp['id']} compartilhada "
-                                f"por {agrupadas} concentrações"
-                                if agrupadas > 1 else
-                                f"🔄 Acompanhamento em andamento — Ficha #{ficha_acomp['id']}"
-                            )
+                            indicador_nota = f"🔄 Em andamento — Ficha #{ficha_acomp['id']}"
                         elif vinculo_acomp:
                             indicador_nota = "Acompanhamento vinculado — ficha indisponível"
-                        elif opcoes_recuperar:
-                            indicador_nota = "🔎 Possível acompanhamento existente — revisar vínculo"
                         else:
-                            indicador_nota = "Sem vínculo exato identificado" if not erro_acomp_visivel else "Acompanhamento indisponível"
+                            indicador_nota = "Sem acompanhamento nesta concentração"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
                         titulo = (
                             f"{codigo} — {', '.join(cidades_grupo) or 'Município não informado'}"
@@ -6094,37 +5873,20 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         mapa_ativo = codigo_texto == str(st.session_state.get("farol_v2_concentracao", ""))
                         with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
-                                st.success(indicador_nota)
-                                if str(codigo) in continuidades_automaticas:
-                                    st.caption(
-                                        "Continuidade reconhecida automaticamente: as O.S. "
-                                        "anteriores permanecem na concentração. "
-                                        "Ficha e movimentações originais preservadas."
-                                    )
-                            elif opcoes_recuperar:
-                                st.warning(
-                                    "Há acompanhamento(s) anterior(es) com O.S. em comum. "
-                                    "Nenhuma ficha foi movida; confirme o vínculo antes de criar outra."
-                                )
+                                st.info(indicador_nota) if compartilhada_antiga else st.success(indicador_nota)
                             else:
                                 st.caption(
-                                    "Nenhum vínculo exato encontrado para esta composição de O.S. "
-                                    "Se já existia uma ficha, confira o histórico antes de criar outra."
+                                    "Esta concentração ainda não possui acompanhamento. "
+                                    "Crie sua ficha independente ou copie informações de outra."
                                 )
 
-                            municipio_indice = normalizar_municipio(municipio_acomp)
-                            fichas_copia = set()
-                            for nome_bairro in re.split(r"[,;/]", bairros_grupo):
-                                bairro_indice = normalizar_texto(nome_bairro)
-                                fichas_copia.update(indice_fontes_por_bairro.get(
-                                    (municipio_indice, bairro_indice), set()
-                                ))
-                            if vinculo_acomp:
-                                fichas_copia.discard(str(vinculo_acomp.get("evento_id", "")))
                             fontes_copia = [
-                                {"id": fid, "titulo": fichas_acomp_visiveis[fid].get("titulo", "")}
-                                for fid in sorted(fichas_copia)
-                                if fid in fichas_acomp_visiveis
+                                origem for origem in fontes_copia_ativas
+                                if origem["codigo"] != str(codigo)
+                                and origem["id"] != (
+                                    str(vinculo_acomp.get("evento_id", ""))
+                                    if vinculo_acomp else ""
+                                )
                             ]
                             contexto_popup = {
                                 "chave": chave_acomp, "codigo": str(codigo),
@@ -6145,87 +5907,25 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                 ),
                                 "origem": "producao",
                             }
-                            if opcoes_recuperar and not vinculo_acomp:
-                                if st.button(
-                                    "🔗 Revisar acompanhamento existente",
-                                    key=f"farol_revisar_vinculo_{abrangencia}_{codigo}",
-                                    disabled=not PODE_EDITAR_FAROL,
-                                ):
-                                    st.session_state["farol_codigo_recuperacao"] = str(codigo)
-                                    st.session_state["farol_v2_detalhe_aberto"] = str(codigo)
-                                    st.rerun()
-                                if st.session_state.get("farol_codigo_recuperacao") == str(codigo):
-                                    with st.form(f"farol_form_recuperar_{abrangencia}_{codigo}"):
-                                        escolha = st.selectbox(
-                                            "Ficha anterior para esta concentração",
-                                            list(range(len(opcoes_recuperar))),
-                                            format_func=lambda i: (
-                                                f"Ficha #{opcoes_recuperar[i]['evento_id']} — "
-                                                f"{str(fichas_acomp_visiveis[opcoes_recuperar[i]['evento_id']].get('titulo', ''))[:75]} "
-                                                f"— {opcoes_recuperar[i]['os_em_comum']} O.S. em comum "
-                                                f"— {opcoes_recuperar[i]['distancia_m']} m"
-                                            ),
-                                            key=f"farol_escolha_recuperacao_{abrangencia}_{codigo}",
-                                        )
-                                        candidato = opcoes_recuperar[escolha]
-                                        ficha_candidata = fichas_acomp_visiveis[candidato["evento_id"]]
-                                        st.caption(
-                                            f"Registro de {candidato['criado_em']} · "
-                                            f"Status: {ficha_candidata.get('status', '')} · "
-                                            f"{candidato['os_em_comum']} de {candidato['os_anteriores']} O.S. "
-                                            f"anteriores e {candidato['os_atuais']} O.S. atuais · "
-                                            f"Distância entre centros: {candidato['distancia_m']} m"
-                                        )
-                                        ambiguo = uso_candidato.get(candidato["evento_id"], 0) > 1
-                                        if ambiguo:
-                                            st.error(
-                                                "Esta ficha também corresponde a outra concentração atual "
-                                                "(possível divisão/fusão). Recuperação bloqueada para evitar associação incorreta."
-                                            )
-                                        confirmado = st.checkbox(
-                                            "Confirmei que a concentração atual corresponde à ficha selecionada. "
-                                            "O vínculo antigo e todo o histórico serão preservados.",
-                                            key=f"farol_confirmar_recuperacao_{abrangencia}_{codigo}",
-                                        )
-                                        recuperar = st.form_submit_button(
-                                            "Confirmar recuperação do vínculo",
-                                            type="primary",
-                                            disabled=ambiguo or not PODE_EDITAR_FAROL,
-                                        )
-                                    if recuperar:
-                                        if not confirmado:
-                                            st.warning("Confirme a correspondência com a ficha anterior antes de recuperar.")
-                                        else:
-                                            try:
-                                                recuperar_vinculo_confirmado(
-                                                    contexto_popup, candidato["chave_anterior"],
-                                                    candidato["evento_id"],
-                                                )
-                                                st.session_state.pop("farol_codigo_recuperacao", None)
-                                                st.toast("Vínculo recuperado; ficha e histórico preservados.")
-                                                st.rerun()
-                                            except Exception as erro_recuperar:
-                                                st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
-                                if st.button(
-                                    "📝 Criar ficha independente ou copiar dados",
-                                    key=f"farol_criar_independente_{abrangencia}_{codigo}",
-                                    disabled=not PODE_EDITAR_FAROL,
-                                ):
-                                    popup_acompanhamento_farol(
-                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
-                                    )
-                            else:
-                                rotulo_acomp = (
-                                    ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                                    if vinculo_acomp
-                                    else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                            rotulo_acomp = (
+                                "✏️ Abrir / Editar Acompanhamento" if vinculo_acomp
+                                else "📝 Iniciar Acompanhamento"
+                            ) if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento"
+                            if st.button(
+                                rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
+                                disabled=bool(erro_acomp_visivel),
+                            ):
+                                popup_acompanhamento_farol(
+                                    contexto_popup, pode_editar=PODE_EDITAR_FAROL
                                 )
+                            if fontes_copia and PODE_EDITAR_FAROL:
                                 if st.button(
-                                    rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
-                                    disabled=bool(erro_acomp_visivel),
+                                    "📋 Copiar dados de outra concentração",
+                                    key=f"farol_copiar_ficha_{abrangencia}_{codigo}",
                                 ):
                                     popup_acompanhamento_farol(
-                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                        dict(contexto_popup, abrir_copia=True),
+                                        pode_editar=PODE_EDITAR_FAROL,
                                     )
                             if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
                                          key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
@@ -6261,43 +5961,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                              key=f"farol_v2_carregar_detalhe_{abrangencia}_{codigo}"):
                                     st.session_state["farol_v2_detalhe_aberto"] = codigo_texto
                                     st.rerun()
-        # Os cartões já foram montados antes de qualquer escrita.
-        # Quando houver mudança segura, conciliar UMA vez por requisição.
-        # Nenhuma gravação é executada individualmente dentro de expansores.
-        if recuperar_supabase_ativo and PODE_EDITAR_FAROL and lote_ocorrencias_pendentes:
-            assinatura = hashlib.sha256(json.dumps(
-                [(cod, ctx["chave"], ctx["evento_chaves"])
-                 for cod, ctx in sorted(contextos_ativos_acomp.items())],
-                sort_keys=True, ensure_ascii=False, default=str,
-            ).encode("utf-8")).hexdigest()
-            tentativas = st.session_state.setdefault(
-                "farol_ocorrencias_sincronizacao_tentativas", {}
-            )
-            falha_recente = (
-                tentativas.get("assinatura_falha") == assinatura
-                and tempo_execucao.monotonic() - tentativas.get("falha_em", 0) < 90
-            )
-            if tentativas.get("assinatura_sucesso") != assinatura and not falha_recente:
-                try:
-                    retorno_ocorrencias = sincronizar_ocorrencias_lote(
-                        lote_ocorrencias_pendentes
-                    )
-                    tentativas["assinatura_sucesso"] = assinatura
-                    tentativas.pop("assinatura_falha", None)
-                    if int(retorno_ocorrencias.get("incorporacoes", 0)):
-                        st.toast(
-                            "Concentrações do mesmo evento compartilham uma ficha. "
-                            "Movimentações e históricos preservados."
-                        )
-                except Exception as erro:
-                    tentativas["assinatura_falha"] = assinatura
-                    tentativas["falha_em"] = tempo_execucao.monotonic()
-                    st.warning(
-                        "Não foi possível persistir a continuidade reconhecida. "
-                        "A ficha continua visível nesta análise, mas a gravação "
-                        f"precisa ser repetida: {erro}"
-                    )
-
         # Disponível também quando não há concentrações no filtro atual.
         if concentracoes.empty:
             resumo_pdf = concentracoes.copy()

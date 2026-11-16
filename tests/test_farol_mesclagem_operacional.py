@@ -181,12 +181,10 @@ class TestMerge(unittest.TestCase):
         modulo=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
         auxiliar=SRC.read_text(encoding="utf-8")
         sql=(ROOT/"sql"/"farol_desfazer_mescla_operacional.sql").read_text(encoding="utf-8")
-        self.assertIn("renderizar_painel_desfazer_mesclas",modulo)
-        trecho=modulo.split('st.subheader("🗺️ Farol V2 — Panorama e concentrações")',1)[1]
-        self.assertLess(
-            trecho.index("renderizar_painel_desfazer_mesclas("),
-            trecho.index("if df_pontos.empty:")
-        )
+        # A mesclagem antiga continua auditada no banco, mas a interface
+        # não deve mais oferecer edição nem reversão como fluxo do Módulo 3.
+        self.assertNotIn("renderizar_painel_desfazer_mesclas(",modulo)
+        self.assertNotIn("listar_mesclas_farol(",modulo)
         self.assertIn("Desfazer mesclagem",auxiliar)
         self.assertIn("Fichas consolidadas, vínculos, incorporações",auxiliar)
         self.assertIn("SET ativo=false, alterado_em=now()",sql)
@@ -200,10 +198,10 @@ class TestMerge(unittest.TestCase):
         modulo=(ROOT/"pages"/"3_Farol_Operacional.py").read_text(encoding="utf-8")
         auxiliar=SRC.read_text(encoding="utf-8")
         sql=(ROOT/"sql"/"10_mesclagem_concentracoes_evento_farol.sql").read_text(encoding="utf-8")
-        self.assertIn("Mesclar concentrações",modulo)
-        self.assertIn("last_active_drawing",modulo)
-        self.assertIn("renderizar_painel_mescla(",modulo)
-        self.assertIn("CHAVE_MESCLA",modulo)
+        self.assertNotIn("Mesclar concentrações",modulo)
+        self.assertNotIn("last_active_drawing",modulo)
+        self.assertNotIn("renderizar_painel_mescla(",modulo)
+        self.assertNotIn("aplicar_mesclas_farol(",modulo)
         self.assertIn("farol_incorporar_mescla_tx",auxiliar)
         self.assertIn("farol_mesclas_operacionais ENABLE ROW LEVEL SECURITY",sql)
         self.assertIn("INSERT INTO public.prisma_auditoria",sql)

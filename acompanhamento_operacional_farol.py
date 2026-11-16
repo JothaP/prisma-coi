@@ -435,68 +435,75 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
     else:
         st.info("Ao salvar, o acompanhamento será iniciado com status 'Em Andamento'.")
 
-    # Uma ficha compartilhada não pode ser alterada sem que o analista
-    # escolha entre manter o compartilhamento ou separar esta concentração.
-    separar = False
-    dados_iniciais = evento
+    # Cada concentração possui um acompanhamento próprio: mesmo em fichas
+    # antigas compartilhadas, a edição começa separando apenas esta chave.
+    # O botão de cópia preenche o formulário; não grava nem copia o histórico.
     chave_concentracao = str(contexto.get("chave", "")).strip()
     codigo_concentracao = str(contexto.get("codigo", "")).strip()
-    if modo_supabase and not somente_leitura:
-        if evento and contexto.get("ficha_compartilhada"):
-            st.warning(
-                "Esta ficha atende mais de uma concentração. Editá-la ou concluí-la "
-                "também afeta as demais concentrações vinculadas."
+    separar = bool(modo_supabase and evento and contexto.get("ficha_compartilhada"))
+    dados_iniciais = evento
+    chave_copia_estado = f"farol_acomp_copia_aplicada_{chave_concentracao}"
+    fontes_copia = list(contexto.get("fontes_copia") or [])
+    if separar:
+        st.warning(
+            "Esta ficha antiga está vinculada a mais de uma concentração. "
+            "Para evitar alterar as demais, será criada uma ficha independente "
+            "somente para esta concentração; a original e seu histórico permanecem."
+        )
+        usar_atual = st.checkbox(
+            "Usar os dados da ficha atual como ponto de partida",
+            value=True,
+            disabled=somente_leitura,
+            key=f"farol_acomp_separar_usar_atual_{chave_concentracao}",
+        )
+        dados_iniciais = evento if usar_atual else None
+
+    if modo_supabase and not somente_leitura and fontes_copia:
+        with st.expander(
+            "📋 Copiar dados de outra concentração",
+            expanded=bool(contexto.get("abrir_copia")),
+        ):
+            origem_idx = st.selectbox(
+                "Concentração de origem",
+                range(len(fontes_copia)),
+                format_func=lambda i: (
+                    f"{fontes_copia[i]['codigo']} — "
+                    f"{str(fontes_copia[i].get('municipio', ''))} — "
+                    f"{str(fontes_copia[i].get('bairros', ''))} "
+                    f"(Ficha #{fontes_copia[i]['id']})"
+                ),
+                key=f"farol_acomp_fonte_{chave_concentracao}",
             )
-            acao = st.radio(
-                "O que deseja fazer com esta concentração?",
-                ("Editar ficha compartilhada", "Criar ficha independente nesta concentração"),
-                index=None,
-                key=f"farol_acomp_acao_{chave_concentracao}",
+            col_aplicar, col_limpar = st.columns(2)
+            if col_aplicar.button(
+                "Aplicar cópia ao formulário", type="primary",
+                key=f"farol_acomp_aplicar_copia_{chave_concentracao}",
+            ):
+                st.session_state[chave_copia_estado] = str(
+                    fontes_copia[origem_idx]["id"]
+                )
+            if col_limpar.button(
+                "Limpar cópia", key=f"farol_acomp_limpar_copia_{chave_concentracao}"
+            ):
+                st.session_state.pop(chave_copia_estado, None)
+    ids_fontes = {str(fonte["id"]) for fonte in fontes_copia}
+    origem_copia = str(st.session_state.get(chave_copia_estado, "") or "")
+    if origem_copia not in ids_fontes or (evento and origem_copia == str(eid)):
+        origem_copia = ""
+    if origem_copia and modo_supabase:
+        dados_copiados = obter_evento(origem_copia)
+        if dados_copiados is None:
+            st.session_state.pop(chave_copia_estado, None)
+            st.warning("A ficha de origem não está mais disponível. Selecione outra.")
+            origem_copia = ""
+        else:
+            # Campos operacionais apenas: título, município, O.S., data,
+            # status e histórico permanecem exclusivos do destino.
+            dados_iniciais = dados_copiados
+            st.info(
+                f"Dados da ficha #{origem_copia} carregados para este formulário. "
+                "Confira os campos e clique em Salvar; a origem não será alterada."
             )
-            if acao is None:
-                st.info("Escolha uma ação para continuar. Nenhuma ficha será alterada automaticamente.")
-                return
-            separar = acao == "Criar ficha independente nesta concentração"
-            if separar:
-                copiar = st.checkbox(
-                    "Copiar os campos da ficha atual para a nova ficha",
-                    value=True,
-                    key=f"farol_acomp_separar_copiar_{chave_concentracao}",
-                )
-                dados_iniciais = evento if copiar else None
-                st.info(
-                    "Será criado um novo ID e apenas o vínculo desta concentração será "
-                    "transferido. A ficha antiga e suas movimentações serão preservadas. "
-                    "O histórico não será copiado."
-                )
-        elif not evento:
-            fontes = list(contexto.get("fontes_copia") or [])
-            opcoes = ["Criar ficha independente"]
-            if fontes:
-                opcoes.append("Copiar dados de outra ficha (criar ID independente)")
-            modo = st.radio(
-                "Como deseja iniciar o acompanhamento?",
-                opcoes, key=f"farol_acomp_criacao_{chave_concentracao}",
-            )
-            if modo.startswith("Copiar dados"):
-                ids = [str(f["id"]) for f in fontes]
-                fonte_id = st.selectbox(
-                    "Ficha de origem (mesmo município e bairro)",
-                    ids,
-                    format_func=lambda fid: next(
-                        (f"Ficha #{f['id']} — {str(f.get('titulo', ''))[:90]}"
-                         for f in fontes if str(f["id"]) == fid), fid
-                    ),
-                    key=f"farol_acomp_fonte_{chave_concentracao}",
-                )
-                dados_iniciais = obter_evento(fonte_id)
-                if dados_iniciais is None:
-                    st.error("A ficha de origem não está mais disponível. Atualize a página.")
-                    return
-                st.caption(
-                    "Somente os campos serão copiados. O novo acompanhamento terá "
-                    "status, conclusão e histórico próprios."
-                )
     criar_nova = not evento or separar
 
     # A versão da ficha fica presa à primeira abertura do formulário.
@@ -512,22 +519,28 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
             st.session_state.pop(versao_chave, None)
             st.rerun()
     # Campos da ficha seguem a disposição aprovada pelo COI.
-    with st.form(f"popup_acompanhamento_{eid or contexto.get('chave', 'novo')}"):
+    with st.form(
+        f"popup_acompanhamento_{eid or chave_concentracao}_"
+        f"{'separar' if separar else 'editar'}_{origem_copia or 'sem_copia'}"
+    ):
         topo_a, topo_b = st.columns([2.3, 1])
         titulo_padrao = (f"{contexto.get('codigo', '')} — {contexto.get('municipio', '')}"
                          f" — {contexto.get('bairros', '')}").strip(" —")
-        titulo_base = (str(dados_iniciais.get("titulo", "")) if dados_iniciais else titulo_padrao)
-        if criar_nova and dados_iniciais and codigo_concentracao not in titulo_base:
+        titulo_base = (
+            str(evento.get("titulo", "") or titulo_padrao)
+            if evento else titulo_padrao
+        )
+        if separar and codigo_concentracao not in titulo_base:
             titulo_base = f"{titulo_base} — {codigo_concentracao}"
         titulo = topo_a.text_input("Título do Acompanhamento", value=titulo_base,
                                   disabled=somente_leitura)
         quantidade = topo_b.number_input("Nº de Reclamações", min_value=0, step=1,
                             value=(int(contexto.get("qtd", 0)) if criar_nova else
-                                    int(float(dados_iniciais.get("qtd_reclamacoes") or 0))),
+                                    int(float(evento.get("qtd_reclamacoes") or 0))),
                             disabled=somente_leitura)
         col_u, col_r, col_m = st.columns(3)
-        unidade_atual = str(dados_iniciais.get("unidade", "")) if dados_iniciais else "Águas do Piauí"
-        regional_atual = str(dados_iniciais.get("regional", "")) if dados_iniciais else "Cerrado"
+        unidade_atual = str(evento.get("unidade", "")) if evento else "Águas do Piauí"
+        regional_atual = str(evento.get("regional", "")) if evento else "Cerrado"
         unidade = col_u.selectbox("Unidade", UNIDADES,
                      index=UNIDADES.index(unidade_atual) if unidade_atual in UNIDADES else 0,
                      disabled=somente_leitura)
@@ -535,12 +548,12 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                       index=REGIONAIS.index(regional_atual) if regional_atual in REGIONAIS else 0,
                       disabled=somente_leitura)
         municipio = col_m.text_input("Município", value=(str(contexto.get("municipio", "")) if criar_nova
-                                                  else str(dados_iniciais.get("municipio", ""))),
+                                                  else str(evento.get("municipio", ""))),
                                    disabled=somente_leitura)
 
         col_status, col_causa = st.columns(2)
         status_atual = ("Em Andamento" if criar_nova else
-                        status_para_interface(dados_iniciais.get("status", "")))
+                        status_para_interface(evento.get("status", "")))
         status = col_status.selectbox("Status", STATUS, index=STATUS.index(status_atual), disabled=somente_leitura,
                                       help="Ao mudar um concluído para Pendente/Em Andamento e salvar, ele será reaberto.")
         causa_atual = causa_para_interface(dados_iniciais) if dados_iniciais else "Não"
@@ -563,13 +576,6 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
         if evento and not separar and not somente_leitura:
             movimentacao = st.text_area("Nova movimentação (opcional)", placeholder="Descreva a ação realizada ou pendência...", height=70)
         if not somente_leitura:
-            confirmar_edicao_compartilhada = (
-                st.checkbox(
-                    "Confirmo que desejo editar a ficha compartilhada, afetando todas as concentrações vinculadas.",
-                    key=f"farol_acomp_confirmar_compartilhada_{chave_concentracao}",
-                ) if evento and contexto.get("ficha_compartilhada") and not separar
-                else True
-            )
             if concluido and not criar_nova:
                 salvar = st.form_submit_button("💾 Salvar alterações / Reabrir",
                                               type="primary", use_container_width=True)
@@ -595,8 +601,6 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                 raise ValueError("Confirme o encerramento antes de concluir o acompanhamento.")
             if separar and not confirmar_separacao:
                 raise ValueError("Confirme a separação desta concentração.")
-            if evento and not separar and not confirmar_edicao_compartilhada:
-                raise ValueError("Confirme a edição da ficha compartilhada.")
             if salvar and status == "Concluído" and criar_nova:
                 raise ValueError("Para concluir a nova ficha, use 'Acompanhamento Concluído'.")
             if salvar and status == "Concluído" and not concluido:
@@ -639,6 +643,7 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
             if modo_supabase:
                 st.session_state.pop(versao_chave, None)
                 st.session_state.pop(id_chave, None)
+                st.session_state.pop(chave_copia_estado, None)
             st.rerun()
         except Exception as erro:
             st.error(f"Não foi possível salvar o acompanhamento: {erro}")
@@ -646,7 +651,11 @@ def popup_acompanhamento_farol(contexto, pode_editar=True):
                 st.caption("Se o registro foi criado, confira a planilha antes de tentar novamente para evitar duplicação.")
 
     if evento:
-        with st.expander("🕓 Histórico de movimentações", expanded=False):
+        nome_historico = (
+            "🕓 Histórico da ficha compartilhada anterior (não será copiado)"
+            if separar else "🕓 Histórico de movimentações"
+        )
+        with st.expander(nome_historico, expanded=False):
             try:
                 registros = obter_movimentacoes(eid)
                 for data_mov, descricao_mov, status_mov in registros:
