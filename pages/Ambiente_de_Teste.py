@@ -65,11 +65,16 @@ if str(st.session_state.get("perfil", "")).lower().strip() not in {"admin", "usu
 st.title("🧪 Ambiente de Teste — COI")
 modo_teste = st.radio(
     "Ferramenta experimental",
-    ["Investigação de áreas de influência", "Mesclagem de concentrações por evento",
-     "Relatórios integrados (original)"],
+    ["Farol Operacional V3 — Diário", "Investigação de áreas de influência",
+     "Mesclagem de concentrações por evento", "Relatórios integrados (original)"],
     horizontal=True,
     key="ambiente_teste_ferramenta",
 )
+if modo_teste == "Farol Operacional V3 — Diário":
+    from farol_v3_teste import renderizar
+    renderizar()
+    st.stop()
+
 if modo_teste == "Investigação de áreas de influência":
     from investigacao_areas_teste import renderizar_investigacao
     renderizar_investigacao()
