@@ -82,11 +82,11 @@ def filtrar_registros_do_m3(valores, dia: date):
         ["Dt. Emissão", "Data Emissão", "Dt Emissao", "Data de Abertura", "Data"],
     )
     indice_data = cabecalho.index(coluna_data)
-    somente_dia = [
-        linha for linha in linhas
-        if pd.notna(data_valida(linha[indice_data]))
-        and data_valida(linha[indice_data]).date() == dia
-    ]
+    somente_dia = []
+    for linha in linhas:
+        data_emissao = data_valida(linha[indice_data])
+        if pd.notna(data_emissao) and data_emissao.date() == dia:
+            somente_dia.append(linha)
     estatisticas = {
         "lidos": len(linhas),
         "do_dia": len(somente_dia),
