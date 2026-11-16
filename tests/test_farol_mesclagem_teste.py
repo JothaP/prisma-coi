@@ -163,8 +163,12 @@ class MesclagemTestes(unittest.TestCase):
     def test_ambiente_isolado_de_producao(self):
         codigo=(RAIZ/"pages"/"Ambiente_de_Teste.py").read_text(encoding="utf-8")
         helper=FONTE.read_text(encoding="utf-8")
-        self.assertIn("renderizar_mesclagem_teste(",codigo)
-        self.assertIn("st.stop()",codigo[codigo.index('modo_teste = st.radio('):])
+        # O núcleo legado continua no repositório para referência, mas a
+        # interface do Ambiente de Teste agora é exclusiva do Farol V3.
+        self.assertNotIn("renderizar_mesclagem_teste(",codigo)
+        self.assertNotIn("modo_teste = st.radio(",codigo)
+        self.assertIn('exigir_acesso_modulo("teste")',codigo)
+        self.assertIn("from farol_v3_teste import renderizar",codigo)
         self.assertNotIn("farol_acomp_supabase_backend",helper)
         self.assertNotIn("integracao_acompanhamento_producao",helper)
         self.assertNotIn("append_row(",helper)
