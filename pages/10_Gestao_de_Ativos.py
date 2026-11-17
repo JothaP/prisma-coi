@@ -25,8 +25,9 @@ if str(RAIZ) not in sys.path:
 
 from auth import exigir_acesso_modulo, pode_executar_acao, registrar_atividade
 from gestao_ativos_backend import (
-    CAMPOS_EDITAVEIS, MAX_MARCADORES, criar_ativo, editar_ativo, historico_ativo,
-    listar_ativos, municipios, obter_ativo, validar_historico,
+    CAMPOS_EDITAVEIS, CONFIRMACAO_RESET_ATIVOS, MAX_MARCADORES, criar_ativo,
+    editar_ativo, historico_ativo, listar_ativos, municipios, obter_ativo,
+    resetar_fichas_e_historico, validar_historico,
 )
 from prisma_backend import ErroPRISMA
 
@@ -526,6 +527,62 @@ with col_novo:
 
 if not HISTORICO_DISPONIVEL:
     st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
+
+# Recurso administrativo do Módulo 9: não aparece para usuários ou operadores.
+# A validação de admin e permissão também ocorre no backend e dentro do banco.
+if st.session_state.get("perfil") == "admin":
+    with st.expander("Administração — Resetar dados das fichas e histórico", expanded=False):
+        st.warning(
+            "Esta operação atua em TODOS os ativos do módulo. Remove o status, "
+            "as últimas O.S. de Operação e Eletromecânica, suas datas, "
+            "o Protocolo Equatorial e a data, as observações e o histórico "
+            "das fichas. Preserva todos os ativos, suas plantas, nomes, "
+            "matrículas, municípios, coordenadas e dados cadastrais de origem. "
+            "O registro de auditoria administrativa do reset será preservado. "
+            "A exclusão do histórico não pode ser desfeita pela interface."
+        )
+        with st.form("ga_confirmacao_reset_geral"):
+            st.caption(
+                "Confirme que deseja limpar todas as fichas e o histórico "
+                "do módulo. Digite exatamente:"
+            )
+            st.code(CONFIRMACAO_RESET_ATIVOS)
+            frase_reset = st.text_input(
+                "Frase de confirmação",
+                value="",
+                key="ga_frase_reset_geral",
+                placeholder=CONFIRMACAO_RESET_ATIVOS,
+            )
+            aceite_reset = st.checkbox(
+                "Estou ciente de que os dados operacionais e o histórico "
+                "serão apagados de todos os ativos."
+            )
+            enviar_reset = st.form_submit_button(
+                "Resetar fichas e histórico",
+                type="secondary",
+                disabled=not HISTORICO_DISPONIVEL
+                or not pode_executar_acao("9", "excluir"),
+            )
+        if enviar_reset:
+            if not aceite_reset or frase_reset != CONFIRMACAO_RESET_ATIVOS:
+                st.error("Marque a confirmação e digite a frase exatamente como apresentada.")
+            else:
+                try:
+                    with st.spinner("Limpando as fichas e o histórico com auditoria..."):
+                        resumo_reset = resetar_fichas_e_historico(frase_reset)
+                    _limpar_cache()
+                    st.session_state.pop("ga_painel", None)
+                    st.session_state.pop("ga_ultimo_status_processado", None)
+                    st.session_state.pop("ga_evento_marcador_processado", None)
+                    st.session_state["ga_mensagem"] = (
+                        f"Reset concluído: {resumo_reset['ativos_preservados']} ativos "
+                        f"preservados, {resumo_reset['fichas_limpas']} fichas limpas e "
+                        f"{resumo_reset['historicos_excluidos']} registros do histórico "
+                        "apagados. Auditoria administrativa registrada."
+                    )
+                    st.rerun()
+                except ErroPRISMA as exc:
+                    st.error(f"Reset não realizado: {exc}")
 
 if mensagem := st.session_state.pop("ga_mensagem", None):
     st.success(mensagem)
