@@ -23,6 +23,7 @@ from farol_v3_nucleo_teste import (
     preparar_os_do_dia, concentracoes_do_dia, eventos_pertinentes,
     ativos_proximos, pressao_proxima, normalizar, RAIO_PADRAO, MINIMO_OS,
 )
+from farol_v3_fontes_m3 import ler_pontos_m3_dia, ler_eventos_m3
 
 FUSO = ZoneInfo("America/Fortaleza")
 MAX_ARQUIVO_BYTES = 40 * 1024 * 1024
@@ -267,13 +268,14 @@ def _visao_investigacao(op):
     st.divider()
     st.markdown("#### Evidências sob demanda")
     st.caption(
-        "Eventos, ativos e medições só são examinados ao solicitar a investigação. "
-        "Arquivos opcionais permanecem apenas nesta sessão."
+        "Eventos: consulta somente leitura à aba EVENTOS do Módulo 3 quando você "
+        "solicitar a investigação. Os ativos vêm dos cadastros locais do M3. "
+        "As medições de pressão podem ser enviadas por arquivo."
     )
     a, b = st.columns(2)
     with a:
         eventos_upload = st.file_uploader(
-            "Eventos operacionais (CSV ou XLSX, opcional)",
+            "Substituir eventos do Módulo 3 por arquivo (opcional)",
             type=["csv", "xlsx"], key="farol_v3_teste_eventos",
         )
     with b:
@@ -283,11 +285,22 @@ def _visao_investigacao(op):
         )
     if st.button("🔍 Carregar evidências desta concentração", key="farol_v3_teste_investigar"):
         try:
-            dia = hoje()
-            eventos = (
-                eventos_pertinentes(ler_arquivo(eventos_upload), conc, dia)
-                if eventos_upload else []
-            )
+            dia = datetime.fromisoformat(op["dia"]).date()
+            eventos = []
+            erro_eventos = ""
+            origem_eventos = "arquivo enviado" if eventos_upload else "EVENTOS do Módulo 3"
+            try:
+                if eventos_upload:
+                    base_eventos = ler_arquivo(eventos_upload)
+                elif op.get("demonstracao"):
+                    # Não relacionar eventos reais com pontos fictícios.
+                    base_eventos = pd.DataFrame()
+                    origem_eventos = "demonstração (sem eventos reais)"
+                else:
+                    base_eventos = ler_eventos_m3()
+                eventos = eventos_pertinentes(base_eventos, conc, dia)
+            except Exception as erro:
+                erro_eventos = f"Não foi possível consultar os eventos: {erro}"
             pressoes = (
                 pressao_proxima(ler_arquivo(pressao_upload), conc, dia)
                 if pressao_upload else []
@@ -297,11 +310,15 @@ def _visao_investigacao(op):
             st.session_state["farol_v3_teste_evidencias"] = {
                 "chave": chave, "eventos": eventos, "pressoes": pressoes,
                 "pocos": poco, "loggers": logger,
+                "origem_eventos": origem_eventos, "erro_eventos": erro_eventos,
             }
         except Exception as erro:
             st.error(f"Falha ao consultar evidências: {erro}")
     dados = st.session_state.get("farol_v3_teste_evidencias", {})
     if dados.get("chave") == chave:
+        st.caption(f"Fonte dos eventos: {dados.get('origem_eventos', 'não informada')}")
+        if dados.get("erro_eventos"):
+            st.warning(dados["erro_eventos"])
         col1, col2, col3 = st.columns(3)
         col1.metric("Eventos relacionados", len(dados["eventos"]))
         col2.metric("Ativos em 750 m", len(dados["pocos"]) + len(dados["loggers"]))
@@ -310,7 +327,7 @@ def _visao_investigacao(op):
             if dados["eventos"]:
                 st.dataframe(pd.DataFrame(dados["eventos"]), use_container_width=True, hide_index=True)
             else:
-                st.caption("Nenhum evento identificado ou arquivo de eventos não fornecido.")
+                st.caption("Nenhum evento pertinente identificado na fonte consultada.")
         with st.expander("Ativos e loggers próximos"):
             ativos = [
                 dict(item, tipo=tipo)
@@ -572,31 +589,63 @@ def renderizar():
         st.session_state.pop("farol_v3_teste_evidencias", None)
         op = None
         st.info("O dia operacional mudou. Carregue as reclamações de hoje.")
-    with st.expander("1. Carregar reclamações do dia", expanded=op is None):
+    with st.expander("1. Reclamações do dia — dados do Módulo 3", expanded=op is None):
         st.caption(
-            "Envie uma exportação CSV/XLSX com O.S., cidade, bairro, latitude, "
-            "longitude e data de emissão. Os registros fora da data atual "
-            "serão ignorados. Nenhuma planilha de produção é modificada."
+            "Fonte principal: aba PONTOS do Farol (Módulo 3), consultada em modo "
+            "somente leitura. Apenas registros emitidos hoje serão processados. "
+            "As reclamações históricas não entram nos agrupamentos do V3."
         )
-        upload = st.file_uploader(
-            "Arquivo de reclamações", type=["csv", "xlsx"],
-            key="farol_v3_teste_upload_os",
-        )
-        col1, col2 = st.columns(2)
-        if col1.button("Processar arquivo de hoje", type="primary", disabled=upload is None):
+        if st.button(
+            "🔄 Consultar reclamações de hoje no Módulo 3",
+            type="primary", key="farol_v3_teste_consultar_m3",
+        ):
             try:
-                with st.spinner("Filtrando o dia e formando concentrações..."):
-                    st.session_state[CHAVE_OPERACAO] = processar(ler_arquivo(upload), dia)
+                with st.spinner("Lendo PONTOS e filtrando a data antes do processamento..."):
+                    base, contagem_m3 = ler_pontos_m3_dia(dia)
+                    if base.empty:
+                        raise ValueError(
+                            f"A aba PONTOS possui {contagem_m3['lidos']} registro(s), "
+                            f"mas nenhum foi emitido hoje ({dia:%d/%m/%Y}). "
+                            "Confirme a atualização diária do Módulo 3."
+                        )
+                    novo = processar(base, dia)
+                    novo["origem"] = "Módulo 3 — PONTOS (somente leitura)"
+                    novo["estatisticas"]["m3_lidos"] = contagem_m3["lidos"]
+                    novo["estatisticas"]["m3_fora_do_dia"] = contagem_m3["fora_do_dia"]
+                    st.session_state[CHAVE_OPERACAO] = novo
                     st.session_state.pop("farol_v3_teste_evidencias", None)
                 st.rerun()
             except Exception as erro:
-                st.error(f"Importação interrompida: {erro}")
-        if col2.button("Carregar exemplo fictício (demonstração)"):
-            st.session_state[CHAVE_OPERACAO] = processar(
-                exemplo_do_dia(dia), dia, demonstracao=True,
+                st.error(f"Não foi possível consultar PONTOS do Módulo 3: {erro}")
+        with st.expander("Alternativas para simular sem consultar o Módulo 3", expanded=False):
+            st.caption(
+                "Um arquivo CSV/XLSX também será filtrado pela data atual. "
+                "Você pode usar o exemplo inteiramente fictício."
             )
-            st.session_state.pop("farol_v3_teste_evidencias", None)
-            st.rerun()
+            upload = st.file_uploader(
+                "Arquivo de reclamações (alternativo)",
+                type=["csv", "xlsx"], key="farol_v3_teste_upload_os",
+            )
+            col1, col2 = st.columns(2)
+            if col1.button(
+                "Processar arquivo de hoje", disabled=upload is None,
+                key="farol_v3_teste_processar_upload",
+            ):
+                try:
+                    with st.spinner("Filtrando o dia e formando concentrações..."):
+                        novo = processar(ler_arquivo(upload), dia)
+                        novo["origem"] = "arquivo enviado pelo analista"
+                        st.session_state[CHAVE_OPERACAO] = novo
+                        st.session_state.pop("farol_v3_teste_evidencias", None)
+                    st.rerun()
+                except Exception as erro:
+                    st.error(f"Importação interrompida: {erro}")
+            if col2.button("Carregar exemplo fictício (demonstração)"):
+                novo = processar(exemplo_do_dia(dia), dia, demonstracao=True)
+                novo["origem"] = "exemplo fictício"
+                st.session_state[CHAVE_OPERACAO] = novo
+                st.session_state.pop("farol_v3_teste_evidencias", None)
+                st.rerun()
 
     op = st.session_state.get(CHAVE_OPERACAO)
     if not op:
@@ -614,9 +663,17 @@ def renderizar():
     if op["demonstracao"]:
         st.warning("DADOS FICTÍCIOS: os registros desta análise são apenas demonstrativos.")
     st.caption(
+        f"Fonte: {op.get('origem', 'arquivo enviado')}. "
         f"Último processamento: {op['processado_em']}. "
-        "A análise usa apenas a data corrente, não uma janela de oito dias."
+        "O processamento usa apenas a data corrente, não uma janela de oito dias."
     )
+    if op.get("estatisticas", {}).get("m3_lidos") is not None:
+        st.caption(
+            f"Registros consultados na aba PONTOS: "
+            f"{op['estatisticas']['m3_lidos']}; "
+            f"fora da data: {op['estatisticas']['m3_fora_do_dia']}. "
+            "Os demais não foram incluídos no agrupamento."
+        )
     navegar = st.session_state.pop("farol_v3_teste_navegar", None)
     if navegar in {"Panorama do dia", "Investigação", "Acompanhamentos"}:
         st.session_state["farol_v3_teste_visao"] = navegar
