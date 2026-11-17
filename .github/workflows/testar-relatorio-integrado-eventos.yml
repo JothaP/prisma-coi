@@ -1,0 +1,32 @@
+name: Validar eventos do Relatorio Integrado (M7)
+
+on:
+  push:
+    paths:
+      - 'pages/7_Relatorios_Integrados.py'
+      - 'farol_eventos_relatorio_integrado.py'
+      - 'tests/test_ri7_eventos_farol.py'
+      - 'tests/test_farol_individual_relatorio7.py'
+      - '.github/workflows/testar-relatorio-integrado-eventos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependencias geograficas para teste
+        run: python -m pip install 'pandas>=2.2,<3' 'shapely>=2,<3' 'pyproj>=3,<4'
+      - name: Validar sintaxe dos modulos
+        run: python -m py_compile pages/7_Relatorios_Integrados.py farol_eventos_relatorio_integrado.py pages/3_Farol_Operacional.py
+      - name: Testar paridade com Farol e vinculo por OS
+        run: python -m unittest discover -s tests -p 'test_ri7_eventos_farol.py' -v
+      - name: Garantir PDF e layout individual
+        run: python -m unittest discover -s tests -p 'test_farol_individual_relatorio7.py' -v
