@@ -6,6 +6,7 @@ Google Sheets ou Supabase. Não modifica os arquivos originais.
 from __future__ import annotations
 
 import ast
+import copy
 from datetime import date
 from pathlib import Path
 import unittest
@@ -117,9 +118,15 @@ class TestRelatorio7EventosFarol(unittest.TestCase):
             with self.subTest(funcao=nome):
                 self.assertIn(nome, src)
                 self.assertIn(nome, dst)
+                original = copy.deepcopy(src[nome])
+                duplicada = copy.deepcopy(dst[nome])
+                # Decoradores st.cache_data são exclusivos da página do Farol.
+                # A lógica interna, inclusive atribuições, deve permanecer idêntica.
+                original.decorator_list = []
+                duplicada.decorator_list = []
                 self.assertEqual(
-                    ast.dump(src[nome], include_attributes=False),
-                    ast.dump(dst[nome], include_attributes=False),
+                    ast.dump(original, include_attributes=False),
+                    ast.dump(duplicada, include_attributes=False),
                     "Rotina divergente; atualizar compartilhamento com M3",
                 )
 
