@@ -27,13 +27,14 @@ STATUS_RELATORIO = {
 STATUS_FECHAMENTOS_RELATORIO = {
     "Pendente": "🔴",
     "Em andamento": "🟡",
-    "Concluído": "🟢",
+    "Encerrado": "🟢",
     "Cancelado": "⚫",
 }
 CODIGOS_FECHAMENTO = {
     "pendente": "Pendente",
     "em_andamento": "Em andamento",
-    "concluido": "Concluído",
+    "encerrado": "Encerrado",
+    "concluido": "Encerrado",  # Leitura de registros anteriores.
     "cancelado": "Cancelado",
 }
 
@@ -151,6 +152,8 @@ def preparar_fechamentos_relatorio(fechamentos: list[dict]) -> list[dict]:
             "O.S.": _texto(reg.get("os")),
             "Bairro": _texto(reg.get("bairro")),
             "Data": _texto(reg.get("data"))[:10],
+            "O.S. de abertura": _texto(reg.get("os_abertura")),
+            "Data da abertura": _texto(reg.get("data_abertura"))[:10],
         })
     return registros
 
@@ -168,11 +171,12 @@ def _formatar_fechamento(item: dict, numero: int) -> str:
     for chave, rotulo in (
         ("Bairro", "Bairro"), ("Líder", "Líder"), ("Equipe", "Equipe"),
         ("Matrícula", "Matrícula"), ("O.S.", "O.S."),
-        ("Data", "Data"),
+        ("Data", "Data"), ("O.S. de abertura", "O.S. de abertura"),
+        ("Data da abertura", "Data da abertura"),
     ):
         valor = _texto(item.get(chave))
         if valor:
-            if chave == "Data":
+            if chave in ("Data", "Data da abertura"):
                 valor = _data_relatorio_fechamento(valor)
             partes.append(f"{rotulo}: {valor}")
     return f"🚧 {numero}. " + (" | ".join(partes) if partes else "Reparo de rede")
