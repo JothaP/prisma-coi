@@ -32,7 +32,13 @@ from gestao_ativos_backend import (
 )
 from gestao_ativos_relatorio import (
     SECOES as SECOES_RELATORIO, SITUACOES as SITUACOES_RELATORIO,
-    STATUS_RELATORIO, gerar_pontos_atencao, preparar_itens_relatorio,
+    STATUS_RELATORIO, STATUS_FECHAMENTOS_RELATORIO,
+    gerar_pontos_atencao, preparar_itens_relatorio, preparar_fechamentos_relatorio,
+)
+from gestao_ativos_fechamentos import (
+    STATUS_FECHAMENTO, LIMITE_MARCADORES_FECHAMENTOS,
+    listar_fechamentos, listar_fechamentos_relatorio, municipios_fechamentos,
+    criar_fechamento, editar_fechamento, obter_fechamento,
 )
 from prisma_backend import ErroPRISMA
 
@@ -84,6 +90,16 @@ def _municipios():
 @st.cache_data(ttl=35, show_spinner=False)
 def _listar(municipio, pesquisa, status):
     return listar_ativos(municipio, pesquisa, status)
+
+
+@st.cache_data(ttl=35, show_spinner=False)
+def _listar_reparos(municipio, bairro, pesquisa, status):
+    return listar_fechamentos(municipio, bairro, pesquisa, status)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _municipios_reparos():
+    return municipios_fechamentos()
 
 
 def _data(valor):
@@ -176,6 +192,8 @@ def _campos_formulario(registro, prefixo, *, novo=False, coords=None, municipio_
 def _limpar_cache():
     _listar.clear()
     _municipios.clear()
+    _listar_reparos.clear()
+    _municipios_reparos.clear()
     # O st_folium preserva o mapa antigo entre reruns. Reconstrói os marcadores
     # somente após uma gravação confirmada, para refletir status e cores novos.
     st.session_state["ga_versao_mapa"] = st.session_state.get("ga_versao_mapa", 0) + 1
@@ -192,6 +210,20 @@ def _auditar(acao, registro):
         st.session_state["ga_aviso_auditoria"] = (
             "A alteração foi salva e registrada no histórico do ativo, "
             "mas houve falha no registro de auditoria geral."
+        )
+
+
+def _auditar_reparo(acao, registro):
+    try:
+        registrar_atividade(
+            "9", acao, registro_id=registro.get("id"),
+            detalhes=("Fechamento/reparo de rede: "
+                      + str(registro.get("bairro") or "")[:100]),
+        )
+    except ErroPRISMA:
+        st.session_state["ga_aviso_auditoria"] = (
+            "O fechamento foi salvo, mas houve falha na auditoria geral. "
+            "Informe a administração para verificar o registro."
         )
 
 
