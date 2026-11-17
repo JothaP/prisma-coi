@@ -2,6 +2,7 @@
 import ast
 from html import escape as html_escape
 import math
+import re
 from pathlib import Path
 import unittest
 
@@ -15,6 +16,7 @@ tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
 names = {
     "_popup_cliente", "_popup_ativo", "_m8_formatar_cota",
     "_m8_rótulo_html", "_m8_adicionar_rotulo", "_m8_mapa_unificado",
+    "_m8_interpretar_coordenadas",
 }
 found = [
     node for node in tree.body
@@ -24,6 +26,7 @@ assert {node.name for node in found} == names
 namespace = {
     "folium": folium, "Draw": Draw, "Fullscreen": Fullscreen,
     "Element": Element, "pd": pd, "html_escape": html_escape, "math": math,
+    "re": re,
     "LIMITE_EQUIPAMENTOS_MAPA": 350,
 }
 exec(compile(ast.Module(body=found, type_ignores=[]), str(source), "exec"), namespace)
@@ -96,6 +99,46 @@ class TestarRotulosModulo8(unittest.TestCase):
                                 for child in pin._children.values()))
             self.assertTrue(any(isinstance(child, folium.Tooltip)
                                 for child in pin._children.values()))
+
+    def test_coordenadas_aceitam_ponto_ou_virgula_decimal(self):
+        interpretar = namespace["_m8_interpretar_coordenadas"]
+        self.assertEqual(interpretar("-5,089", "-42,801"), (-5.089, -42.801))
+        self.assertEqual(interpretar(" 0 ", "180"), (0.0, 180.0))
+        self.assertEqual(interpretar("-90.0", "-180"), (-90.0, -180.0))
+        for latitude, longitude in [
+            ("", "-42.8"), ("-5.08", ""), ("-91", "-42.8"),
+            ("5", "181"), ("-5.08", "abc"), ("-5,08,1", "-42"),
+            ("nan", "-42"), ("1e3", "-42"),
+        ]:
+            with self.subTest(latitude=latitude, longitude=longitude):
+                with self.assertRaises(ValueError):
+                    interpretar(latitude, longitude)
+
+    def test_ponto_localizado_no_mapa_sem_matricula_e_com_cota(self):
+        pontos = pd.DataFrame(columns=["NUM_LIGACAO", "END_LIGACAO", "_lat", "_lon"])
+        mapa = namespace["_m8_mapa_unificado"](
+            pontos, [], 750, [], [], None, None,
+            {(-5.089, -42.801): 98.4},
+            exibir_rotulos=False,
+            ponto_pesquisado=(-5.089, -42.801),
+        )
+        self.assertEqual(mapa.location, [-5.089, -42.801])
+        html = mapa.get_root().render()
+        self.assertIn("Ponto pesquisado por coordenadas", html)
+        self.assertIn("Cota da superfície:", html)
+        self.assertIn("98 m", html)
+        self.assertIn("-5.08900000", html)
+        self.assertIn("-42.80100000", html)
+        self.assertNotIn("fitBounds", html)
+
+    def test_busca_coordenadas_e_independente_do_indice_matriculas(self):
+        codigo = source.read_text(encoding="utf-8")
+        self.assertIn('with st.form("m8_busca_coordenadas"):', codigo)
+        self.assertIn('"m8_ponto_pesquisado"] = ponto_encontrado', codigo)
+        self.assertIn('ponto_pesquisado=ponto_pesquisado', codigo)
+        self.assertIn('st.session_state.pop("m8_ponto_pesquisado", None)', codigo)
+        self.assertIn('or ponto_pesquisado is not None:', codigo)
+        self.assertIn('_consultar_proximidade(\n            referencia_ponto, bases, raio', codigo)
 
     def test_toggle_recria_o_mapa_sem_alterar_a_consulta(self):
         raw = source.read_text(encoding="utf-8")
