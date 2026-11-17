@@ -543,28 +543,54 @@ def _painel_novo(coordenadas=None, municipio_padrao=""):
                 st.error(str(exc))
 
 
-def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao=""):
-    """Ficha 🚧: três linhas exatas, sem modificar as fichas de poços."""
+def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao="",
+                       *, modal=False, cidades_disponiveis=()):
+    """Ficha 🚧: três linhas e coordenadas editáveis no cadastro.
+
+    No botão Novo Fechamento, o mesmo formulário abre em janela modal;
+    pelo clique no mapa, continua disponível no painel inferior.
+    """
     novo = registro is None
     registro = registro or {}
     bairro_atual = _texto(registro.get("bairro"))
     titulo = ("🚧 Cadastrar fechamento / reparo de rede" if novo
               else "🚧 Ficha do fechamento / reparo — " + bairro_atual)
-    with st.expander(titulo, expanded=True):
+    # No dialog, evitar expander aninhado e manter a ficha aberta.
+    contexto = st.container() if modal else st.expander(titulo, expanded=True)
+    with contexto:
         if novo:
             lat, lon = coordenadas or (None, None)
         else:
             lat, lon = registro.get("latitude"), registro.get("longitude")
         municipio_reparo = _texto(registro.get("municipio") or municipio_padrao)
-        st.caption(
-            f"Município: {municipio_reparo or 'não selecionado'} · "
-            f"Localização: {float(lat):.7f}, {float(lon):.7f}"
-            if lat is not None and lon is not None else
-            "Localização não definida: selecione um ponto no mapa."
-        )
-        st.button("Fechar ficha 🚧", key="ga_fechar_ficha_reparo",
-                  on_click=_fechar_painel)
-        with st.form("ga_form_fechamento_" + ("novo" if novo else str(registro["id"]))):
+        if modal:
+            st.caption("Preencha a ficha e informe a posição do 🚧 no mapa.")
+            if st.button("Cancelar", key="ga_cancelar_modal_fechamento"):
+                st.rerun()
+        else:
+            if lat is not None and lon is not None:
+                st.caption(
+                    f"Município: {municipio_reparo} · "
+                    f"Localização: {float(lat):.7f}, {float(lon):.7f}"
+                )
+            else:
+                st.caption("Informe latitude e longitude para posicionar o 🚧.")
+            st.button("Fechar ficha 🚧", key="ga_fechar_ficha_reparo",
+                      on_click=_fechar_painel)
+        with st.form("ga_form_fechamento_" + ("novo_modal" if modal else
+                                             "novo" if novo else str(registro["id"]))):
+            if novo and modal:
+                opcoes_municipio = sorted({
+                    str(nome).strip().upper() for nome in cidades_disponiveis
+                    if str(nome).strip() and str(nome).strip().lower() != "todos"
+                } | {"TERESINA"})
+                municipio_reparo = st.selectbox(
+                    "Município", opcoes_municipio,
+                    index=(opcoes_municipio.index(municipio_reparo.upper())
+                           if municipio_reparo.upper() in opcoes_municipio else
+                           opcoes_municipio.index("TERESINA")),
+                    key="ga_municipio_novo_fechamento",
+                )
             # Primeira linha: Líder e Equipe.
             c1, c2 = st.columns(2)
             with c1:
@@ -599,6 +625,25 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao=""):
                     index=codigos.index(atual) if atual in codigos else 0,
                     format_func=lambda codigo: STATUS_FECHAMENTO[codigo][0],
                 )
+            # Campos geográficos extras ao final, sem alterar as três linhas
+            # da ficha operacional. Vazios até o usuário informar a posição;
+            # nunca cadastrar inadvertidamente no centro do mapa.
+            if novo:
+                c1, c2 = st.columns(2)
+                with c1:
+                    latitude_reparo = st.text_input(
+                        "Latitude", value=str(lat) if lat is not None else "",
+                        placeholder="Ex.: -5,0890000", key=(
+                            "ga_fechamento_lat_modal" if modal else
+                            "ga_fechamento_lat_mapa"),
+                    )
+                with c2:
+                    longitude_reparo = st.text_input(
+                        "Longitude", value=str(lon) if lon is not None else "",
+                        placeholder="Ex.: -42,8010000", key=(
+                            "ga_fechamento_lon_modal" if modal else
+                            "ga_fechamento_lon_mapa"),
+                    )
             enviar = st.form_submit_button(
                 "Cadastrar fechamento 🚧" if novo else "Salvar fechamento 🚧",
                 type="primary", use_container_width=True,
@@ -613,7 +658,9 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao=""):
             }
             try:
                 if novo:
-                    salvo = criar_fechamento(campos_reparo, lat, lon)
+                    salvo = criar_fechamento(
+                        campos_reparo, latitude_reparo, longitude_reparo
+                    )
                     acao = "criar"
                 else:
                     salvo = editar_fechamento(
@@ -631,6 +678,16 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao=""):
                 st.rerun()
             except ErroPRISMA as exc:
                 st.error(f"Não foi possível salvar o fechamento: {exc}")
+
+
+@st.dialog("🚧 Novo fechamento / reparo de rede", width="large")
+def _dialogo_novo_fechamento(cidades_disponiveis, municipio_padrao="TERESINA"):
+    """Janela de cadastro diretamente no botão, independente do clique no mapa."""
+    _painel_fechamento(
+        municipio_padrao=municipio_padrao,
+        modal=True,
+        cidades_disponiveis=cidades_disponiveis,
+    )
 
 
 st.title("Gestão de Ativos")
@@ -659,11 +716,18 @@ with col_novo:
     with b_reparo:
         if st.button("🚧 Novo fechamento", use_container_width=True,
                      disabled=not pode_executar_acao("9", "criar")):
-            # O ponto será definido pelo próximo clique em terreno livre no mapa.
+            # Abre formulário completo sem depender de clique prévio no mapa.
             st.session_state["ga_modo_cadastro"] = False
-            st.session_state["ga_modo_fechamento"] = True
-            st.session_state.pop("ga_painel", None)
-            st.rerun()
+            st.session_state["ga_modo_fechamento"] = False
+            municipio_atual = st.session_state.get("ga_municipio_reparo")
+            municipio_padrao_dialogo = (
+                municipio_atual if municipio_atual and municipio_atual != "Todos"
+                else "TERESINA"
+            )
+            _dialogo_novo_fechamento(
+                [*cidades, *cidades_reparos],
+                municipio_padrao=municipio_padrao_dialogo,
+            )
 
 if not HISTORICO_DISPONIVEL:
     st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
