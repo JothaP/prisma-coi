@@ -93,8 +93,10 @@ def _listar(municipio, pesquisa, status):
 
 
 @st.cache_data(ttl=35, show_spinner=False)
-def _listar_reparos(municipio, bairro, pesquisa, status):
-    return listar_fechamentos(municipio, bairro, pesquisa, status)
+def _listar_reparos(municipio, bairro, pesquisa, status, dia):
+    return listar_fechamentos(
+        municipio, bairro, pesquisa, status, data_referencia=dia
+    )
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -577,8 +579,9 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao="",
                 st.caption("Informe latitude e longitude para posicionar o 🚧.")
             st.button("Fechar ficha 🚧", key="ga_fechar_ficha_reparo",
                       on_click=_fechar_painel)
-        with st.form("ga_form_fechamento_" + ("novo_modal" if modal else
-                                             "novo" if novo else str(registro["id"]))):
+        # Sem st.form: a seleção Encerrado precisa atualizar a ficha imediatamente
+        # para apresentar os campos obrigatórios de abertura na própria janela.
+        with st.container():
             if novo and modal:
                 opcoes_municipio = sorted({
                     str(nome).strip().upper() for nome in cidades_disponiveis
@@ -620,11 +623,35 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao="",
             with c2:
                 codigos = list(STATUS_FECHAMENTO)
                 atual = _texto(registro.get("status"))
+                if atual == "concluido":
+                    atual = "encerrado"  # Compatibilidade com registros antigos.
                 status_reparo = st.selectbox(
                     "Status", codigos,
                     index=codigos.index(atual) if atual in codigos else 0,
                     format_func=lambda codigo: STATUS_FECHAMENTO[codigo][0],
                 )
+            # Ao encerrar, mostrar os campos adicionais imediatamente.
+            if status_reparo == "encerrado":
+                st.caption(
+                    "Para marcar como Encerrado, preencha obrigatoriamente a "
+                    "O.S. de abertura e a data da abertura."
+                )
+                c1, c2 = st.columns(2)
+                with c1:
+                    os_abertura_reparo = st.text_input(
+                        "O.S. de abertura",
+                        value=_texto(registro.get("os_abertura")), max_chars=80,
+                    )
+                with c2:
+                    data_abertura_reparo = st.date_input(
+                        "Data da abertura",
+                        value=_data(registro.get("data_abertura")),
+                        format="DD/MM/YYYY",
+                    )
+            else:
+                # Reaberturas preservam os dados já registrados.
+                os_abertura_reparo = _texto(registro.get("os_abertura"))
+                data_abertura_reparo = _data(registro.get("data_abertura"))
             # Campos geográficos extras ao final, sem alterar as três linhas
             # da ficha operacional. Vazios até o usuário informar a posição;
             # nunca cadastrar inadvertidamente no centro do mapa.
@@ -644,7 +671,7 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao="",
                             "ga_fechamento_lon_modal" if modal else
                             "ga_fechamento_lon_mapa"),
                     )
-            enviar = st.form_submit_button(
+            enviar = st.button(
                 "Cadastrar fechamento 🚧" if novo else "Salvar fechamento 🚧",
                 type="primary", use_container_width=True,
                 disabled=not pode_executar_acao("9", "criar" if novo else "editar"),
@@ -655,6 +682,8 @@ def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao="",
                 "matricula": matricula_reparo, "os": os_reparo,
                 "bairro": bairro_reparo, "data": data_reparo,
                 "status": status_reparo, "municipio": municipio_reparo,
+                "os_abertura": os_abertura_reparo,
+                "data_abertura": data_abertura_reparo,
             }
             try:
                 if novo:
@@ -836,7 +865,7 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                 with st.spinner("Consultando poços e fechamentos no Supabase..."):
                     registros_relatorio = listar_fichas_para_relatorio(municipio_relatorio)
                     registros_reparos_relatorio = listar_fechamentos_relatorio(
-                        municipio_relatorio
+                        municipio_relatorio, data_referencia=data_relatorio
                     )
                 linhas_relatorio = preparar_itens_relatorio(
                     registros_relatorio, incluir_operando=incluir_operando
@@ -916,6 +945,7 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                     pd.DataFrame(fichas_revisao.get("fechamentos", []), columns=[
                         "Incluir", "Ordem", "Status do fechamento",
                         "Líder", "Equipe", "Matrícula", "O.S.", "Bairro", "Data",
+                        "O.S. de abertura", "Data da abertura",
                     ]),
                     key=f"ga_relatorio_reparos_{st.session_state.get('ga_relatorio_versao', 0)}",
                     use_container_width=True, hide_index=True,
@@ -935,6 +965,9 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                         "O.S.": st.column_config.TextColumn("O.S."),
                         "Bairro": st.column_config.TextColumn("Bairro"),
                         "Data": st.column_config.TextColumn("Data (AAAA-MM-DD)"),
+                        "O.S. de abertura": st.column_config.TextColumn("O.S. de abertura"),
+                        "Data da abertura": st.column_config.TextColumn(
+                            "Data da abertura (AAAA-MM-DD)"),
                     },
                 )
                 montar_relatorio = st.form_submit_button(
@@ -1003,6 +1036,22 @@ with f3:
                           format_func=lambda s: s if s == "Todos" else STATUS[s])
 with f4:
     mapa_base = st.selectbox("Mapa-base", ["Padrão", "Satélite", "Terreno"])
+
+# O seletor de data dos reparos fica na barra lateral; não filtra os poços.
+with st.sidebar:
+    st.markdown("### 🚧 Fechamentos / reparos")
+    data_fechamentos = st.date_input(
+        "Data dos fechamentos", value=datetime.now(FUSO).date(),
+        format="DD/MM/YYYY", key="ga_data_fechamentos",
+        help="Seleciona os fechamentos conforme a Data informada na ficha."
+    )
+    todas_datas_fechamentos = st.checkbox(
+        "Exibir todas as datas", value=False, key="ga_todas_datas_fechamentos",
+        help="Desativa o filtro diário e permite consultar todos os fechamentos."
+    )
+dia_fechamentos_filtro = (
+    None if todas_datas_fechamentos else data_fechamentos
+)
 
 st.markdown("**Filtros — 🚧 Fechamentos / reparos de rede**")
 cidades_filtragem_reparo = sorted({
@@ -1090,6 +1139,7 @@ try:
         _listar_reparos(
             municipio_reparo_filtro, bairro_reparo_filtro,
             pesquisa_reparo_filtro, status_reparo_filtro,
+            dia_fechamentos_filtro,
         )
         if exibir_reparos else []
     )
@@ -1207,6 +1257,8 @@ for reparo in reparos_visiveis:
         ("Líder", "lider"), ("Equipe", "equipe"),
         ("Matrícula", "matricula"), ("O.S.", "os"),
         ("Bairro", "bairro"), ("Data", "data"),
+        ("O.S. de abertura", "os_abertura"),
+        ("Data da abertura", "data_abertura"),
     )
     popup_reparo = (
         "<div style='min-width:240px;font:13px Segoe UI,Arial,sans-serif'>"
