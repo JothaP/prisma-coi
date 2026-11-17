@@ -83,6 +83,33 @@ class TestFechamentosRede(unittest.TestCase):
         self.assertIn('st.date_input(\n                    "Data"', bloco)
         self.assertIn('"Status", codigos', bloco)
 
+    def test_novo_fechamento_abre_popup_com_coordenadas_sem_clique_no_mapa(self):
+        codigo = PAGINA.read_text(encoding="utf-8")
+        self.assertIn('@st.dialog("🚧 Novo fechamento / reparo de rede"', codigo)
+        self.assertIn('def _dialogo_novo_fechamento(', codigo)
+        self.assertIn('modal=True,', codigo)
+        self.assertIn('st.button("🚧 Novo fechamento"', codigo)
+        self.assertIn('_dialogo_novo_fechamento(\n                [*cidades, *cidades_reparos]', codigo)
+        self.assertIn('latitude_reparo = st.text_input(', codigo)
+        self.assertIn('longitude_reparo = st.text_input(', codigo)
+        self.assertIn('salvo = criar_fechamento(\n                        campos_reparo, latitude_reparo, longitude_reparo', codigo)
+        self.assertIn('ga_fechamento_lat_modal', codigo)
+        self.assertIn('ga_fechamento_lon_modal', codigo)
+        self.assertIn('st.session_state["ga_modo_fechamento"] = False', codigo)
+        # O cadastro por clique também continua disponível como alternativa.
+        self.assertIn('elif painel.get("tipo") == "novo_fechamento":', codigo)
+
+    def test_coordenadas_digitadas_com_virgula_ou_ponto(self):
+        self.assertEqual(
+            self.ctx["_coordenadas"]("-5,0890000", "-42,8010000"),
+            (-5.089, -42.801),
+        )
+        self.assertEqual(self.ctx["_coordenadas"]("-5.09", "-42.80"), (-5.09, -42.8))
+        for latitude, longitude in (("", ""), ("-5,08", ""), ("", "-42,8")):
+            with self.subTest(latitude=latitude, longitude=longitude):
+                with self.assertRaises(self.ctx["ErroPRISMA"]):
+                    self.ctx["_coordenadas"](latitude, longitude)
+
     def test_marcador_filtros_e_edicao_independentes_dos_pocos(self):
         pagina = PAGINA.read_text(encoding="utf-8")
         self.assertIn("🚧 FECHAMENTOS / REPAROS DE REDE", (
