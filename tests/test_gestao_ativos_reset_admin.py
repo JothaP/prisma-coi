@@ -101,7 +101,9 @@ class TestGestaoAtivosResetAdmin(unittest.TestCase):
     def test_interface_apenas_para_admin_e_com_confirmacao_dupla(self):
         codigo = PAGE.read_text(encoding="utf-8")
         self.assertIn('if st.session_state.get("perfil") == "admin":', codigo)
-        self.assertIn('st.expander("Administração — Resetar dados das fichas e histórico"', codigo)
+        self.assertIn('@st.dialog("⚙️ Administração — Gestão de Campo"', codigo)
+        self.assertIn('st.button("⚙️ Administração"', codigo)
+        self.assertIn('def _dialogo_administracao():', codigo)
         self.assertIn('with st.form("ga_confirmacao_reset_geral"):', codigo)
         self.assertIn("aceite_reset = st.checkbox(", codigo)
         self.assertIn('frase_reset != CONFIRMACAO_RESET_ATIVOS', codigo)
