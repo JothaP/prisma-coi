@@ -123,7 +123,8 @@ class TestFechamentosRede(unittest.TestCase):
         self.assertIn("modo_fechamento", pagina)
         self.assertIn("if novo_click and achado_reparo:", pagina)
         self.assertIn('elif painel.get("tipo") == "fechamento"', pagina)
-        self.assertIn("criar_fechamento(campos_reparo, lat, lon)", pagina)
+        self.assertIn("salvo = criar_fechamento(", pagina)
+        self.assertIn("campos_reparo, latitude_reparo, longitude_reparo", pagina)
         self.assertIn("editar_fechamento(", pagina)
 
     def test_campos_e_coordenadas_validos(self):
