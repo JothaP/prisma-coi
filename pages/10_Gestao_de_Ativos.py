@@ -42,6 +42,7 @@ STATUS = {
     "operando": "Operando",
     "parado": "Parado",
     "em_manutencao": "Em manutenção",
+    "em_observacao": "Em Observação",
     "inativo": "Inativo",
     "validar": "Validar",
 }
@@ -50,6 +51,7 @@ CORES_STATUS = {
     "operando": "#2563EB",       # Azul
     "parado": "#EF4444",         # Vermelho
     "em_manutencao": "#FACC15",  # Amarelo
+    "em_observacao": "#9333EA",  # Roxo
     "inativo": "#111111",        # Preto
     "validar": "#D1D5DB",        # Cinza claro
     "": "#94A3B8",               # Sem status: cinza claro
@@ -365,7 +367,7 @@ class PonteStatusFolium(MacroElement):
             if (msg) msg.textContent = "O status selecionado já é o atual.";
             return;
         }
-        if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) {
+        if (["operando","parado","em_manutencao","em_observacao","inativo","validar"].indexOf(radio.value) < 0) {
             if (msg) msg.textContent = "Status inválido.";
             return;
         }
@@ -740,7 +742,7 @@ if resultado:
     tooltip = str(resultado.get("last_object_clicked_tooltip") or "")
     evento_marcador = (clicks, tooltip)
     sinal_status = re.fullmatch(
-        r"PRISMA_STATUS=([0-9a-fA-F-]{36})\|(operando|parado|em_manutencao|inativo|validar)"
+        r"PRISMA_STATUS=([0-9a-fA-F-]{36})\|(operando|parado|em_manutencao|em_observacao|inativo|validar)"
         r"\|([0-9]{10,16}_[a-z0-9]{4,12})",
         tooltip,
     )
