@@ -43,7 +43,7 @@ from gestao_ativos_fechamentos import (
 from prisma_backend import ErroPRISMA
 
 st.set_page_config(
-    page_title="Gestão de Ativos | PRISMA", page_icon="🚰",
+    page_title="Gestão de Campo | PRISMA", page_icon="🚧",
     layout="wide", initial_sidebar_state="expanded",
 )
 exigir_acesso_modulo("9")
@@ -719,12 +719,67 @@ def _dialogo_novo_fechamento(cidades_disponiveis, municipio_padrao="TERESINA"):
     )
 
 
-st.title("Gestão de Ativos")
-st.caption("PRISMA · Cadastro operacional georreferenciado no Supabase")
-col_voltar, col_novo = st.columns([3, 2])
-with col_voltar:
-    if st.button("← Menu principal", key="ga_voltar"):
-        st.switch_page("app.py")
+@st.dialog("⚙️ Administração — Gestão de Campo", width="large")
+def _dialogo_administracao():
+    """Controles administrativos isolados da área operacional principal."""
+    if st.session_state.get("perfil") != "admin":
+        st.error("Acesso exclusivo à administração.")
+        return
+    st.warning(
+        "Esta operação atua em TODOS os ativos do módulo. Remove o status, "
+        "as últimas O.S. de Operação e Eletromecânica, suas datas, "
+        "o Protocolo Equatorial e a data, as observações e o histórico "
+        "das fichas. Preserva todos os ativos, suas plantas, nomes, "
+        "matrículas, municípios, coordenadas e dados cadastrais de origem. "
+        "O registro de auditoria administrativa do reset será preservado. "
+        "A exclusão do histórico não pode ser desfeita pela interface."
+    )
+    with st.form("ga_confirmacao_reset_geral"):
+        st.caption(
+            "Confirme que deseja limpar todas as fichas e o histórico "
+            "do módulo. Digite exatamente:"
+        )
+        st.code(CONFIRMACAO_RESET_ATIVOS)
+        frase_reset = st.text_input(
+            "Frase de confirmação",
+            value="",
+            key="ga_frase_reset_geral",
+            placeholder=CONFIRMACAO_RESET_ATIVOS,
+        )
+        aceite_reset = st.checkbox(
+            "Estou ciente de que os dados operacionais e o histórico "
+            "serão apagados de todos os ativos."
+        )
+        enviar_reset = st.form_submit_button(
+            "Resetar fichas e histórico",
+            type="secondary",
+            disabled=not HISTORICO_DISPONIVEL
+            or not pode_executar_acao("9", "excluir"),
+        )
+    if enviar_reset:
+        if not aceite_reset or frase_reset != CONFIRMACAO_RESET_ATIVOS:
+            st.error("Marque a confirmação e digite a frase exatamente como apresentada.")
+        else:
+            try:
+                with st.spinner("Limpando as fichas e o histórico com auditoria..."):
+                    resumo_reset = resetar_fichas_e_historico(frase_reset)
+                _limpar_cache()
+                st.session_state.pop("ga_painel", None)
+                st.session_state.pop("ga_ultimo_status_processado", None)
+                st.session_state.pop("ga_evento_marcador_processado", None)
+                st.session_state["ga_mensagem"] = (
+                    f"Reset concluído: {resumo_reset['ativos_preservados']} ativos "
+                    f"preservados, {resumo_reset['fichas_limpas']} fichas limpas e "
+                    f"{resumo_reset['historicos_excluidos']} registros do histórico "
+                    "apagados. Auditoria administrativa registrada."
+                )
+                st.rerun()
+            except ErroPRISMA as exc:
+                st.error(f"Reset não realizado: {exc}")
+
+
+st.title("Gestão de Campo")
+st.caption("PRISMA · Poços, fechamentos e reparos de rede")
 
 try:
     HISTORICO_DISPONIVEL = validar_historico()
@@ -734,91 +789,44 @@ except ErroPRISMA as exc:
     st.error(f"Não foi possível acessar o cadastro de ativos: {exc}")
     st.stop()
 
-with col_novo:
-    b_poco, b_reparo = st.columns(2)
-    with b_poco:
-        if st.button("＋ Novo poço", use_container_width=True,
-                     disabled=not pode_executar_acao("9", "criar") or not HISTORICO_DISPONIVEL):
-            st.session_state["ga_painel"] = {
-                "tipo": "novo", "coordenadas": None, "municipio_padrao": "TERESINA",
-            }
-    with b_reparo:
-        if st.button("🚧 Novo fechamento", use_container_width=True,
-                     disabled=not pode_executar_acao("9", "criar")):
-            # Cada novo cadastro começa sem coordenadas herdadas do último.
-            st.session_state.pop("ga_fechamento_lat_modal", None)
-            st.session_state.pop("ga_fechamento_lon_modal", None)
-            # Abre formulário completo sem depender de clique prévio no mapa.
-            st.session_state["ga_modo_cadastro"] = False
-            st.session_state["ga_modo_fechamento"] = False
-            municipio_atual = st.session_state.get("ga_municipio_reparo")
-            municipio_padrao_dialogo = (
-                municipio_atual if municipio_atual and municipio_atual != "Todos"
-                else "TERESINA"
-            )
-            _dialogo_novo_fechamento(
-                [*cidades, *cidades_reparos],
-                municipio_padrao=municipio_padrao_dialogo,
-            )
+with st.sidebar:
+    st.markdown("### Gestão de Campo")
+    if st.button("← Retornar ao Menu Principal", key="ga_voltar",
+                 use_container_width=True):
+        st.switch_page("app.py")
+    st.divider()
+    st.markdown("**Cadastros**")
+    if st.button("＋ Novo Poço", key="ga_novo_poco", use_container_width=True,
+                 disabled=not pode_executar_acao("9", "criar") or not HISTORICO_DISPONIVEL):
+        st.session_state["ga_painel"] = {
+            "tipo": "novo", "coordenadas": None, "municipio_padrao": "TERESINA",
+        }
+    if st.button("🚧 Novo Fechamento", key="ga_novo_fechamento",
+                 use_container_width=True,
+                 disabled=not pode_executar_acao("9", "criar")):
+        # Sempre iniciar novo cadastro sem reutilizar coordenadas anteriores.
+        st.session_state.pop("ga_fechamento_lat_modal", None)
+        st.session_state.pop("ga_fechamento_lon_modal", None)
+        st.session_state["ga_modo_cadastro"] = False
+        st.session_state["ga_modo_fechamento"] = False
+        municipio_atual = st.session_state.get("ga_municipio_reparo")
+        municipio_padrao_dialogo = (
+            municipio_atual if municipio_atual and municipio_atual != "Todos"
+            else "TERESINA"
+        )
+        _dialogo_novo_fechamento(
+            [*cidades, *cidades_reparos],
+            municipio_padrao=municipio_padrao_dialogo,
+        )
+    if st.session_state.get("perfil") == "admin":
+        st.divider()
+        if st.button("⚙️ Administração", key="ga_admin",
+                     use_container_width=True):
+            _dialogo_administracao()
+    st.divider()
 
 if not HISTORICO_DISPONIVEL:
     st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
-
-# Recurso administrativo do Módulo 9: não aparece para usuários ou operadores.
-# A validação de admin e permissão também ocorre no backend e dentro do banco.
-if st.session_state.get("perfil") == "admin":
-    with st.expander("Administração — Resetar dados das fichas e histórico", expanded=False):
-        st.warning(
-            "Esta operação atua em TODOS os ativos do módulo. Remove o status, "
-            "as últimas O.S. de Operação e Eletromecânica, suas datas, "
-            "o Protocolo Equatorial e a data, as observações e o histórico "
-            "das fichas. Preserva todos os ativos, suas plantas, nomes, "
-            "matrículas, municípios, coordenadas e dados cadastrais de origem. "
-            "O registro de auditoria administrativa do reset será preservado. "
-            "A exclusão do histórico não pode ser desfeita pela interface."
-        )
-        with st.form("ga_confirmacao_reset_geral"):
-            st.caption(
-                "Confirme que deseja limpar todas as fichas e o histórico "
-                "do módulo. Digite exatamente:"
-            )
-            st.code(CONFIRMACAO_RESET_ATIVOS)
-            frase_reset = st.text_input(
-                "Frase de confirmação",
-                value="",
-                key="ga_frase_reset_geral",
-                placeholder=CONFIRMACAO_RESET_ATIVOS,
-            )
-            aceite_reset = st.checkbox(
-                "Estou ciente de que os dados operacionais e o histórico "
-                "serão apagados de todos os ativos."
-            )
-            enviar_reset = st.form_submit_button(
-                "Resetar fichas e histórico",
-                type="secondary",
-                disabled=not HISTORICO_DISPONIVEL
-                or not pode_executar_acao("9", "excluir"),
-            )
-        if enviar_reset:
-            if not aceite_reset or frase_reset != CONFIRMACAO_RESET_ATIVOS:
-                st.error("Marque a confirmação e digite a frase exatamente como apresentada.")
-            else:
-                try:
-                    with st.spinner("Limpando as fichas e o histórico com auditoria..."):
-                        resumo_reset = resetar_fichas_e_historico(frase_reset)
-                    _limpar_cache()
-                    st.session_state.pop("ga_painel", None)
-                    st.session_state.pop("ga_ultimo_status_processado", None)
-                    st.session_state.pop("ga_evento_marcador_processado", None)
-                    st.session_state["ga_mensagem"] = (
-                        f"Reset concluído: {resumo_reset['ativos_preservados']} ativos "
-                        f"preservados, {resumo_reset['fichas_limpas']} fichas limpas e "
-                        f"{resumo_reset['historicos_excluidos']} registros do histórico "
-                        "apagados. Auditoria administrativa registrada."
-                    )
-                    st.rerun()
-                except ErroPRISMA as exc:
-                    st.error(f"Reset não realizado: {exc}")
 
 # Consulta apenas leitura e revisão em memória. Nenhuma classificação
 # automática dos status e nenhuma gravação em prisma_ativos.
