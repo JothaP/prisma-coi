@@ -165,10 +165,10 @@ class TestFechamentosRede(unittest.TestCase):
             "TERESINA", date(2026, 11, 17)
         )
         self.assertIn(
-            "and(data.lte.2026-11-17", self.chamadas[-1][1]["params"]["and"]
+            "status.in.(em_andamento,pendente),data.lte.2026-11-17", self.chamadas[-1][1]["params"]["and"]
         )
         self.assertIn(
-            "and(data.eq.2026-11-17", self.chamadas[-1][1]["params"]["and"]
+            "status.in.(cancelado,concluido,encerrado),data.eq.2026-11-17", self.chamadas[-1][1]["params"]["and"]
         )
 
     def test_formulario_encerrado_exibe_campos_condicionais(self):
