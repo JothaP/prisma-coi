@@ -71,7 +71,7 @@ class TestFechamentosRede(unittest.TestCase):
     def test_formulario_tres_linhas_na_ordem_solicitada(self):
         codigo = PAGINA.read_text(encoding="utf-8")
         inicio = codigo.index("def _painel_fechamento(")
-        fim = codigo.index('st.title("Gestão de Ativos")', inicio)
+        fim = codigo.index('st.title("Gestão de Campo")', inicio)
         bloco = codigo[inicio:fim]
         pos = [bloco.index(f'"{campo}"') for campo in
                ("Líder", "Equipe", "Matrícula", "O.S.", "Bairro")]
@@ -88,7 +88,7 @@ class TestFechamentosRede(unittest.TestCase):
         self.assertIn('@st.dialog("🚧 Novo fechamento / reparo de rede"', codigo)
         self.assertIn('def _dialogo_novo_fechamento(', codigo)
         self.assertIn('modal=True,', codigo)
-        self.assertIn('st.button("🚧 Novo fechamento"', codigo)
+        self.assertIn('st.button("🚧 Novo Fechamento"', codigo)
         self.assertIn('_dialogo_novo_fechamento(\n                [*cidades, *cidades_reparos]', codigo)
         self.assertIn('latitude_reparo = st.text_input(', codigo)
         self.assertIn('longitude_reparo = st.text_input(', codigo)
