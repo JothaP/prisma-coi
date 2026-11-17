@@ -44,7 +44,7 @@ from prisma_backend import ErroPRISMA
 
 st.set_page_config(
     page_title="Gestão de Ativos | PRISMA", page_icon="🚰",
-    layout="wide", initial_sidebar_state="collapsed",
+    layout="wide", initial_sidebar_state="expanded",
 )
 exigir_acesso_modulo("9")
 
