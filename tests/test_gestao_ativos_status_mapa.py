@@ -193,11 +193,11 @@ class TestGestaoAtivosStatusMapa(unittest.TestCase):
             and isinstance(no.func.value, ast.Name)
             and no.func.value.id == "folium"
         ]
-        self.assertEqual(len(popups), 1)
-        self.assertFalse(
-            any(chave.arg == "show" for chave in popups[0].keywords),
-            "Popup com show dinâmico reinicia iframe no clique do marcador",
-        )
+        self.assertEqual(len(popups), 2)  # poço + fechamento 🚧
+        self.assertTrue(all(
+            all(chave.arg != "show" for chave in popup.keywords)
+            for popup in popups
+        ), "Popup com show dinâmico reinicia iframe no clique do marcador")
         self.assertIn('_status_popup_html(registro, pode_editar_status)', trecho_mapa)
         # A recriação intencional permanece reservada à gravação confirmada.
         self.assertIn('st.session_state["ga_versao_mapa"] = ', fonte)
