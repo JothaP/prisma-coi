@@ -997,7 +997,8 @@ st.caption(
 )
 
 coordenadas = [
-    (float(r["latitude"]), float(r["longitude"])) for r in ativos
+    (float(r["latitude"]), float(r["longitude"]))
+    for r in [*ativos, *reparos_visiveis]
     if r.get("latitude") is not None and r.get("longitude") is not None
 ]
 centro = [-5.09, -42.80]
@@ -1074,6 +1075,55 @@ for registro in ativos:
             ),
         ).add_to(mapa)
 
+# Marcadores 🚧 ficam em cadastro e filtros próprios, sem tocar nas fichas
+# e nas cores dos poços. O aro do ícone segue o status do fechamento.
+for reparo in reparos_visiveis:
+    if reparo.get("latitude") is None or reparo.get("longitude") is None:
+        continue
+    lat, lon = float(reparo["latitude"]), float(reparo["longitude"])
+    codigo_reparo = str(reparo.get("status") or "")
+    rotulo_status, cor_reparo, _ = STATUS_FECHAMENTO.get(
+        codigo_reparo, ("Não informado", "#94A3B8", "⚪")
+    )
+    bairro_reparo = escape(_texto(reparo.get("bairro")))
+    tooltip_reparo = (
+        f"<span style='display:none'>PRISMA_FECHAMENTO={reparo['id']}</span>"
+        f"🚧 <b>Fechamento / reparo</b> · {bairro_reparo}"
+        f"<br><b>Status:</b> {escape(rotulo_status)}"
+    )
+    detalhes_reparo = (
+        ("Líder", "lider"), ("Equipe", "equipe"),
+        ("Matrícula", "matricula"), ("O.S.", "os"),
+        ("Bairro", "bairro"), ("Data", "data"),
+    )
+    popup_reparo = (
+        "<div style='min-width:240px;font:13px Segoe UI,Arial,sans-serif'>"
+        "<b>🚧 Fechamento / reparo de rede</b><hr>"
+        + "".join(
+            f"<div><b>{titulo}:</b> {escape(_texto(reparo.get(campo)) or '—')}</div>"
+            for titulo, campo in detalhes_reparo
+        )
+        + f"<div><b>Status:</b> {escape(rotulo_status)}</div>"
+        + "<small>Para editar, consulte a ficha abaixo do mapa.</small></div>"
+    )
+    folium.Marker(
+        [lat, lon],
+        tooltip=folium.Tooltip(tooltip_reparo, sticky=True),
+        popup=folium.Popup(popup_reparo, max_width=390),
+        icon=folium.DivIcon(
+            html=(
+                "<div style='width:39px;height:39px;display:flex;"
+                "align-items:center;justify-content:center;font-size:23px;"
+                "border-radius:50%;background:#fff;border:3px solid "
+                + cor_reparo
+                + ";box-shadow:0 2px 7px #0005'>🚧</div>"
+            ),
+            icon_size=(45, 45), icon_anchor=(22, 22),
+            class_name="ga-icone-fechamento",
+        ),
+        z_index_offset=400,
+    ).add_to(mapa)
+
 if len(coordenadas) > 1:
     mapa.fit_bounds(coordenadas, padding=(30, 30), max_zoom=14)
 
@@ -1124,25 +1174,38 @@ if resultado:
             st.rerun()
     else:
         achado = re.search(r"PRISMA_ID=([0-9a-fA-F-]{36})", tooltip)
-        selecionou_ativo = bool(
-            clicks > 0 and achado
+        achado_reparo = re.search(
+            r"PRISMA_FECHAMENTO=([0-9a-fA-F-]{36})", tooltip
+        )
+        novo_click = (
+            clicks > 0
             and evento_marcador != st.session_state.get("ga_evento_marcador_processado")
         )
-        if selecionou_ativo:
+        if novo_click and achado_reparo:
+            st.session_state["ga_evento_marcador_processado"] = evento_marcador
+            st.session_state["ga_painel"] = {
+                "tipo": "fechamento", "id": achado_reparo.group(1),
+            }
+        elif novo_click and achado:
             st.session_state["ga_evento_marcador_processado"] = evento_marcador
             st.session_state["ga_painel"] = {"tipo": "ficha", "id": achado.group(1)}
-        elif modo_cadastro and (ponto := resultado.get("last_clicked")):
+        elif (modo_cadastro or modo_fechamento) and (ponto := resultado.get("last_clicked")):
             lat, lon = ponto.get("lat"), ponto.get("lng")
             if lat is not None and lon is not None:
-                chave = (round(float(lat), 7), round(float(lon), 7))
+                tipo_novo = "novo_fechamento" if modo_fechamento else "novo"
+                chave = (tipo_novo, round(float(lat), 7), round(float(lon), 7))
                 if chave != st.session_state.get("ga_terreno_processado"):
                     st.session_state["ga_terreno_processado"] = chave
                     st.session_state["ga_painel"] = {
-                        "tipo": "novo", "coordenadas": (lat, lon),
-                        "municipio_padrao": municipio if municipio != "Todos" else "",
+                        "tipo": tipo_novo, "coordenadas": (lat, lon),
+                        "municipio_padrao": (
+                            municipio_reparo_filtro
+                            if modo_fechamento else
+                            municipio if municipio != "Todos" else ""
+                        ),
                     }
 
-if not modo_cadastro:
+if not modo_cadastro and not modo_fechamento:
     st.session_state.pop("ga_terreno_processado", None)
 
 # O painel fica abaixo do mapa; navegação, formulários e histórico permanecem
@@ -1163,5 +1226,20 @@ elif painel.get("tipo") == "novo":
         coordenadas=painel.get("coordenadas"),
         municipio_padrao=painel.get("municipio_padrao", ""),
     )
+elif painel.get("tipo") == "fechamento" and painel.get("id"):
+    try:
+        fechamento_selecionado = obter_fechamento(painel["id"])
+    except ErroPRISMA as exc:
+        st.error(f"Não foi possível abrir o fechamento: {exc}")
+        fechamento_selecionado = None
+    if fechamento_selecionado:
+        _painel_fechamento(fechamento_selecionado)
+    else:
+        st.warning("Fechamento não encontrado. Selecione outro marcador 🚧.")
+elif painel.get("tipo") == "novo_fechamento":
+    _painel_fechamento(
+        coordenadas=painel.get("coordenadas"),
+        municipio_padrao=painel.get("municipio_padrao", ""),
+    )
 else:
-    st.caption("Selecione um marcador de poço para consultar ou editar sua ficha abaixo do mapa.")
+    st.caption("Selecione um marcador de poço ou 🚧 para consultar a ficha abaixo do mapa.")
