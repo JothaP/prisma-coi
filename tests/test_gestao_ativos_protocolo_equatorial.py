@@ -17,12 +17,12 @@ def _backend_sem_banco():
     nos = [
         no for no in arvore.body
         if (isinstance(no, ast.Assign)
-            and any(isinstance(dest, ast.Name) and dest.id == "CAMPOS_EDITAVEIS"
+            and any(isinstance(dest, ast.Name) and dest.id in {"CAMPOS_EDITAVEIS", "STATUS"}
                     for dest in no.targets))
         or (isinstance(no, ast.FunctionDef) and no.name == "_validar_campos")
     ]
-    if len(nos) != 2:
-        raise AssertionError("Não foi possível isolar CAMPOS_EDITAVEIS e _validar_campos")
+    if len(nos) != 3:
+        raise AssertionError("Não foi possível isolar CAMPOS_EDITAVEIS, STATUS e _validar_campos")
     codigo = compile(ast.fix_missing_locations(ast.Module(body=nos, type_ignores=[])),
                      str(BACKEND), "exec")
     contexto = {"ErroPRISMA": ValueError}
