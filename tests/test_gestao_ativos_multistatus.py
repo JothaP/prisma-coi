@@ -22,9 +22,14 @@ def montar_backend(caminho, nome_funcao, nomes_constantes):
         if ((isinstance(item, ast.Assign) and any(
             isinstance(alvo, ast.Name) and alvo.id in nomes_constantes
             for alvo in item.targets))
-            or (isinstance(item, ast.FunctionDef) and item.name == nome_funcao))
+            or (isinstance(item, ast.FunctionDef) and (
+                item.name == nome_funcao or
+                (nome_funcao == "listar_fechamentos"
+                 and item.name == "_filtros_continuidade"))))
     ]
-    assert len(partes) == len(nomes_constantes) + 1
+    assert len(partes) == len(nomes_constantes) + (
+        2 if nome_funcao == "listar_fechamentos" else 1
+    )
     class ErroPRISMA(Exception):
         pass
     chamadas = []
@@ -91,7 +96,7 @@ class TestFiltrosMultisselecao(unittest.TestCase):
             argumentos["params"]["status"], "in.(em_andamento,pendente)"
         )
         self.assertEqual(argumentos["params"]["bairro"], "ilike.*Centro*")
-        self.assertEqual(argumentos["params"]["data"], "eq.2026-11-17")
+        self.assertEqual(argumentos["params"]["data"], "lte.2026-11-17")
 
     def test_fechamentos_encerrado_inclui_legado(self):
         self.rede["listar_fechamentos"](
