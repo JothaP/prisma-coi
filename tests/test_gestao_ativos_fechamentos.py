@@ -110,6 +110,74 @@ class TestFechamentosRede(unittest.TestCase):
                 with self.assertRaises(self.ctx["ErroPRISMA"]):
                     self.ctx["_coordenadas"](latitude, longitude)
 
+    def test_encerrar_exige_os_e_data_abertura_sem_gravacao_parcial(self):
+        encerrado = {**self.dados, "status": "encerrado"}
+        for dados_invalidos in (
+            encerrado,
+            {**encerrado, "os_abertura": "900123456"},
+            {**encerrado, "data_abertura": date(2026, 11, 17)},
+        ):
+            with self.subTest(dados=dados_invalidos):
+                with self.assertRaisesRegex(
+                    self.ctx["ErroPRISMA"], "O.S. de abertura"
+                ):
+                    self.ctx["_campos"](dados_invalidos)
+        self.assertEqual(self.chamadas, [])
+        dados = {
+            **encerrado, "os_abertura": "000900123456",
+            "data_abertura": date(2026, 11, 17),
+        }
+        normalizados = self.ctx["_campos"](dados)
+        self.assertEqual(normalizados["status"], "encerrado")
+        self.assertEqual(normalizados["os_abertura"], "000900123456")
+        self.assertEqual(normalizados["data_abertura"], "2026-11-17")
+        self.ctx["editar_fechamento"](
+            "12345678-1234-1234-1234-123456789012",
+            dados, "2026-11-17T12:00:00Z",
+        )
+        ultimo = self.chamadas[-1][1]
+        self.assertEqual(ultimo["method"], "PATCH")
+        self.assertEqual(ultimo["payload"]["os_abertura"], "000900123456")
+        self.assertEqual(ultimo["payload"]["data_abertura"], "2026-11-17")
+
+    def test_data_sidebar_filtra_apenas_os_fechamentos(self):
+        pagina = PAGINA.read_text(encoding="utf-8")
+        self.assertIn('with st.sidebar:', pagina)
+        self.assertIn('"Data dos fechamentos"', pagina)
+        self.assertIn('"Exibir todas as datas"', pagina)
+        self.assertIn('data_referencia=dia', pagina)
+        self.assertIn('dia_fechamentos_filtro,', pagina)
+        self.assertIn('data_referencia=data_relatorio', pagina)
+        self.ctx["listar_fechamentos"](
+            "TERESINA", "", "", "Todos", date(2026, 11, 17)
+        )
+        nome, op = self.chamadas[-1]
+        self.assertEqual(nome, "prisma_fechamentos_rede")
+        self.assertEqual(op["params"]["data"], "eq.2026-11-17")
+        self.ctx["listar_fechamentos"]("TERESINA", "", "", "Todos", None)
+        self.assertNotIn("data", self.chamadas[-1][1]["params"])
+        self.ctx["listar_fechamentos_relatorio"](
+            "TERESINA", date(2026, 11, 17)
+        )
+        self.assertEqual(
+            self.chamadas[-1][1]["params"]["data"], "eq.2026-11-17"
+        )
+
+    def test_formulario_encerrado_exibe_campos_condicionais(self):
+        pagina = PAGINA.read_text(encoding="utf-8")
+        inicio = pagina.index("def _painel_fechamento(")
+        fim = pagina.index('@st.dialog("🚧 Novo fechamento', inicio)
+        ficha = pagina[inicio:fim]
+        self.assertIn('if status_reparo == "encerrado":', ficha)
+        self.assertIn('"O.S. de abertura"', ficha)
+        self.assertIn('"Data da abertura"', ficha)
+        self.assertIn('os_abertura_reparo = st.text_input(', ficha)
+        self.assertIn('data_abertura_reparo = st.date_input(', ficha)
+        self.assertIn('"os_abertura": os_abertura_reparo', ficha)
+        self.assertIn('"data_abertura": data_abertura_reparo', ficha)
+        self.assertNotIn('with st.form("ga_form_fechamento_', ficha)
+        self.assertIn('enviar = st.button(', ficha)
+
     def test_marcador_filtros_e_edicao_independentes_dos_pocos(self):
         pagina = PAGINA.read_text(encoding="utf-8")
         self.assertIn("🚧 FECHAMENTOS / REPAROS DE REDE", (
@@ -189,7 +257,8 @@ class TestFechamentosRede(unittest.TestCase):
             {**self.dados, "data": "2026-11-17"},
             {**self.dados, "bairro": "Centro", "status": "pendente",
              "os": "000900001111"},
-            {**self.dados, "status": "concluido", "bairro": "Sul"},
+            {**self.dados, "status": "encerrado", "bairro": "Sul",
+             "os_abertura": "000900200300", "data_abertura": "2026-11-17"},
         ])
         self.assertEqual(len(itens), 3)
         self.assertTrue(itens[0]["Incluir"])
@@ -209,6 +278,13 @@ class TestFechamentosRede(unittest.TestCase):
         self.assertIn("O.S.: 000900400885", texto)
         self.assertIn("Data: 17/11/2026", texto)
         self.assertNotIn("Bairro: Sul", texto)
+        itens[2]["Incluir"] = True
+        texto_encerrado = gerar_pontos_atencao(
+            "Teresina", date(2026, 11, 17), [], fechamentos=itens
+        )
+        self.assertIn("🟢 Encerrado:", texto_encerrado)
+        self.assertIn("O.S. de abertura: 000900200300", texto_encerrado)
+        self.assertIn("Data da abertura: 17/11/2026", texto_encerrado)
         self.assertNotIn("OBSERVAÇÕES POÇOS:", texto)
 
     def test_sintaxe(self):
