@@ -32,7 +32,7 @@ from gestao_ativos_backend import (
 )
 from gestao_ativos_relatorio import (
     SECOES as SECOES_RELATORIO, SITUACOES as SITUACOES_RELATORIO,
-    gerar_pontos_atencao, preparar_itens_relatorio,
+    STATUS_RELATORIO, gerar_pontos_atencao, preparar_itens_relatorio,
 )
 from prisma_backend import ErroPRISMA
 
@@ -595,9 +595,10 @@ if st.session_state.get("perfil") == "admin":
 # automática dos status e nenhuma gravação em prisma_ativos.
 with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False):
     st.caption(
-        "Modelo de relatório operacional para copiar ou baixar como texto. "
-        "As situações Pendente / Em andamento e as seções são escolhas "
-        "independentes do status cadastrado no PRISMA."
+        "Relatório dividido pelo status registrado na ficha: cada grupo e "
+        "marcador utilizam a cor correspondente no mapa. Situação (Pendente / "
+        "Em andamento) permanece um campo independente e não altera o status "
+        "cadastrado. As edições feitas aqui valem apenas para o relatório."
     )
     cidades_relatorio = sorted(
         {str(c).strip().upper() for c in cidades if str(c).strip()}
@@ -662,10 +663,11 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
         elif fichas_revisao and fichas_revisao["itens"]:
             st.caption(
                 f"{len(fichas_revisao['itens'])} ficha(s) disponível(is). "
-                "Revise a descrição e a O.S., selecione a seção e a situação, "
-                "e desmarque os itens que não devem aparecer. "
-                "É possível incluir linhas manuais (por exemplo, dois poços "
-                "referenciados por uma mesma planta), sem modificar o cadastro."
+                "Revise a descrição, a O.S. e o status usado para agrupar "
+                "o relatório. A cor de cada marcador acompanha esse status. "
+                "Desmarque os itens que não devem aparecer ou inclua linhas manuais "
+                "(por exemplo, dois poços de uma mesma planta). "
+                "Nenhuma alteração nesta tabela modifica a ficha do ativo."
             )
             with st.form("ga_relatorio_editor_form"):
                 dados_editor = st.data_editor(
@@ -678,6 +680,12 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                         "Incluir": st.column_config.CheckboxColumn("Incluir"),
                         "Ordem": st.column_config.NumberColumn(
                             "Posição", min_value=0, step=1, format="%d"),
+                        "Status no relatório": st.column_config.SelectboxColumn(
+                            "Grupo por status",
+                            options=list(STATUS_RELATORIO), required=True,
+                            help="Preenchido com o status da ficha. Ajustes manuais "
+                                 "aqui não alteram o cadastro nem o mapa."
+                        ),
                         "Seção": st.column_config.SelectboxColumn(
                             "Seção", options=list(SECOES_RELATORIO), required=True),
                         "Situação": st.column_config.SelectboxColumn(
