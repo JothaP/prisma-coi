@@ -53,11 +53,23 @@ from farol_graficos_temporarios import (
     data_hoje as dia_graficos, indice_do_dia, salvar_grafico, excluir_grafico,
     chave_logger, rotulo_logger, filtrar_loggers,
 )
-from integracao_acompanhamento_producao import (chave_concentracao, localizar_vinculo, listar_vinculos, dados_acompanhamento, historico_evento, texto_pdf, sugerir_recuperacoes, recuperar_vinculo_confirmado, identificar_continuidades_automaticas, continuar_vinculo_automaticamente)
+from integracao_acompanhamento_producao import (
+    chave_concentracao, localizar_vinculo, listar_vinculos,
+    dados_acompanhamento, historico_evento, texto_pdf,
+)
 from farol_acomp_supabase_backend import fonte_supabase
+from farol_ocorrencias_persistentes import resumir_eventos_concentracoes
+from farol_vinculos_os_manuais import (
+    listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
+    vincular_os_manual, desfazer_vinculo_os_manual,
+    aplicar_vinculos_manuais, normalizar_os, eventos_manuais_do_grupo,
+)
+from farol_mesclagem_operacional import chave_evento as chave_evento_persistente
+from farol_regionais_api import (
+    PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
+    mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
+)
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
-
-
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
@@ -113,6 +125,7 @@ NOME_ABA_CONTROLE = "CONTROLE_FAROL"
 NOME_ABA_OBSERVACOES = "OBS_CONCENTRACOES"
 NOME_ABA_AREAS_PROTEGIDAS = "FAROL_AREAS_EDITADAS"
 NOME_ABA_ATUALIZACOES = "FAROL_ATUALIZACOES"
+CABECALHO_ATUALIZACOES = ["BASE", "ATUALIZADO_EM", "ATUALIZADO_POR"]
 NOME_ABA_HISTORICO_V2 = "FAROL_HISTORICO_V2"
 CABECALHO_HISTORICO_V2 = ["Chave", "Valor"]
 DIAS_HISTORICO_V2 = 8
@@ -285,7 +298,10 @@ def limpar_nome_bairro(valor):
     """
     texto = normalizar_texto(valor)
     texto = re.sub(r"\s*\(\s*PARCIAL\s*\)\s*$", "", texto)
-    texto = re.sub(r"^BAIRRO(?:\s*[-–—:]\s*|\s+)", "", texto)
+    texto = re.sub(
+        r"^(?:BAIRROS?|SUB[\s-]*AREAS?|SUB[\s-]*REGIAO(?:ES)?)"
+        r"(?:\s*[-–—:]\s*|\s+)", "", texto
+    )
     # Trata Villa Inglesa e Vila Inglesa como a mesma localidade, sem
     # aproximar nomes de bairros diferentes nem alterar o rótulo original.
     texto = re.sub(r"\bVILLA\b", "VILA", texto)
@@ -334,15 +350,28 @@ def endereco_contem_localidade(endereco, localidade):
     return False
 
 
+def nomes_reconhecidos_feicao(item):
+    """Nomes exatos de um polígono: subárea, bairro e aliases cadastrais.
+
+    Permite reconhecer o campo 'name' de feições adicionadas no PRISMA-GEO,
+    além de NM_BAIRRO, sem aproximação textual entre localidades diferentes.
+    """
+    if item.get("sem_nome"):
+        return set()
+    valores = [
+        item.get("nome_normalizado") or item.get("nome"),
+        *(item.get("nomes_alternativos") or []),
+    ]
+    return {chave for valor in valores if (chave := limpar_nome_bairro(valor))}
+
+
 def indice_nomes_bairros(bairros_geograficos, municipio):
-    """Catálogo restrito ao município, sem correspondência aproximada arriscada."""
+    """Catálogo de bairros e subáreas do município, por nomes exatos."""
     cidade = normalizar_municipio(municipio)
     nomes = set()
     for item in (bairros_geograficos or []):
-        if normalizar_municipio(item.get("municipio", "")) == cidade and not item.get("sem_nome"):
-            nome = limpar_nome_bairro(item.get("nome_normalizado") or item.get("nome"))
-            if nome:
-                nomes.add(nome)
+        if normalizar_municipio(item.get("municipio", "")) == cidade:
+            nomes.update(nomes_reconhecidos_feicao(item))
     return nomes
 
 
@@ -384,6 +413,9 @@ def extrair_bairros_evento(valor, municipio="", bairros_geograficos=None):
                 for nome in sorted(nomes)]
     texto = str(valor).replace("\r", "\n")
     texto = re.sub(r"(?i)\bBAIRROS?\s*(?:IMPACTADOS?|AFETADOS?)?\s*:", "\n", texto)
+    texto = re.sub(
+        r"(?i)\bSUB[\s-]*[ÁA]REAS?\s*(?:IMPACTADAS?|AFETADAS?)?\s*:", "\n", texto
+    )
     texto = re.sub(r"(?i)\b(?:ÁREAS?|AREAS?)\s+(?:IMPACTADAS?|AFETADAS?)\s*:", "\n", texto)
     partes = re.split(r"[,;\n]+", texto)
     saida = []
@@ -442,6 +474,25 @@ def obter_cliente_google():
         ],
     )
     return gspread.authorize(credenciais)
+
+
+@st.cache_data(ttl=300, max_entries=2, show_spinner=False)
+def carregar_regionais_api_modulo5():
+    """Uma leitura leve e em cache do cadastro do Módulo 5 (não lê O.S.).
+
+    Se a consulta falhar, todas as concentrações ainda aparecem, sob
+    'Regional não cadastrada', sem afetar o restante do Farol.
+    """
+    try:
+        planilha = obter_cliente_google().open_by_key(PLANILHA_CADASTROS_COI)
+        aba = planilha.worksheet(ABA_MUNICIPIOS_REGIONAIS)
+        return mapa_regionais_de_linhas(aba.get_all_values()), ""
+    except Exception:
+        return {}, (
+            "Cadastro de regionais do Módulo 5 indisponível. "
+            "As concentrações API serão exibidas em 'Regional não cadastrada' "
+            "até a consulta ser restabelecida."
+        )
 
 
 @st.cache_resource(show_spinner=False)
@@ -594,9 +645,53 @@ def salvar_observacao_concentracao(chave, municipio, lat, lon, observacao):
     carregar_observacoes_concentracoes.clear()
 
 
+def interpretar_registros_atualizacao(linhas):
+    """Lê metadados novos e legados sem atribuir autor retroativamente."""
+    if not linhas:
+        return {}
+    cabecalho = [str(c).strip().upper() for c in linhas[0]]
+    if cabecalho[:2] != CABECALHO_ATUALIZACOES[:2]:
+        return {}
+    pos_autor = (
+        cabecalho.index("ATUALIZADO_POR")
+        if "ATUALIZADO_POR" in cabecalho else None
+    )
+    registros = {}
+    for linha in linhas[1:]:
+        if len(linha) < 2:
+            continue
+        tipo = str(linha[0]).strip().upper()
+        if tipo not in {"PONTOS", "EVENTOS"}:
+            continue
+        data_hora = str(linha[1]).strip()
+        if not data_hora:
+            continue
+        autor = (
+            str(linha[pos_autor]).strip()
+            if pos_autor is not None and len(linha) > pos_autor else ""
+        )
+        registros[tipo] = {
+            "atualizado_em": data_hora,
+            "atualizado_por": autor or "Responsável não registrado",
+        }
+    return registros
+
+
+def responsavel_importacao_farol():
+    """Obtém o nome associado ao perfil PRISMA, nunca do arquivo importado."""
+    if not verificar_autenticacao():
+        raise PermissionError("Sessão expirada. Faça login para importar dados.")
+    responsavel = str(st.session_state.get("usuario_logado") or "").strip()
+    if not responsavel:
+        raise PermissionError(
+            "Não foi possível identificar o responsável autenticado pela importação."
+        )
+    return responsavel[:160]
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def carregar_datas_atualizacao():
-    """Consulta apenas duas linhas de metadados; nunca lê as bases para obter datas."""
+    """Consulta só a aba auxiliar, sem ler a base operacional de O.S./eventos."""
     try:
         aba = obter_planilha(SPREADSHEET_ID).worksheet(NOME_ABA_ATUALIZACOES)
         linhas = aba.get_all_values()
@@ -604,43 +699,78 @@ def carregar_datas_atualizacao():
         return {}
     except Exception:
         return {}
-    return {linha[0].strip().upper(): linha[1].strip()
-            for linha in linhas[1:] if len(linha) >= 2 and linha[0].strip()}
+    return interpretar_registros_atualizacao(linhas)
 
 
 def registrar_atualizacao_base(tipo):
-    """Persiste data/hora real de importação, inclusive entre sessões e reinícios."""
+    """Grava o horário e o responsável da última importação no Google Sheets.
+
+    Atualiza a planilha legada de duas colunas sem apagar os registros antigos.
+    """
     exigir_edicao_farol()
     if tipo not in {"PONTOS", "EVENTOS"}:
         raise ValueError("Tipo de base desconhecido.")
+    autor = responsavel_importacao_farol()
     planilha = obter_planilha(SPREADSHEET_ID)
     try:
         aba = planilha.worksheet(NOME_ABA_ATUALIZACOES)
     except gspread.WorksheetNotFound:
-        aba = planilha.add_worksheet(title=NOME_ABA_ATUALIZACOES, rows=10, cols=2)
-        aba.update(range_name="A1:B1", values=[["BASE", "ATUALIZADO_EM"]], value_input_option="RAW")
+        aba = planilha.add_worksheet(title=NOME_ABA_ATUALIZACOES, rows=10, cols=3)
     linhas = aba.get_all_values()
+    if linhas:
+        cabecalho_atual = [str(c).strip().upper() for c in linhas[0]]
+        if cabecalho_atual[:2] != CABECALHO_ATUALIZACOES[:2]:
+            raise ValueError("Cabeçalho inesperado em FAROL_ATUALIZACOES.")
+        if len(cabecalho_atual) >= 3 and cabecalho_atual[2] not in ("", "ATUALIZADO_POR"):
+            raise ValueError(
+                "A terceira coluna de FAROL_ATUALIZACOES já contém outro cabeçalho."
+            )
+    if aba.col_count < len(CABECALHO_ATUALIZACOES):
+        aba.resize(cols=len(CABECALHO_ATUALIZACOES))
+    if not linhas:
+        aba.update(
+            range_name="A1:C1", values=[CABECALHO_ATUALIZACOES],
+            value_input_option="RAW",
+        )
+    elif len(linhas[0]) < 3 or not str(linhas[0][2]).strip():
+        aba.update(
+            range_name="C1", values=[["ATUALIZADO_POR"]],
+            value_input_option="RAW",
+        )
+
     momento = datetime.now(FUSO_FAROL).strftime("%d/%m/%Y %H:%M:%S")
+    valores = [tipo, momento, autor]
     for numero_linha, linha in enumerate(linhas[1:], start=2):
-        if linha and linha[0].strip().upper() == tipo:
-            aba.update(range_name=f"A{numero_linha}:B{numero_linha}",
-                       values=[[tipo, momento]], value_input_option="RAW")
+        if linha and str(linha[0]).strip().upper() == tipo:
+            aba.update(
+                range_name=f"A{numero_linha}:C{numero_linha}",
+                values=[valores], value_input_option="RAW",
+            )
             carregar_datas_atualizacao.clear()
             return
-    aba.append_row([tipo, momento], value_input_option="RAW")
+    aba.append_row(valores, value_input_option="RAW")
     carregar_datas_atualizacao.clear()
 
 
 def exibir_atualizacoes_abaixo_mapa():
-    datas = carregar_datas_atualizacao()
-    os_em = datas.get("PONTOS", "Sem importação registrada")
-    eventos_em = datas.get("EVENTOS", "Sem importação registrada")
+    registros = carregar_datas_atualizacao()
+    def resumo(tipo, titulo):
+        item = registros.get(tipo) or {}
+        hora = html_escape(str(item.get("atualizado_em") or "Sem importação registrada"))
+        autor = html_escape(
+            str(item.get("atualizado_por") or "Responsável não registrado")
+        )
+        return (
+            f"<span>{titulo} — Atualizado em {hora} "
+            f"· Por: {autor}</span>"
+        )
     st.markdown(
         '<div style="display:flex;flex-wrap:wrap;gap:8px 26px;margin:4px 0 14px;'
         'font-size:13px;font-weight:600;color:#1558b0;">'
-        f'<span>O.S. — Atualizado em {os_em}</span>'
-        f'<span>Eventos — Atualizado em {eventos_em}</span>'
-        '</div>', unsafe_allow_html=True,
+        + resumo("PONTOS", "O.S.")
+        + resumo("EVENTOS", "Eventos")
+        + '</div>',
+        unsafe_allow_html=True,
     )
 
 
@@ -654,7 +784,7 @@ def limpar_dados_operacionais_admin():
         (NOME_ABA_PONTOS, CABECALHO_PONTOS),
         (NOME_ABA_EVENTOS, CABECALHO_EVENTOS),
         (NOME_ABA_AREAS_PROTEGIDAS, ["CHAVE_EVENTO", "AREAS_IMPACTADAS", "ATUALIZADO_EM", "AUTOR"]),
-        (NOME_ABA_ATUALIZACOES, ["BASE", "ATUALIZADO_EM"]),
+        (NOME_ABA_ATUALIZACOES, CABECALHO_ATUALIZACOES),
     )
     for nome, cabecalho in abas:
         try:
@@ -1425,9 +1555,19 @@ def carregar_gpkg(caminho):
                 (campos[k] for k in ("NMBAIRRO", "NOMEBAIRRO", "BAIRRO", "NOME")
                  if k in campos), None,
             )
+            # No GPKG, NM_BAIRRO pode identificar o bairro principal,
+            # enquanto name/NM_SUBAREA descrevem uma subárea desenhada
+            # posteriormente. Priorizar só NM_BAIRRO torna a subárea invisível.
+            campo_subarea = next(
+                (campos[k] for k in (
+                    "NMSUBAREA", "NOMESUBAREA", "SUBAREA",
+                    "NOMESUBREGIAO", "SUBREGIAO",
+                    "NAME", "NOMELOCALIDADE", "LOCALIDADE",
+                ) if k in campos and campos[k] != campo_bairro), None,
+            )
             campo_nome_aux = next(
                 (campos[k] for k in ("NAME", "LOCALIDADE", "NOMELOCALIDADE")
-                 if k in campos and campos[k] != campo_bairro), None,
+                 if k in campos and campos[k] not in (campo_bairro, campo_subarea)), None,
             )
             campo_mun = next(
                 (campos[k] for k in ("NMMUN", "MUNICIPIO", "NOMEMUNICIPIO", "CIDADE", "NMRGI")
@@ -1451,7 +1591,9 @@ def carregar_gpkg(caminho):
             # Não descartar a camada quando não há campo de nome:
             # a geometria pode ser desenhada normalmente.
             colunas = [campo_geometria]
-            colunas += [c for c in (campo_bairro, campo_nome_aux, campo_mun) if c]
+            for campo in (campo_bairro, campo_subarea, campo_nome_aux, campo_mun):
+                if campo and campo not in colunas:
+                    colunas.append(campo)
             consulta = f"SELECT {', '.join(quoted(c) for c in colunas)} FROM {quoted(tabela)}"
             for numero_feicao, row in enumerate(conexao.execute(consulta), start=1):
                 atributos = dict(zip(colunas, row))
@@ -1505,15 +1647,35 @@ def carregar_gpkg(caminho):
                         "", "NAN", "NONE", "NULL", "NOVO ELEMENTO", "NEW FEATURE"
                     } else texto
 
-                nome_real = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
-                if not nome_real and campo_nome_aux:
-                    nome_real = nome_valido(atributos.get(campo_nome_aux))
+                nome_bairro = nome_valido(atributos.get(campo_bairro)) if campo_bairro else ""
+                nome_subarea = nome_valido(atributos.get(campo_subarea)) if campo_subarea else ""
+                nome_auxiliar = nome_valido(atributos.get(campo_nome_aux)) if campo_nome_aux else ""
+                # O nome específico prevalece sobre o bairro de origem; ambos
+                # continuam pesquisáveis, inclusive em eventos já cadastrados.
+                nome_real = nome_subarea or nome_bairro or nome_auxiliar
+                nomes_alternativos = list(dict.fromkeys(
+                    nome for nome in (nome_bairro, nome_subarea, nome_auxiliar)
+                    if nome and limpar_nome_bairro(nome)
+                ))
+                subarea_explicita = bool(
+                    nome_subarea
+                    and (
+                        campo_subarea and normalizar_cabecalho(campo_subarea) in {
+                            "NMSUBAREA", "NOMESUBAREA", "SUBAREA",
+                            "NOMESUBREGIAO", "SUBREGIAO"
+                        }
+                        or nome_bairro and
+                        limpar_nome_bairro(nome_subarea) != limpar_nome_bairro(nome_bairro)
+                    )
+                )
                 rotulo = nome_real or f"Área sem nome ({tabela} #{numero_feicao})"
                 municipio_atributo = atributos.get(campo_mun) if campo_mun else ""
                 municipio = municipio_atributo or nome_municipio_arquivo(caminho)
                 registros.append({
                     "nome": rotulo,
                     "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
+                    "nomes_alternativos": nomes_alternativos,
+                    "tipo_area": "Subárea" if subarea_explicita else "Bairro",
                     "sem_nome": not bool(nome_real),
                     "municipio": normalizar_municipio(municipio),
                     "poligonos": poligonos,
@@ -1523,7 +1685,14 @@ def carregar_gpkg(caminho):
 
 def nome_municipio_arquivo(caminho):
     nome = os.path.splitext(os.path.basename(caminho))[0]
-    return re.sub(r"^(?:NM_MUN|NM_RGI)[_\s-]*", "", nome, flags=re.I)
+    nome = re.sub(r"^(?:NM_MUN|NM_RGI)[_\s-]*", "", nome, flags=re.I)
+    # Também permite "SUBAREAS_Teresina.gpkg" e nomes equivalentes.
+    # Se o arquivo possuir NM_MUN, o atributo específico prevalece.
+    if re.search(r"(?i)(?:^|[_\s-])TERESINA(?:$|[_\s-])", nome):
+        return "TERESINA"
+    if re.search(r"(?i)(?:^|[_\s-])TIMON(?:$|[_\s-])", nome):
+        return "TIMON"
+    return nome
 
 
 def preparar_poligonos_para_mapa(registros, tolerancia=0.00007):
@@ -1605,18 +1774,30 @@ def descobrir_kmz():
                 caminho = os.path.join(DIRETORIO_KMZ, nome)
                 if os.path.isfile(caminho):
                     arquivos.append(caminho)
-    # Para municípios com dois formatos, prefere o GPKG por conter NM_BAIRRO/NM_MUN.
-    prioridades = {".gpkg": 0, ".kmz": 1, ".kml": 2}
-    escolhidos = {}
+    # Carrega TODOS os GPKG, inclusive complementos de subáreas, e não
+    # apenas o primeiro GPKG de cada município. Evita duplicar o KMZ/KML
+    # antigo quando o município já dispõe de GPKG.
+    geopackages = [a for a in arquivos if a.lower().endswith(".gpkg")]
+    municipios_gpkg = {
+        normalizar_municipio(nome_municipio_arquivo(a)) for a in geopackages
+    }
+    escolhidos = list(geopackages)
+    legados = {}
     for caminho in arquivos:
+        if caminho.lower().endswith(".gpkg"):
+            continue
         municipio = normalizar_municipio(nome_municipio_arquivo(caminho))
-        if municipio and (municipio not in escolhidos or
-                          prioridades[os.path.splitext(caminho)[1].lower()] < prioridades[os.path.splitext(escolhidos[municipio])[1].lower()]):
-            escolhidos[municipio] = caminho
-    if os.path.isfile(ARQUIVO_KMZ_PADRAO) and "TERESINA" not in escolhidos:
-        escolhidos["TERESINA"] = ARQUIVO_KMZ_PADRAO
+        if not municipio or municipio in municipios_gpkg:
+            continue
+        if municipio not in legados or caminho.lower().endswith(".kmz"):
+            legados[municipio] = caminho
+    escolhidos.extend(legados.values())
+    if (os.path.isfile(ARQUIVO_KMZ_PADRAO)
+            and "TERESINA" not in municipios_gpkg
+            and "TERESINA" not in legados):
+        escolhidos.append(ARQUIVO_KMZ_PADRAO)
     assinaturas = []
-    for caminho in escolhidos.values():
+    for caminho in escolhidos:
         try:
             info = os.stat(caminho)
             assinaturas.append((caminho, info.st_size, info.st_mtime_ns))
@@ -1936,11 +2117,9 @@ def relacionar_eventos_pontos(df_eventos, df_pontos, bairros):
     }
     geometria_por_localidade = {}
     for poligono in (bairros or []):
-        chave = (
-            normalizar_municipio(poligono.get("municipio", "")),
-            limpar_nome_bairro(poligono.get("nome_normalizado") or poligono.get("nome", "")),
-        )
-        geometria_por_localidade.setdefault(chave, []).append(poligono)
+        cidade_poligono = normalizar_municipio(poligono.get("municipio", ""))
+        for nome in nomes_reconhecidos_feicao(poligono):
+            geometria_por_localidade.setdefault((cidade_poligono, nome), []).append(poligono)
     registros = []
     for indice_evento, evento in df_eventos.reset_index(drop=True).iterrows():
         cidade = normalizar_municipio(evento.get("Cidade", ""))
@@ -2038,8 +2217,9 @@ def eventos_georreferenciados(eventos, bairros_kmz):
         return saida, 0
     indice = {}
     for bairro in bairros_kmz:
-        chave = (bairro.get("municipio", "TERESINA"), bairro["nome_normalizado"])
-        indice.setdefault(chave, []).append(bairro)
+        cidade_bairro = normalizar_municipio(bairro.get("municipio", ""))
+        for nome in nomes_reconhecidos_feicao(bairro):
+            indice.setdefault((cidade_bairro, nome), []).append(bairro)
     for _, evento in eventos.iterrows():
         # Eventos encerrados permanecem na base, mas não geram feições no mapa.
         categoria_status, _ = classificar_status_evento(evento.get("Status", ""))
@@ -2051,6 +2231,7 @@ def eventos_georreferenciados(eventos, bairros_kmz):
             sem_geometria += 1
             continue
         identificados = set()
+        geometrias_desenhadas = set()
         encontrou = False
         faltou = False
         for area in areas:
@@ -2065,8 +2246,14 @@ def eventos_georreferenciados(eventos, bairros_kmz):
             encontrou = True
             categoria, cor = classificar_status_evento(evento.get("Status", ""))
             for bairro in correspondencias:
+                # Uma feição pode possuir nome de subárea e bairro pai:
+                # desenhá-la uma única vez por evento evita sobreposição.
+                if id(bairro) in geometrias_desenhadas:
+                    continue
+                geometrias_desenhadas.add(id(bairro))
                 saida.append({
                     "bairro": bairro,
+                    "nome_area_evento": nome,
                     "evento": evento.to_dict(),
                     "parcial": area["parcial"],
                     "categoria": categoria,
@@ -2089,9 +2276,16 @@ def adicionar_camada_eventos(mapa, eventos_mapeados):
         parcial = item["parcial"]
         def esc(campo):
             return html_escape(str(evento.get(campo, "") or "—"))
-        abrangencia = ("Parcial (polígono do bairro inteiro como referência)" if parcial
-                       else "Todo o município" if evento_abrange_municipio(evento.get("Áreas Impactadas", ""))
-                       else "Bairro informado como impactado")
+        tipo_localidade = bairro.get("tipo_area", "Bairro")
+        abrangencia = (
+            f"Parcial (polígono da {tipo_localidade.lower()} como referência)"
+            if parcial else
+            "Todo o município"
+            if evento_abrange_municipio(evento.get("Áreas Impactadas", "")) else
+            f"{tipo_localidade} informada como impactada"
+            if tipo_localidade == "Subárea" else
+            "Bairro informado como impactado"
+        )
         html = (
             f"<div style='min-width:250px;max-width:400px'>"
             f"<b>Evento — {html_escape(bairro['nome'])}</b><br>"
@@ -2208,7 +2402,11 @@ def adicionar_limites_bairros(mapa, bairros):
                 continue
             features.append({
                 "type": "Feature",
-                "properties": {"bairro": str(b.get("nome", "")), "municipio": str(b.get("municipio", ""))},
+                "properties": {
+                    "bairro": str(b.get("nome", "")),
+                    "tipo": str(b.get("tipo_area", "Bairro")),
+                    "municipio": str(b.get("municipio", "")),
+                },
                 "geometry": {
                     "type": "Polygon",
                     "coordinates": [
@@ -2225,7 +2423,11 @@ def adicionar_limites_bairros(mapa, bairros):
         name="Bairros", smooth_factor=1.0,
         style_function=lambda _feature: {"color": "#65758b", "weight": 1.15, "opacity": 0.75, "fillOpacity": 0},
         highlight_function=lambda _feature: {"color": "#334155", "weight": 2, "fillOpacity": 0.06},
-        tooltip=folium.GeoJsonTooltip(fields=["bairro", "municipio"], aliases=["Bairro:", "Município:"], sticky=True),
+        tooltip=folium.GeoJsonTooltip(
+            fields=["bairro", "tipo", "municipio"],
+            aliases=["Localidade:", "Tipo:", "Município:"],
+            sticky=True,
+        ),
     ).add_to(fg)
     fg.add_to(mapa)
 
@@ -2605,14 +2807,13 @@ def evento_pertinente_data_analise(evento):
 
 
 def indexar_geometrias_evento(bairros_geograficos, cidade_evento, areas_evento):
-    """Relaciona somente polígonos das áreas deste evento e deste município."""
+    """Relaciona bairros e subáreas pelo nome exato e município."""
     nomes = {area["bairro"] for area in areas_evento}
     indice = {nome: [] for nome in nomes}
     for bairro in (bairros_geograficos or []):
         if bairro.get("sem_nome") or normalizar_municipio(bairro.get("municipio", "")) != cidade_evento:
             continue
-        nome = limpar_nome_bairro(bairro.get("nome_normalizado") or bairro.get("nome", ""))
-        if nome in indice:
+        for nome in nomes_reconhecidos_feicao(bairro) & nomes:
             indice[nome].append(bairro)
     return indice
 
@@ -2716,7 +2917,8 @@ def dados_relatorio_concentracao(concentracao, pontos_cluster, proximidades, eve
             chaves_areas = {a["bairro"] for a in areas_evento}
             geometrias_evento = [b for b in (bairros_geograficos or [])
                 if (normalizar_municipio(b.get("municipio", "")) == cidade
-                    and b.get("nome_normalizado", "") in chaves_areas)] if not municipal else []
+                    and not nomes_reconhecidos_feicao(b).isdisjoint(chaves_areas))
+                ] if not municipal else []
             indice_geometrias = indexar_geometrias_evento(
                 geometrias_evento, cidade, areas_evento
             )
@@ -2835,6 +3037,115 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
     def dataframe(linhas):
         return pd.DataFrame(linhas).reindex(columns=cols) if linhas else pd.DataFrame(columns=cols)
     return dataframe(vinculadas), dataframe(nao_vinculadas)
+
+
+
+def diagnosticar_os_nao_vinculadas(nao_vinculadas, eventos, bairros_geograficos=None):
+    """Explica por que cada O.S. não foi vinculada a evento automaticamente.
+
+    Respeita os mesmos critérios exatos de município, área e horário usados
+    para classificar: início -1h, término real +3h. Nunca cria vínculos.
+    A ausência de polígonos é explicitada, mas não amplia a abrangência.
+    """
+    resultado = nao_vinculadas.copy()
+    coluna = "Motivo da não vinculação"
+    if resultado.empty:
+        resultado[coluna] = pd.Series(dtype=str)
+        return resultado
+    if eventos is None or eventos.empty:
+        resultado[coluna] = "Nenhum evento disponível para análise"
+        return resultado
+
+    contextos_por_cidade = {}
+    for _, evento in eventos.iterrows():
+        cidade = normalizar_municipio(evento.get("Cidade", ""))
+        if not cidade or not evento_pertinente_data_analise(evento):
+            continue
+        areas_texto = evento.get("Áreas Impactadas", "")
+        municipal = evento_abrange_municipio(areas_texto)
+        areas = extrair_bairros_evento(
+            areas_texto, evento.get("Cidade", ""), bairros_geograficos
+        )
+        contextos_por_cidade.setdefault(cidade, []).append({
+            "municipal": municipal,
+            "areas": areas,
+            "geometrias": (
+                indexar_geometrias_evento(bairros_geograficos, cidade, areas)
+                if not municipal else {}
+            ),
+            "inicio": interpretar_data_operacional(evento.get("Início", "")),
+            "fim": interpretar_data_operacional(evento.get("Término Real", "")),
+            "encerrado": (
+                classificar_status_evento(evento.get("Status", ""))[0] == "Finalizado"
+            ),
+        })
+
+    agora = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+    def motivo(os_reg):
+        cidade = normalizar_municipio(os_reg.get("Cidade", ""))
+        if not cidade:
+            return "Município da O.S. não informado"
+        candidatos = contextos_por_cidade.get(cidade, [])
+        if not candidatos:
+            return "Nenhum evento elegível no município e dia analisado"
+        emissao = interpretar_data_operacional(os_reg.get("Dt. Emissão", ""))
+        if pd.isna(emissao):
+            return "Data/hora de emissão da O.S. ausente ou inválida"
+
+        motivos = []
+        for contexto in candidatos:
+            if not contexto["municipal"] and not contexto["areas"]:
+                motivos.append("Áreas Impactadas não informadas no evento")
+                continue
+            localidade, _ = identificar_correspondencia_territorial_evento_os(
+                os_reg, cidade, contexto["areas"],
+                municipal=contexto["municipal"],
+                indice_geometrias=contexto["geometrias"],
+            )
+            if localidade is None:
+                com_geometria = any(contexto["geometrias"].values())
+                lat = normalizar_coordenada(os_reg.get("Latitude", ""), "lat")
+                lon = normalizar_coordenada(os_reg.get("Longitude", ""), "lon")
+                if com_geometria and lat is not None and lon is not None:
+                    motivos.append("O.S. fora dos polígonos das áreas impactadas")
+                elif not com_geometria:
+                    motivos.append(
+                        "Sem polígono da área: bairro/endereço não coincide com o evento"
+                    )
+                else:
+                    motivos.append("Bairro/localidade não corresponde às áreas impactadas")
+                continue
+            inicio, fim = contexto["inicio"], contexto["fim"]
+            if pd.isna(inicio):
+                motivos.append("Evento sem data e horário de início válidos")
+            elif pd.isna(fim) and contexto["encerrado"]:
+                motivos.append("Evento finalizado sem horário de término real")
+            elif pd.notna(fim) and fim < inicio:
+                motivos.append("Horários de início e término do evento inconsistentes")
+            else:
+                limite = fim + pd.Timedelta(hours=3) if pd.notna(fim) else agora
+                if inicio - pd.Timedelta(hours=1) <= emissao <= limite:
+                    motivos.append("Vínculo automático não refletido; atualizar análise")
+                else:
+                    motivos.append("O.S. fora da janela temporal do evento")
+
+        # Diagnóstico mais específico/acionável quando existem eventos múltiplos.
+        preferencias = (
+            "Vínculo automático não refletido; atualizar análise",
+            "O.S. fora da janela temporal do evento",
+            "Evento finalizado sem horário de término real",
+            "Horários de início e término do evento inconsistentes",
+            "Evento sem data e horário de início válidos",
+            "Áreas Impactadas não informadas no evento",
+            "O.S. fora dos polígonos das áreas impactadas",
+            "Sem polígono da área: bairro/endereço não coincide com o evento",
+            "Bairro/localidade não corresponde às áreas impactadas",
+        )
+        return next((item for item in preferencias if item in motivos),
+                    "Não foi identificada correspondência territorial ou temporal")
+
+    resultado[coluna] = resultado.apply(motivo, axis=1)
+    return resultado
 
 
 def descricao_eventos_pdf(eventos_relacionados):
@@ -3329,6 +3640,15 @@ def gerar_pdf_concentracao(concentracao, os_grupo, ativos, eventos_relacionados,
     historia.append(p(resumo, normal))
     historia.append(p(f"Centro: {float(concentracao['LATITUDE']):.6f}, {float(concentracao['LONGITUDE']):.6f}", normal))
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
+    manuais = listar_vinculos_os_manuais(os_grupo.get("Nº da O.S", []))
+    vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+        vinculadas, nao_vinculadas, manuais
+    )
+    eventos_incluidos = eventos_manuais_do_grupo(manuais, os_grupo)
+    if eventos_incluidos:
+        nomes = ", ".join(str(e.get("Protocolo") or e.get("Serviço") or "Evento")
+                          for e in eventos_incluidos)
+        historia.append(p("Eventos associados manualmente: " + nomes, normal))
     colunas = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Status OS", "Dt. Emissão", "Serviço Executado"]
     for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
                              ("Ordens não vinculadas", nao_vinculadas)):
@@ -3393,14 +3713,189 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         f"Centro geográfico: {float(concentracao['LATITUDE']):.6f}, "
         f"{float(concentracao['LONGITUDE']):.6f} | Raio operacional: {raio} m"
     )
+    try:
+        manuais = listar_vinculos_os_manuais(os_grupo.get("Nº da O.S", []))
+    except Exception as erro:
+        st.error(f"Não foi possível conferir os vínculos manuais no Supabase: {erro}")
+        return
     vinculadas, nao_vinculadas = classificar_os_por_evento(os_grupo, eventos_relacionados)
+    vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+        vinculadas, nao_vinculadas, manuais
+    )
+    # Explica por que as O.S. restantes não cumpriram território e horário,
+    # sem transformar ausência de polígono em vinculação municipal automática.
+    nao_vinculadas = diagnosticar_os_nao_vinculadas(
+        nao_vinculadas, eventos, bairros_geograficos
+    )
     colunas_os = ["Nº da O.S", "Matrícula", "Cidade", "Bairro", "Endereço",
                   "Status OS", "Dt. Emissão", "Serviço Executado",
                   "Evento(s) vinculado(s)", "Critério do vínculo"]
-    for nome_grupo, base in (("Ordens vinculadas aos eventos", vinculadas),
-                             ("Ordens não vinculadas", nao_vinculadas)):
-        st.markdown(f"#### {nome_grupo} ({len(base)})")
-        st.dataframe(base.reindex(columns=colunas_os).fillna(""), width="stretch", hide_index=True)
+    colunas_nao_vinculadas = colunas_os + ["Motivo da não vinculação"]
+    st.markdown(f"#### Ordens vinculadas aos eventos ({len(vinculadas)})")
+    st.dataframe(
+        vinculadas.reindex(columns=colunas_os).fillna(""),
+        width="stretch", hide_index=True,
+    )
+    st.markdown(f"#### Ordens não vinculadas ({len(nao_vinculadas)})")
+    if not nao_vinculadas.empty:
+        motivos = nao_vinculadas["Motivo da não vinculação"].value_counts()
+        with st.expander("🔎 Diagnóstico das O.S. sem vínculo", expanded=False):
+            st.caption(
+                "A ausência de polígonos não impede a vinculação por bairro, "
+                "endereço ou abrangência municipal explícita. O diagnóstico "
+                "identifica o motivo provável da não associação automática."
+            )
+            st.dataframe(
+                pd.DataFrame({
+                    "Motivo": motivos.index,
+                    "Quantidade de O.S.": motivos.values,
+                }),
+                width="stretch", hide_index=True,
+            )
+    habilitar_manual = bool(PODE_EDITAR_FAROL and fonte_supabase())
+    selecionadas_os = []
+    if nao_vinculadas.empty or not habilitar_manual:
+        st.dataframe(
+            nao_vinculadas.reindex(columns=colunas_nao_vinculadas).fillna(""),
+            width="stretch", hide_index=True,
+        )
+    else:
+        tabela = nao_vinculadas.reindex(columns=colunas_nao_vinculadas).fillna("").copy()
+        tabela.insert(0, "Selecionar", False)
+        chave_editor = f"farol_os_manuais_editor_{codigo}"
+        editado = st.data_editor(
+            tabela, key=chave_editor, hide_index=True, width="stretch",
+            disabled=colunas_nao_vinculadas,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn(
+                    "Selecionar", help="Marque as O.S. que deseja vincular ao evento.",
+                    default=False,
+                ),
+            },
+        )
+        selecionadas_os = [
+            normalizar_os(v) for v in editado.loc[
+                editado["Selecionar"].fillna(False).astype(bool), "Nº da O.S"
+            ] if normalizar_os(v)
+        ]
+        # O evento é selecionado explicitamente: uma O.S. nunca é ligada
+        # apenas porque está próxima de outra no mesmo grupo.
+        cidades_do_grupo = {
+            normalizar_municipio(v) for v in os_grupo.get("Cidade", []) if str(v).strip()
+        }
+        candidatos = []
+        eventos_vistos = set()
+        if eventos is not None and not eventos.empty:
+            for _, evt in eventos.iterrows():
+                registro = evt.to_dict()
+                cidade_evt = normalizar_municipio(registro.get("Cidade", ""))
+                if cidade_evt not in cidades_do_grupo or not registro.get("Início"):
+                    continue
+                chave_evt = chave_evento(registro)
+                if chave_evt in eventos_vistos:
+                    continue
+                eventos_vistos.add(chave_evt)
+                candidatos.append(registro)
+        if candidatos:
+            evento_indice = st.selectbox(
+                "Evento ao qual associar as O.S. selecionadas",
+                range(len(candidatos)),
+                format_func=lambda i: (
+                    f"{str(candidatos[i].get('Protocolo', '') or 'Sem protocolo')} — "
+                    f"{str(candidatos[i].get('Serviço', '') or 'Serviço não informado')} — "
+                    f"{str(candidatos[i].get('Início', '') or 'Início não informado')}"
+                )[:220],
+                key=f"farol_os_manuais_evento_{codigo}",
+            )
+            justificativa = st.text_input(
+                "Justificativa para associação manual (opcional)",
+                key=f"farol_os_manuais_justificativa_{codigo}",
+                max_chars=1200,
+            )
+            confirmar = st.checkbox(
+                "Confirmo que as O.S. selecionadas pertencem ao evento escolhido. "
+                "A inclusão ficará identificada como vínculo manual, com auditoria.",
+                key=f"farol_os_manuais_confirmar_{codigo}",
+            )
+            if st.button(
+                f"Vincular {len(set(selecionadas_os))} O.S. selecionada(s) ao evento",
+                type="primary",
+                key=f"farol_os_manuais_salvar_{codigo}",
+                disabled=not selecionadas_os or not confirmar,
+            ):
+                escolhidas = nao_vinculadas.loc[
+                    nao_vinculadas["Nº da O.S"].astype(str).str.strip().str.upper().isin(
+                        set(selecionadas_os)
+                    )
+                ]
+                cidade_evento = normalizar_municipio(candidatos[evento_indice].get("Cidade", ""))
+                if any(
+                    normalizar_municipio(v) != cidade_evento
+                    for v in escolhidas["Cidade"]
+                ):
+                    st.error("Há O.S. de outro município na seleção. Associação bloqueada.")
+                else:
+                    try:
+                        quantidade = vincular_os_manual(
+                            candidatos[evento_indice], selecionadas_os, justificativa
+                        )
+                        st.session_state.pop(f"farol_pdf_individual_{codigo}", None)
+                        st.session_state.pop(chave_editor, None)
+                        st.toast(
+                            f"{quantidade} vínculo(s) manual(is) registrado(s). "
+                            "O PDF deverá ser gerado novamente."
+                        )
+                        st.rerun()
+                    except Exception as erro:
+                        st.error(f"Não foi possível salvar os vínculos: {erro}")
+        else:
+            st.warning(
+                "Não há eventos disponíveis para o município das O.S. "
+                "Importe ou cadastre o evento antes de associar manualmente."
+            )
+
+    # Permite desfazer apenas o que foi associado manualmente; vínculos
+    # territoriais/temporais calculados automaticamente nunca são removidos.
+    manuais_do_grupo = [
+        r for r in manuais
+        if normalizar_os(r.get("numero_os")) in {
+            normalizar_os(x) for x in os_grupo.get("Nº da O.S", [])
+        }
+    ]
+    if manuais_do_grupo:
+        with st.expander(
+            f"Revisar / desfazer vínculos manuais ({len(manuais_do_grupo)})",
+            expanded=False,
+        ):
+            opcoes_remocao = {
+                (str(r.get("evento_chave")), normalizar_os(r.get("numero_os"))): r
+                for r in manuais_do_grupo
+            }
+            selecao_remover = st.multiselect(
+                "Associações manuais a desfazer",
+                list(opcoes_remocao),
+                format_func=lambda k: (
+                    f"O.S. {k[1]} — "
+                    f"{opcoes_remocao[k].get('evento_rotulo') or opcoes_remocao[k].get('protocolo')}"
+                ),
+                key=f"farol_os_manuais_desfazer_{codigo}",
+                disabled=not habilitar_manual,
+            )
+            if st.button(
+                "Desfazer vínculos manuais selecionados",
+                key=f"farol_os_manuais_confirmar_desfazer_{codigo}",
+                disabled=not habilitar_manual or not selecao_remover,
+            ):
+                try:
+                    quantidade = 0
+                    for chave_evt in dict.fromkeys(k[0] for k in selecao_remover):
+                        numeros = [k[1] for k in selecao_remover if k[0] == chave_evt]
+                        quantidade += desfazer_vinculo_os_manual(chave_evt, numeros)
+                    st.session_state.pop(f"farol_pdf_individual_{codigo}", None)
+                    st.toast(f"{quantidade} vínculo(s) manual(is) desfeito(s).")
+                    st.rerun()
+                except Exception as erro:
+                    st.error(f"Não foi possível desfazer os vínculos: {erro}")
     st.markdown("#### Poços / ativos e loggers próximos")
     if ativos.empty:
         st.info("Nenhum equipamento dentro do raio operacional desta concentração.")
@@ -3408,18 +3903,31 @@ def exibir_relatorio_concentracao(codigo, concentracoes, pontos_cluster, proximi
         st.dataframe(ativos[["Tipo", "Identificação", "Nome", "Município", "Distância"]],
                      width="stretch", hide_index=True)
     st.markdown("#### Eventos relacionados")
-    st.caption("Correspondência por município e bairro impactado; não estabelece relação causal.")
+    st.caption(
+        "Associações automáticas: município, polígono/bairro e janela temporal. "
+        "Associações manuais: confirmação do analista, sem presumir causalidade."
+    )
     if eventos_relacionados.empty:
-        st.info("Nenhum evento com município e bairro correspondente.")
+        st.info("Nenhum evento associado automaticamente por território.")
     else:
         colunas_eventos = ["Protocolo", "Status", "Cidade", "Bairros coincidentes", "Início", "Término Real", "Serviço", "Descrição do Serviço"]
         st.dataframe(eventos_relacionados.reindex(columns=colunas_eventos).fillna(""),
                      width="stretch", hide_index=True)
+    eventos_manuais_visiveis = eventos_manuais_do_grupo(manuais, os_grupo)
+    if eventos_manuais_visiveis:
+        st.caption(f"Eventos com vínculos manuais: {len(eventos_manuais_visiveis)}")
+        st.dataframe(
+            pd.DataFrame(eventos_manuais_visiveis).reindex(
+                columns=["Protocolo", "Serviço", "Código do Ativo", "Início", "Cidade", "Status"]
+            ).fillna(""),
+            width="stretch", hide_index=True,
+        )
     # A colagem de prints não altera os dados operacionais do Farol.
     interface_graficos_logger(ativos, codigo)
     # Captura cartográfica apenas sob demanda; evita Chromium em cada rerun do Streamlit.
     if st.button("📸 Preparar PDF com mapa da concentração", key=f"preparar_pdf_{codigo}"):
         try:
+            limpar_cache_vinculos_manuais()
             with st.spinner("Capturando mapa aproximado e preparando relatório..."):
                 mapa_ficha = mapa_exclusivo_concentracao(concentracao, os_grupo, ativos)
                 imagem_ficha = capturar_mapa_folium(mapa_ficha, largura=800, altura=690)
@@ -3658,6 +4166,11 @@ def modal_eventos():
     tabela["Critérios de associação"] = [
         str(resumo_criterios.get(i, "")) for i in indices_visiveis
     ]
+    tabela["Abrangência territorial"] = [
+        "Todo o município" if evento_abrange_municipio(valor)
+        else "Bairros ou subáreas informados"
+        for valor in eventos_visiveis["Áreas Impactadas"]
+    ]
     tabela = tabela.reset_index(drop=True)
 
     if PODE_EDITAR_FAROL:
@@ -3703,24 +4216,73 @@ def modal_eventos():
             st.caption(
                 f"Evento selecionado: {registro.get('Protocolo') or 'Sem protocolo'} · "
                 f"{registro.get('Cidade', '')} · {registro.get('Serviço', '')}. "
-                "A correção de Áreas Impactadas será preservada nas próximas importações."
+                "A abrangência escolhida será preservada nas próximas importações."
             )
+            # O tipo explícito é salvo em Áreas Impactadas como valor
+            # canônico, sem alterar o cabeçalho da planilha EVENTOS.
+            # Assim, a correção protegida sobrevive à próxima importação.
+            area_original = str(registro.get("Áreas Impactadas", "") or "")
+            opcoes_abrangencia = [
+                "Bairros ou subáreas informados",
+                "Todo o município",
+            ]
+            abrangencia_selecionada = st.radio(
+                "Abrangência territorial do evento",
+                opcoes_abrangencia,
+                index=1 if evento_abrange_municipio(area_original) else 0,
+                key=f"farol_abrangencia_editada_{indice_edicao}",
+                help=(
+                    "Somente 'Todo o município' permite usar o município inteiro "
+                    "na associação das O.S. Sem essa declaração, os bairros e "
+                    "subáreas devem coincidir com as Áreas Impactadas."
+                ),
+            )
+            todo_municipio = abrangencia_selecionada == "Todo o município"
             with st.form(f"farol_edicao_evento_{indice_edicao}"):
                 area_editada = st.text_area(
-                    "Áreas Impactadas",
-                    value=str(registro.get("Áreas Impactadas", "") or ""),
+                    "Bairros ou subáreas impactados",
+                    value=("" if evento_abrange_municipio(area_original)
+                           else area_original),
                     height=110,
-                    help="Somente este campo pode ser alterado.",
+                    disabled=todo_municipio,
+                    key=(
+                        f"farol_areas_impactadas_editadas_{indice_edicao}_"
+                        + ("municipal" if todo_municipio else "local")
+                    ),
+                    help=(
+                        "Liste as localidades separadas por vírgulas. "
+                        "Sem polígonos, a associação utiliza o bairro exato "
+                        "cadastrado na O.S. ou a localidade completa no endereço."
+                    ),
                 )
-                salvar = st.form_submit_button("💾 Salvar área impactada", width="stretch")
+                st.caption(
+                    "Abrangência municipal associa somente O.S. do mesmo município "
+                    "dentro da janela temporal, mesmo sem polígonos."
+                    if todo_municipio else
+                    "Bairros ou subáreas são comparados pelo nome exato, "
+                    "com validação geográfica quando houver polígonos."
+                )
+                salvar = st.form_submit_button(
+                    "💾 Salvar abrangência territorial", width="stretch"
+                )
             if salvar:
                 try:
-                    atualizar_evento_cadastrado(
-                        indice_edicao, registro, {"Áreas Impactadas": area_editada}
-                    )
-                    st.session_state.pop("farol_evento_em_edicao", None)
-                    st.success("Evento atualizado. O mapa e as associações serão recalculados.")
-                    st.rerun()
+                    areas_salvar = "Todo o município" if todo_municipio else area_editada.strip()
+                    if not todo_municipio and not areas_salvar:
+                        st.error(
+                            "Informe os bairros ou subáreas impactados. Para "
+                            "atingir toda a cidade, selecione 'Todo o município'."
+                        )
+                    else:
+                        atualizar_evento_cadastrado(
+                            indice_edicao, registro, {"Áreas Impactadas": areas_salvar}
+                        )
+                        st.session_state.pop("farol_evento_em_edicao", None)
+                        st.success(
+                            "Abrangência atualizada. O mapa e as associações "
+                            "territoriais e temporais serão recalculados."
+                        )
+                        st.rerun()
                 except Exception as erro:
                     st.error(f"Não foi possível salvar o evento: {erro}")
     else:
@@ -3728,7 +4290,7 @@ def modal_eventos():
 
     # Diagnóstico espacial dos nomes deste evento — usa SOMENTE as feições
     # já carregadas. Não adiciona leituras ao Google Sheets nem recria o mapa.
-    with st.expander("🔎 Diagnóstico dos bairros não reconhecidos", expanded=False):
+    with st.expander("🔎 Diagnóstico dos bairros e subáreas não reconhecidos", expanded=False):
         if eventos_visiveis.empty:
             st.info("Nenhum evento disponível neste município.")
         else:
@@ -3752,17 +4314,20 @@ def modal_eventos():
             areas_diag = extrair_bairros_evento(valor_areas, cidade_diag, bairros)
             catalogo_diag = indice_nomes_bairros(bairros, cidade_diag)
             if municipal_diag:
-                st.info("Evento declarado para todo o município. Os polígonos existentes são usados como referência.")
-            if not areas_diag:
+                st.success(
+                    "Abrangência declarada: todo o município. O Farol considera "
+                    "as O.S. da cidade dentro da janela temporal, mesmo sem polígonos."
+                )
+            elif not areas_diag:
                 st.warning(
-                    "Nenhum bairro foi extraído do campo Áreas Impactadas. "
-                    "Se os bairros estiverem apenas na mensagem do WhatsApp ou na "
+                    "Nenhum bairro ou subárea foi extraído do campo Áreas Impactadas. "
+                    "Se as localidades estiverem apenas na mensagem do WhatsApp ou na "
                     "Descrição do Serviço, informe a lista em Áreas Impactadas na edição do evento."
                 )
             else:
                 diagnostico = pd.DataFrame([
                     {
-                        "Bairro interpretado": a["bairro"],
+                        "Bairro ou subárea interpretada": a["bairro"],
                         "Polígono no município": (
                             "Encontrado" if a["bairro"] in catalogo_diag else "Não encontrado"
                         ),
@@ -3772,37 +4337,39 @@ def modal_eventos():
                 st.dataframe(diagnostico, hide_index=True, width="stretch")
                 encontrados_diag = int((diagnostico["Polígono no município"] == "Encontrado").sum())
                 st.caption(
-                    f"Bairros reconhecidos no arquivo cartográfico: "
-                    f"{encontrados_diag} de {len(diagnostico)} informados no evento."
+                    f"Bairros e subáreas reconhecidos na base cartográfica: "
+                    f"{encontrados_diag} de {len(diagnostico)} localidades informadas."
                 )
                 ausentes = diagnostico.loc[
                     diagnostico["Polígono no município"] == "Não encontrado",
-                    "Bairro interpretado",
+                    "Bairro ou subárea interpretada",
                 ].tolist()
                 if ausentes:
                     st.warning(
                         "Sem correspondência exata na base geográfica de "
                         f"{cidade_diag}: {', '.join(ausentes)}. "
                         "Confirme a nomenclatura no arquivo GPKG/KMZ/KML do município. "
-                        "O Farol não marca bairros por aproximação de nomes."
+                        "O Farol não marca bairros ou subáreas por aproximação de nomes."
                     )
                 else:
-                    st.success("Todos os bairros interpretados têm polígonos carregados no município.")
+                    st.success("Todos os bairros e subáreas interpretados possuem polígonos no município.")
             st.caption(
                 f"Cobertura cartográfica carregada: {len(catalogo_diag)} "
-                "nome(s) distinto(s) de bairro neste município."
+                "nome(s) distinto(s) de bairros e subáreas neste município."
             )
-            with st.expander("Ver nomes de bairros existentes na base cartográfica", expanded=False):
+            with st.expander("Ver nomes de bairros e subáreas da base cartográfica", expanded=False):
                 if catalogo_diag:
                     st.write(", ".join(sorted(catalogo_diag)))
                 else:
                     st.warning(
                         "Nenhum polígono foi carregado para este município. "
-                        "Confira os arquivos de geodados/municipios."
+                        "A associação automática por bairro cadastrado, "
+                        "endereço ou abrangência municipal declarada continua "
+                        "disponível. Para exibir limites, confira geodados/municipios."
                     )
 
     # O gráfico utiliza APENAS a cidade selecionada, nunca mistura municípios.
-    st.markdown("### Distribuição das O.S. nos bairros impactados")
+    st.markdown("### Distribuição das O.S. nos bairros e subáreas impactados")
     if rel_municipio.empty:
         st.info("Nenhuma O.S. encontrada nos bairros dos eventos deste município.")
     else:
@@ -4104,6 +4671,12 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
             Paragraph(f"Concentrações: {len(concentracoes)} · O.S., concentrações e equipamentos operacionais.", pequeno),
         ]))
         historia.append(PageBreak())
+        # Vínculos manuais de todas as concentrações consultados uma única vez.
+        # A exportação ignora caches anteriores para refletir o Supabase atual.
+        limpar_cache_vinculos_manuais()
+        manuais_relatorio = listar_vinculos_os_manuais(
+            pontos_cluster.get("Nº da O.S", [])
+        )
         # Imagens do dia: lidas uma única vez para todo o relatório operacional.
         indice_graficos = indice_do_dia(SPREADSHEET_ID, dia_graficos())
         for indice, (_, c) in enumerate(concentracoes.iterrows()):
@@ -4138,6 +4711,19 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
                           ) or "Nenhum evento relacionado"), pequeno),
             ])
             vinculadas, nao_vinculadas = classificar_os_por_evento(grupo, eventos_da_concentracao)
+            vinculadas, nao_vinculadas = aplicar_vinculos_manuais(
+                vinculadas, nao_vinculadas, manuais_relatorio
+            )
+            manuais_da_concentracao = eventos_manuais_do_grupo(
+                manuais_relatorio, grupo
+            )
+            if manuais_da_concentracao:
+                resumo.append(Paragraph(
+                    "<b>Vínculos manuais:</b> " + xml_escape("; ".join(
+                        str(e.get("Protocolo") or e.get("Serviço") or "Evento")
+                        for e in manuais_da_concentracao
+                    )), pequeno
+                ))
             # Distribuir as duas tabelas dentro da área cinza ao lado do mapa.
             # O espaço abaixo do mapa só recebe linhas que não couberem no painel.
             def linhas_pdf(base):
@@ -4989,6 +5575,7 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             + ", ".join(vizinhas)
                             + ". Os agrupamentos permanecem independentes; selecione outro registro na lista para analisar seus dados.")
             else:
+                # Panorama de consulta: nenhuma ferramenta de desenho ou união.
                 mapa = criar_mapa_panorama_v2(
                     concentracoes, raio_m=raio_concentracao,
                     bairros=bairros_panorama, eventos_mapeados=eventos_panorama,
@@ -5086,6 +5673,11 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         else:
             st.markdown("### 📋 Análise das Concentrações")
             st.caption("Expanda uma concentração e clique em **Carregar detalhes** para consultar O.S., equipamentos, eventos e PDFs. Apenas a ficha escolhida é processada.")
+            st.caption(
+                "Cada concentração mantém seu próprio acompanhamento. "
+                "Use o botão de copiar dados para aproveitar informações de outra ficha, "
+                "sem compartilhar status nem histórico."
+            )
             observacoes_df = carregar_observacoes_concentracoes()
             resumo_pdf = concentracoes.copy()
             grupos_os = {chave: quadro for chave, quadro in pontos_cluster.groupby("_grupo", sort=False)} if not pontos_cluster.empty else {}
@@ -5095,12 +5687,19 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 todos_vinculos_acomp = listar_vinculos()
                 vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
+                total_vinculos_por_ficha = {}
+                for vinculo in todos_vinculos_acomp:
+                    ficha_id = str(vinculo.get("evento_id", ""))
+                    total_vinculos_por_ficha[ficha_id] = (
+                        total_vinculos_por_ficha.get(ficha_id, 0) + 1
+                    )
                 recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
                 todos_vinculos_acomp = []
                 vinculos_acomp_visiveis = {}
                 fichas_acomp_visiveis = {}
+                total_vinculos_por_ficha = {}
                 recuperar_supabase_ativo = False
                 erro_acomp_visivel = erro
                 st.warning(f"Acompanhamentos temporariamente indisponíveis: {erro}")
@@ -5130,102 +5729,59 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     "multiplos_municipios": len(cidades_atuais) != 1,
                     "latitude": float(c_atual["LATITUDE"]),
                     "longitude": float(c_atual["LONGITUDE"]),
+                    "evento_chaves": (),
+                    "evento_os": {},
                 }
 
             chaves_ativas = {c["chave"] for c in contextos_ativos_acomp.values()}
 
-            # Continuidade automática SOMENTE quando as O.S. anteriores
-            # permanecem integralmente na concentração, novas O.S. são
-            # acrescentadas e a correspondência é única e geograficamente segura.
-            # O mapeamento em memória permite CONSULTA imediata também ao
-            # operador; a gravação persistente só ocorre sob perfil com edição.
-            continuidades_automaticas = {}
-            continuidades_persistidas = set()
-            continuidades_pendentes = set()
-            if recuperar_supabase_ativo and not erro_acomp_visivel:
-                continuidades_automaticas = identificar_continuidades_automaticas(
-                    contextos_ativos_acomp, todos_vinculos_acomp,
-                    fichas_acomp_visiveis,
+            # Um resumo compartilhado, por evento e município, substitui a
+            # preparação individual de relatórios para TODOS os cartões.
+            # As análises detalhadas são preparadas apenas quando solicitadas.
+            agora_eventos = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+            resumo_eventos_por_grupo = resumir_eventos_concentracoes(
+                pontos_cluster, df_eventos, bairros,
+                normalizar_cidade=normalizar_municipio,
+                conferir_data=evento_pertinente_data_analise,
+                abrange_municipio=evento_abrange_municipio,
+                extrair_areas=extrair_bairros_evento,
+                nomes_poligono=nomes_reconhecidos_feicao,
+                localizar_os=identificar_correspondencia_territorial_evento_os,
+                converter_data=interpretar_data_operacional,
+                classificar_status=classificar_status_evento,
+                chave_evento=chave_evento_persistente,
+                agora=agora_eventos,
+            )
+            for _, item_conc in concentracoes.iterrows():
+                codigo_atual = str(item_conc["ID_CONCENTRACAO"])
+                resumo = resumo_eventos_por_grupo.get(item_conc["GRUPO"], {})
+                os_por_evento = resumo.get("evento_os", {})
+                contextos_ativos_acomp[codigo_atual]["evento_os"] = os_por_evento
+                contextos_ativos_acomp[codigo_atual]["evento_chaves"] = tuple(
+                    sorted(os_por_evento)
                 )
-                tentativas_auto = st.session_state.setdefault(
-                    "farol_auto_vinculo_tentativas", {}
-                )
-                agora_tentativa = tempo_execucao.monotonic()
-                # Não repetir chamadas de gravação em reruns simultâneos após
-                # falhas temporárias, nem sobrecarregar o banco num único rerun.
-                gravacoes_nesta_interacao = 0
-                for codigo_auto, candidato_auto in continuidades_automaticas.items():
-                    ctx_auto = contextos_ativos_acomp[codigo_auto]
-                    chave_auto = ctx_auto["chave"]
-                    vinculo_virtual = {
-                        "chave": chave_auto,
-                        "evento_id": candidato_auto["evento_id"],
-                        "municipio": ctx_auto["municipio"],
-                        "bairros": ctx_auto["bairros"],
-                        "latitude": str(ctx_auto["latitude"]),
-                        "longitude": str(ctx_auto["longitude"]),
-                        "os_origem": ";".join(ctx_auto["os"]),
-                        "continuidade_automatica": True,
-                    }
-                    vinculos_acomp_visiveis[chave_auto] = vinculo_virtual
-                    if not PODE_EDITAR_FAROL:
-                        continuidades_pendentes.add(codigo_auto)
-                        continue
-                    ultima = tentativas_auto.get(chave_auto)
-                    if (ultima is not None and agora_tentativa - ultima < 600
-                            or gravacoes_nesta_interacao >= 12):
-                        continuidades_pendentes.add(codigo_auto)
-                        continue
-                    tentativas_auto[chave_auto] = agora_tentativa
-                    gravacoes_nesta_interacao += 1
-                    try:
-                        continuar_vinculo_automaticamente(
-                            ctx_auto, candidato_auto["chave_anterior"],
-                            candidato_auto["evento_id"],
-                        )
-                        continuidades_persistidas.add(codigo_auto)
-                        tentativas_auto.pop(chave_auto, None)
-                    except Exception:
-                        # Nunca inventar ficha nova nem perder a continuidade
-                        # reconhecida para consulta se o banco ficar indisponível.
-                        continuidades_pendentes.add(codigo_auto)
-                if continuidades_pendentes and PODE_EDITAR_FAROL:
-                    st.warning(
-                        "Algumas continuidades de acompanhamento foram reconhecidas, "
-                        "mas ainda não tiveram o novo vínculo gravado no Supabase. "
-                        "A associação pode ser consultada nesta sessão; "
-                        "a gravação será tentada novamente após alguns minutos."
-                    )
 
-            ids_fichas_ativas = {
-                str(vinculos_acomp_visiveis[chave]["evento_id"])
-                for chave in chaves_ativas if chave in vinculos_acomp_visiveis
-            }
-            candidatos_acomp_por_codigo = {}
-            if recuperar_supabase_ativo and not erro_acomp_visivel:
-                for codigo_atual, ctx in contextos_ativos_acomp.items():
-                    if (ctx["chave"] in vinculos_acomp_visiveis
-                            or ctx["multiplos_municipios"]):
-                        continue
-                    opcoes = sugerir_recuperacoes(
-                        todos_vinculos_acomp, ctx["municipio"],
-                        ctx["latitude"], ctx["longitude"], ctx["os"],
-                        chaves_ativas=chaves_ativas,
-                    )
-                    opcoes = [
-                        op for op in opcoes
-                        if op["evento_id"] in fichas_acomp_visiveis
-                        and op["evento_id"] not in ids_fichas_ativas
-                    ]
-                    if opcoes:
-                        candidatos_acomp_por_codigo[codigo_atual] = opcoes
-            # Uma ficha que combina com duas concentrações atuais pode
-            # indicar divisão/fusão: bloquear a recuperação até revisão.
-            uso_candidato = {}
-            for opcoes in candidatos_acomp_por_codigo.values():
-                for opcao in opcoes:
-                    eid = opcao["evento_id"]
-                    uso_candidato[eid] = uso_candidato.get(eid, 0) + 1
+            # Só as chaves exatas persistidas vinculam concentração e ficha.
+            # O usuário escolhe o que copiar, sem sincronização/união implícita.
+            # Opções de cópia são identificadas por concentrações ativas, não
+            # por coincidência de bairro/evento. Seleção e cópia sempre manuais.
+            fontes_copia_ativas = []
+            for codigo_origem, contexto_origem in contextos_ativos_acomp.items():
+                vinculo_origem = vinculos_acomp_visiveis.get(contexto_origem["chave"])
+                if not vinculo_origem:
+                    continue
+                id_origem = str(vinculo_origem.get("evento_id", ""))
+                ficha_origem = fichas_acomp_visiveis.get(id_origem)
+                if not ficha_origem:
+                    continue
+                fontes_copia_ativas.append({
+                    "id": id_origem,
+                    "codigo": codigo_origem,
+                    "titulo": str(ficha_origem.get("titulo", "") or ""),
+                    "municipio": contexto_origem.get("municipio", ""),
+                    "bairros": contexto_origem.get("bairros", ""),
+                })
+
             # Três unidades separadas, com ordenação THE / API / TIM.
             aba_the, aba_api, aba_tim = st.tabs([
                 "📍 THE — Teresina", "🌐 API — Piauí", "📍 TIM — Timon"
@@ -5238,43 +5794,65 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     st.caption(f"{len(concentracoes_abrangencia)} concentração(ões) em {abrangencia}.")
                     if concentracoes_abrangencia.empty:
                         st.info("Nenhuma concentração encontrada nesta abrangência.")
-                    for _, concentracao in concentracoes_abrangencia.iterrows():
+                    if abrangencia == "API" and not concentracoes_abrangencia.empty:
+                        mapa_regionais_api, aviso_regionais = carregar_regionais_api_modulo5()
+                        if aviso_regionais:
+                            st.warning(aviso_regionais)
+                        exibicao_concentracoes = ordenar_concentracoes_api_por_regional(
+                            concentracoes_abrangencia, grupos_os, mapa_regionais_api
+                        )
+                    else:
+                        exibicao_concentracoes = [
+                            (None, conc) for _, conc in concentracoes_abrangencia.iterrows()
+                        ]
+                    regional_anterior = None
+                    for regional_atual, concentracao in exibicao_concentracoes:
+                        if abrangencia == "API" and regional_atual != regional_anterior:
+                            st.markdown(f"#### {html_escape(regional_atual).upper()}")
+                            regional_anterior = regional_atual
                         codigo = concentracao["ID_CONCENTRACAO"]
                         os_grupo = grupos_os.get(concentracao["GRUPO"], pontos_cluster.iloc[0:0])
                         cidades_grupo = sorted({str(v).strip() for v in os_grupo["Cidade"] if str(v).strip()})
                         qtd_ativos = (int((proximidades["Concentração"] == codigo).sum())
                                       if not proximidades.empty else 0)
-                        # Calcular o vínculo de eventos uma única vez por concentração.
-                        # A ficha detalhada reutiliza este resultado quando for aberta.
-                        os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
-                            concentracao, pontos_cluster, proximidades, df_eventos, bairros
+                        # Resumo da passagem compartilhada; nenhum relatório
+                        # ou tabela individual é calculado na montagem do cartão.
+                        resumo_eventos = resumo_eventos_por_grupo.get(
+                            concentracao["GRUPO"], {}
                         )
+                        total_eventos = int(resumo_eventos.get("eventos_relacionados", 0))
                         indicador_eventos = (
-                            f"⚡ {len(eventos_do_grupo)} evento(s) relacionado(s)"
-                            if not eventos_do_grupo.empty else "Sem evento relacionado"
+                            f"⚡ {total_eventos} evento(s) relacionado(s)"
+                            if total_eventos else "Sem evento relacionado"
                         )
                         municipio_nota = cidades_grupo[0] if cidades_grupo else ""
                         numeros_os = [str(x).strip() for x in os_grupo.get("Nº da O.S", []) if str(x).strip()]
                         municipio_acomp = cidades_grupo[0] if cidades_grupo else municipio_nota
                         contexto_atual = contextos_ativos_acomp[str(codigo)]
                         chave_acomp = contexto_atual["chave"]
-                        opcoes_recuperar = candidatos_acomp_por_codigo.get(str(codigo), [])
                         concentracoes.loc[concentracoes["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "CHAVE_ACOMPANHAMENTO"] = chave_acomp
                         vinculo_acomp = vinculos_acomp_visiveis.get(chave_acomp)
-                        resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "EVENTOS_RELACIONADOS"] = len(eventos_do_grupo)
+                        resumo_pdf.loc[resumo_pdf["ID_CONCENTRACAO"] == codigo, "EVENTOS_RELACIONADOS"] = total_eventos
                         ficha_acomp = fichas_acomp_visiveis.get(str(vinculo_acomp.get("evento_id", ""))) if vinculo_acomp else None
-                        if ficha_acomp and (str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
-                                             or str(ficha_acomp.get("status", "")).strip().casefold().startswith("concluído")):
+                        compartilhada_antiga = bool(
+                            vinculo_acomp and total_vinculos_por_ficha.get(
+                                str(vinculo_acomp.get("evento_id", "")), 0
+                            ) > 1
+                        )
+                        if compartilhada_antiga:
+                            indicador_nota = "⚠️ Ficha antiga compartilhada — separar ao editar"
+                        elif ficha_acomp and (
+                            str(ficha_acomp.get("finalizado", "")).strip().casefold() == "sim"
+                            or str(ficha_acomp.get("status", "")).strip().casefold().startswith("conclu")
+                        ):
                             indicador_nota = "✅ Acompanhamento concluído"
                         elif vinculo_acomp and ficha_acomp:
-                            indicador_nota = "🔄 Acompanhamento em andamento"
+                            indicador_nota = f"🔄 Em andamento — Ficha #{ficha_acomp['id']}"
                         elif vinculo_acomp:
                             indicador_nota = "Acompanhamento vinculado — ficha indisponível"
-                        elif opcoes_recuperar:
-                            indicador_nota = "🔎 Possível acompanhamento existente — revisar vínculo"
                         else:
-                            indicador_nota = "Sem vínculo exato identificado" if not erro_acomp_visivel else "Acompanhamento indisponível"
+                            indicador_nota = "Sem acompanhamento nesta concentração"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
                         titulo = (
                             f"{codigo} — {', '.join(cidades_grupo) or 'Município não informado'}"
@@ -5296,24 +5874,24 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                         mapa_ativo = codigo_texto == str(st.session_state.get("farol_v2_concentracao", ""))
                         with st.expander(titulo, expanded=detalhe_ativo or mapa_ativo):
                             if vinculo_acomp:
-                                st.success(indicador_nota)
-                                if str(codigo) in continuidades_automaticas:
-                                    st.caption(
-                                        "Continuidade reconhecida automaticamente: as O.S. "
-                                        "anteriores permanecem na concentração. "
-                                        "Ficha e movimentações originais preservadas."
-                                    )
-                            elif opcoes_recuperar:
-                                st.warning(
-                                    "Há acompanhamento(s) anterior(es) com O.S. em comum. "
-                                    "Nenhuma ficha foi movida; confirme o vínculo antes de criar outra."
-                                )
+                                if compartilhada_antiga:
+                                    st.info(indicador_nota)
+                                else:
+                                    st.success(indicador_nota)
                             else:
                                 st.caption(
-                                    "Nenhum vínculo exato encontrado para esta composição de O.S. "
-                                    "Se já existia uma ficha, confira o histórico antes de criar outra."
+                                    "Esta concentração ainda não possui acompanhamento. "
+                                    "Crie sua ficha independente ou copie informações de outra."
                                 )
 
+                            fontes_copia = [
+                                origem for origem in fontes_copia_ativas
+                                if origem["codigo"] != str(codigo)
+                                and origem["id"] != (
+                                    str(vinculo_acomp.get("evento_id", ""))
+                                    if vinculo_acomp else ""
+                                )
+                            ]
                             contexto_popup = {
                                 "chave": chave_acomp, "codigo": str(codigo),
                                 "municipio": municipio_acomp, "bairros": bairros_grupo,
@@ -5321,81 +5899,37 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                 "longitude": float(concentracao["LONGITUDE"]),
                                 "os": numeros_os, "qtd": int(concentracao["QTD_OS"]),
                                 "evento_id": str(vinculo_acomp["evento_id"]) if vinculo_acomp else "",
+                                "ficha_compartilhada": bool(
+                                    vinculo_acomp and total_vinculos_por_ficha.get(
+                                        str(vinculo_acomp["evento_id"]), 0
+                                    ) > 1
+                                ),
+                                "fontes_copia": fontes_copia,
+                                "evento_chave": (
+                                    contexto_atual["evento_chaves"][0]
+                                    if len(contexto_atual["evento_chaves"]) == 1 else ""
+                                ),
                                 "origem": "producao",
                             }
-                            if opcoes_recuperar and not vinculo_acomp:
-                                if st.button(
-                                    "🔗 Revisar acompanhamento existente",
-                                    key=f"farol_revisar_vinculo_{abrangencia}_{codigo}",
-                                    disabled=not PODE_EDITAR_FAROL,
-                                ):
-                                    st.session_state["farol_codigo_recuperacao"] = str(codigo)
-                                    st.session_state["farol_v2_detalhe_aberto"] = str(codigo)
-                                    st.rerun()
-                                if st.session_state.get("farol_codigo_recuperacao") == str(codigo):
-                                    with st.form(f"farol_form_recuperar_{abrangencia}_{codigo}"):
-                                        escolha = st.selectbox(
-                                            "Ficha anterior para esta concentração",
-                                            list(range(len(opcoes_recuperar))),
-                                            format_func=lambda i: (
-                                                f"Ficha #{opcoes_recuperar[i]['evento_id']} — "
-                                                f"{str(fichas_acomp_visiveis[opcoes_recuperar[i]['evento_id']].get('titulo', ''))[:75]} "
-                                                f"— {opcoes_recuperar[i]['os_em_comum']} O.S. em comum "
-                                                f"— {opcoes_recuperar[i]['distancia_m']} m"
-                                            ),
-                                            key=f"farol_escolha_recuperacao_{abrangencia}_{codigo}",
-                                        )
-                                        candidato = opcoes_recuperar[escolha]
-                                        ficha_candidata = fichas_acomp_visiveis[candidato["evento_id"]]
-                                        st.caption(
-                                            f"Registro de {candidato['criado_em']} · "
-                                            f"Status: {ficha_candidata.get('status', '')} · "
-                                            f"{candidato['os_em_comum']} de {candidato['os_anteriores']} O.S. "
-                                            f"anteriores e {candidato['os_atuais']} O.S. atuais · "
-                                            f"Distância entre centros: {candidato['distancia_m']} m"
-                                        )
-                                        ambiguo = uso_candidato.get(candidato["evento_id"], 0) > 1
-                                        if ambiguo:
-                                            st.error(
-                                                "Esta ficha também corresponde a outra concentração atual "
-                                                "(possível divisão/fusão). Recuperação bloqueada para evitar associação incorreta."
-                                            )
-                                        confirmado = st.checkbox(
-                                            "Confirmei que a concentração atual corresponde à ficha selecionada. "
-                                            "O vínculo antigo e todo o histórico serão preservados.",
-                                            key=f"farol_confirmar_recuperacao_{abrangencia}_{codigo}",
-                                        )
-                                        recuperar = st.form_submit_button(
-                                            "Confirmar recuperação do vínculo",
-                                            type="primary",
-                                            disabled=ambiguo or not PODE_EDITAR_FAROL,
-                                        )
-                                    if recuperar:
-                                        if not confirmado:
-                                            st.warning("Confirme a correspondência com a ficha anterior antes de recuperar.")
-                                        else:
-                                            try:
-                                                recuperar_vinculo_confirmado(
-                                                    contexto_popup, candidato["chave_anterior"],
-                                                    candidato["evento_id"],
-                                                )
-                                                st.session_state.pop("farol_codigo_recuperacao", None)
-                                                st.toast("Vínculo recuperado; ficha e histórico preservados.")
-                                                st.rerun()
-                                            except Exception as erro_recuperar:
-                                                st.error(f"Não foi possível recuperar o vínculo: {erro_recuperar}")
-                            else:
-                                rotulo_acomp = (
-                                    ("✏️ Abrir / Editar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
-                                    if vinculo_acomp
-                                    else ("📝 Iniciar Acompanhamento" if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento")
+                            rotulo_acomp = (
+                                "✏️ Abrir / Editar Acompanhamento" if vinculo_acomp
+                                else "📝 Iniciar Acompanhamento"
+                            ) if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento"
+                            if st.button(
+                                rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
+                                disabled=bool(erro_acomp_visivel),
+                            ):
+                                popup_acompanhamento_farol(
+                                    contexto_popup, pode_editar=PODE_EDITAR_FAROL
                                 )
+                            if fontes_copia and PODE_EDITAR_FAROL:
                                 if st.button(
-                                    rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
-                                    disabled=bool(erro_acomp_visivel),
+                                    "📋 Copiar dados de outra concentração",
+                                    key=f"farol_copiar_ficha_{abrangencia}_{codigo}",
                                 ):
                                     popup_acompanhamento_farol(
-                                        contexto_popup, pode_editar=PODE_EDITAR_FAROL
+                                        dict(contexto_popup, abrir_copia=True),
+                                        pode_editar=PODE_EDITAR_FAROL,
                                     )
                             if st.button("🗺️ Abrir mapa desta concentração" if not mapa_ativo else "📍 Mapa desta concentração aberto",
                                          key=f"farol_v2_foco_{abrangencia}_{codigo}", disabled=mapa_ativo):
@@ -5408,6 +5942,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             # Evita criar vários st.dataframe e executar uma consulta aos
                             # gráficos dos loggers para CADA expansor em todo rerun.
                             if detalhe_ativo:
+                                # Somente o código escolhido realiza o cálculo
+                                # completo de O.S., ativos e eventos para as tabelas.
+                                os_eventos, ativos_eventos, eventos_do_grupo = dados_relatorio_concentracao(
+                                    concentracao, pontos_cluster, proximidades,
+                                    df_eventos, bairros,
+                                )
                                 if st.button("▴ Ocultar detalhes desta concentração",
                                              key=f"farol_v2_ocultar_detalhe_{abrangencia}_{codigo}"):
                                     # String vazia: não reabrir o detalhe apenas por haver
