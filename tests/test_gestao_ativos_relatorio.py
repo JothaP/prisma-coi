@@ -142,7 +142,11 @@ class TestRelatorioPontosAtencao(unittest.TestCase):
     def test_ui_e_backend_apenas_leitura(self):
         pagina = PAGINA.read_text(encoding="utf-8")
         backend = BACKEND.read_text(encoding="utf-8")
-        self.assertIn('with st.expander("📋 Gerar relatório — Pontos de Atenção"', pagina)
+        self.assertIn('@st.dialog("📋 Gerar Relatório — Pontos de Atenção"', pagina)
+        self.assertIn('def _dialogo_gerar_relatorio(cidades, cidades_reparos):', pagina)
+        self.assertIn('st.button("📋 Gerar Relatório"', pagina)
+        self.assertNotIn('with st.expander("📋 Gerar relatório', pagina)
+        self.assertIn('"data_referencia": data_relatorio.isoformat()', pagina)
         self.assertIn('with st.form("ga_relatorio_editor_form"):', pagina)
         self.assertIn('num_rows="dynamic"', pagina)
         self.assertIn('"Status no relatório": st.column_config.SelectboxColumn(', pagina)
