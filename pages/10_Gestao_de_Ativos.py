@@ -766,22 +766,29 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
             help="Consulta as fichas do município; não modifica nenhum registro.",
         ):
             try:
-                with st.spinner("Consultando as fichas de ativos no Supabase..."):
+                with st.spinner("Consultando poços e fechamentos no Supabase..."):
                     registros_relatorio = listar_fichas_para_relatorio(municipio_relatorio)
+                    registros_reparos_relatorio = listar_fechamentos_relatorio(
+                        municipio_relatorio
+                    )
                 linhas_relatorio = preparar_itens_relatorio(
                     registros_relatorio, incluir_operando=incluir_operando
+                )
+                linhas_reparos_relatorio = preparar_fechamentos_relatorio(
+                    registros_reparos_relatorio
                 )
                 st.session_state["ga_relatorio_fichas"] = {
                     "municipio": municipio_relatorio,
                     "incluir_operando": incluir_operando,
                     "itens": linhas_relatorio,
+                    "fechamentos": linhas_reparos_relatorio,
                 }
                 st.session_state["ga_relatorio_versao"] = (
                     st.session_state.get("ga_relatorio_versao", 0) + 1
                 )
                 st.session_state.pop("ga_relatorio_texto", None)
-                if not linhas_relatorio:
-                    st.info("Nenhuma ficha operacional preenchida para esses filtros.")
+                if not linhas_relatorio and not linhas_reparos_relatorio:
+                    st.info("Nenhuma ficha de poço ou fechamento disponível para esse município.")
             except ErroPRISMA as exc:
                 st.error(f"Não foi possível consultar as fichas: {exc}")
 
@@ -794,18 +801,22 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                 "Os filtros foram alterados. Clique em Carregar fichas "
                 "novamente para montar a lista correspondente."
             )
-        elif fichas_revisao and fichas_revisao["itens"]:
+        elif fichas_revisao and (
+            fichas_revisao["itens"] or fichas_revisao.get("fechamentos")
+        ):
             st.caption(
-                f"{len(fichas_revisao['itens'])} ficha(s) disponível(is). "
-                "Revise a descrição, a O.S. e o status usado para agrupar "
-                "o relatório. A cor de cada marcador acompanha esse status. "
-                "Desmarque os itens que não devem aparecer ou inclua linhas manuais "
-                "(por exemplo, dois poços de uma mesma planta). "
-                "Nenhuma alteração nesta tabela modifica a ficha do ativo."
+                f"{len(fichas_revisao['itens'])} ficha(s) de poços e "
+                f"{len(fichas_revisao.get('fechamentos', []))} fechamento(s) disponíveis. "
+                "Revise os status, descrições e itens selecionados. "
+                "Os ajustes no editor não alteram as fichas do Supabase."
             )
             with st.form("ga_relatorio_editor_form"):
+                st.markdown("**💧 Poços — agrupados por status**")
                 dados_editor = st.data_editor(
-                    pd.DataFrame(fichas_revisao["itens"]),
+                    pd.DataFrame(fichas_revisao["itens"], columns=[
+                        "Incluir", "Ordem", "Status no relatório", "Seção", "Situação",
+                        "Poço / ativo", "Observação", "O.S.", "Nota", "Planta de origem"
+                    ]),
                     key=f"ga_relatorio_editor_{st.session_state.get('ga_relatorio_versao', 0)}",
                     use_container_width=True, hide_index=True,
                     num_rows="dynamic",
@@ -833,21 +844,55 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                         "Planta de origem": st.column_config.TextColumn("Planta (referência)"),
                     },
                 )
+                st.markdown("**🚧 Fechamentos / reparos de rede — por status**")
+                dados_reparos_editor = st.data_editor(
+                    pd.DataFrame(fichas_revisao.get("fechamentos", []), columns=[
+                        "Incluir", "Ordem", "Status do fechamento",
+                        "Líder", "Equipe", "Matrícula", "O.S.", "Bairro", "Data",
+                    ]),
+                    key=f"ga_relatorio_reparos_{st.session_state.get('ga_relatorio_versao', 0)}",
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic",
+                    column_config={
+                        "Incluir": st.column_config.CheckboxColumn("Incluir"),
+                        "Ordem": st.column_config.NumberColumn(
+                            "Posição", min_value=0, step=1, format="%d"),
+                        "Status do fechamento": st.column_config.SelectboxColumn(
+                            "Status 🚧", options=list(STATUS_FECHAMENTOS_RELATORIO),
+                            required=True,
+                            help="Agrupamento no relatório; não altera status cadastrado.",
+                        ),
+                        "Líder": st.column_config.TextColumn("Líder"),
+                        "Equipe": st.column_config.TextColumn("Equipe"),
+                        "Matrícula": st.column_config.TextColumn("Matrícula"),
+                        "O.S.": st.column_config.TextColumn("O.S."),
+                        "Bairro": st.column_config.TextColumn("Bairro"),
+                        "Data": st.column_config.TextColumn("Data (AAAA-MM-DD)"),
+                    },
+                )
                 montar_relatorio = st.form_submit_button(
                     "Gerar texto do relatório", type="primary",
                     use_container_width=True,
                 )
             if montar_relatorio:
                 registros_editados = dados_editor.to_dict("records")
-                if not any(
+                reparos_editados = dados_reparos_editor.to_dict("records")
+                selecionados_pocos = any(
                     item.get("Incluir") is True
                     and str(item.get("Poço / ativo") or "").strip()
                     for item in registros_editados
-                ):
-                    st.warning("Selecione pelo menos um item com identificação.")
+                )
+                selecionados_reparos = any(
+                    item.get("Incluir") is True
+                    and str(item.get("Bairro") or "").strip()
+                    for item in reparos_editados
+                )
+                if not selecionados_pocos and not selecionados_reparos:
+                    st.warning("Selecione pelo menos um poço ou fechamento identificado.")
                 else:
                     st.session_state["ga_relatorio_texto"] = gerar_pontos_atencao(
-                        municipio_relatorio, data_relatorio, registros_editados
+                        municipio_relatorio, data_relatorio, registros_editados,
+                        fechamentos=reparos_editados,
                     )
 
         if (fichas_revisao
