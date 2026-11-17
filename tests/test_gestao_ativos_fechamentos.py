@@ -25,6 +25,7 @@ def backend_isolado(chamadas):
     arvore = ast.parse(BACKEND.read_text(encoding="utf-8"))
     nomes = {
         "_autor", "_uuid", "_leitura", "_campos", "_coordenadas",
+        "_filtros_continuidade",
         "criar_fechamento", "editar_fechamento", "listar_fechamentos",
         "listar_fechamentos_relatorio", "obter_fechamento",
     }
@@ -154,14 +155,20 @@ class TestFechamentosRede(unittest.TestCase):
         )
         nome, op = self.chamadas[-1]
         self.assertEqual(nome, "prisma_fechamentos_rede")
-        self.assertEqual(op["params"]["data"], "eq.2026-11-17")
+        self.assertEqual(op["params"]["data"], "lte.2026-11-17")
+        self.assertEqual(
+            op["params"]["status"], "in.(em_andamento,pendente)"
+        )
         self.ctx["listar_fechamentos"]("TERESINA", "", "", "Todos", None)
         self.assertNotIn("data", self.chamadas[-1][1]["params"])
         self.ctx["listar_fechamentos_relatorio"](
             "TERESINA", date(2026, 11, 17)
         )
-        self.assertEqual(
-            self.chamadas[-1][1]["params"]["data"], "eq.2026-11-17"
+        self.assertIn(
+            "and(data.lte.2026-11-17", self.chamadas[-1][1]["params"]["and"]
+        )
+        self.assertIn(
+            "and(data.eq.2026-11-17", self.chamadas[-1][1]["params"]["and"]
         )
 
     def test_formulario_encerrado_exibe_campos_condicionais(self):
