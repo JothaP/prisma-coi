@@ -799,13 +799,28 @@ def evento_pertinente_periodo(evento, inicio, fim):
     return True
 
 
-@lru_cache(maxsize=1)
-def bairros_do_farol():
-    """Carrega os mesmos GeoPackages/KMZ usados no M3, apenas uma vez/processo.
-
-    O leitor trata falhas isoladas nos arquivos da mesma forma que o Farol.
-    """
+@lru_cache(maxsize=3)
+def _bairros_por_assinatura(assinatura):
+    """Cache de geometrias com invalidação por arquivos modificados."""
     return descobrir_kmz()
+
+
+def bairros_do_farol():
+    """Usa as mesmas camadas do M3, atualizando quando arquivos mudam."""
+    arquivos = []
+    diretorio = Path(DIRETORIO_KMZ)
+    if diretorio.is_dir():
+        arquivos.extend(
+            p for p in diretorio.iterdir()
+            if p.is_file() and p.suffix.lower() in {".gpkg", ".kmz", ".kml"}
+        )
+    if Path(ARQUIVO_KMZ_PADRAO).is_file():
+        arquivos.append(Path(ARQUIVO_KMZ_PADRAO))
+    assinatura = tuple(sorted(
+        (str(p), p.stat().st_size, p.stat().st_mtime_ns)
+        for p in arquivos
+    ))
+    return _bairros_por_assinatura(assinatura)
 
 
 def eventos_do_grupo_farol(grupo, eventos, bairros, inicio, fim):
