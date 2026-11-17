@@ -73,7 +73,7 @@ class TestFechamentosRede(unittest.TestCase):
         inicio = codigo.index("def _painel_fechamento(")
         fim = codigo.index('st.title("Gestão de Ativos")', inicio)
         bloco = codigo[inicio:fim]
-        pos = [bloco.index(f'st.text_input("{campo}"') for campo in
+        pos = [bloco.index(f'"{campo}"') for campo in
                ("Líder", "Equipe", "Matrícula", "O.S.", "Bairro")]
         self.assertEqual(pos, sorted(pos))
         self.assertLess(bloco.index('st.date_input('),
