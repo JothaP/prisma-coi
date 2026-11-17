@@ -87,8 +87,20 @@ def listar_ativos(municipio=None, pesquisa="", status=None):
     }
     if municipio and municipio != "Todos":
         params["municipio"] = "eq." + municipio
-    if status and status != "Todos":
-        params["status"] = "eq." + status
+    # Filtro multisseleção: vazio significa todos os status (inclusive sem
+    # classificação). Os valores são validados para não compor filtros livres.
+    selecionados = (
+        [status] if isinstance(status, str) and status != "Todos"
+        else list(status or []) if not isinstance(status, str) else []
+    )
+    if selecionados:
+        if any(codigo not in STATUS for codigo in selecionados):
+            raise ErroPRISMA("Um dos status selecionados é inválido.")
+        codigos = sorted(set(selecionados))
+        if len(codigos) == 1:
+            params["status"] = "eq." + codigos[0]
+        else:
+            params["status"] = "in.(" + ",".join(codigos) + ")"
     termo = re.sub(r"[^\w\s-]", "", pesquisa or "", flags=re.UNICODE).strip()[:70]
     if termo:
         params["or"] = f"(planta.ilike.*{termo}*,nome.ilike.*{termo}*)"
