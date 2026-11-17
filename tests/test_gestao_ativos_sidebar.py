@@ -27,7 +27,7 @@ class TestGestaoCampoSidebar(unittest.TestCase):
         self.assertIn('"pagina": "pages/10_Gestao_de_Ativos.py"', self.app)
         self.assertNotIn('"titulo": "Gestão de Ativos"', self.app)
 
-    def test_quatro_acessos_somente_na_sidebar(self):
+    def test_acessos_e_relatorio_somente_na_sidebar(self):
         inicio = self.pagina.index('with st.sidebar:\n    st.markdown("### Gestão de Campo")')
         fim = self.pagina.index('if not HISTORICO_DISPONIVEL:', inicio)
         sidebar = self.pagina[inicio:fim]
@@ -35,7 +35,9 @@ class TestGestaoCampoSidebar(unittest.TestCase):
             'st.button("← Retornar ao Menu Principal"',
             'st.button("＋ Novo Poço"',
             'st.button("🚧 Novo Fechamento"',
+            'st.button("📋 Gerar Relatório"',
             'st.button("⚙️ Administração"',
+            '_dialogo_gerar_relatorio(cidades, cidades_reparos)',
             'st.switch_page("app.py")',
             '_dialogo_novo_fechamento(',
             '_dialogo_administracao()',
@@ -46,6 +48,12 @@ class TestGestaoCampoSidebar(unittest.TestCase):
         self.assertEqual(self.pagina.count('st.button("🚧 Novo Fechamento"'), 1)
         self.assertEqual(self.pagina.count('st.button("＋ Novo Poço"'), 1)
         self.assertEqual(self.pagina.count('st.button("⚙️ Administração"'), 1)
+        self.assertEqual(self.pagina.count('st.button("📋 Gerar Relatório"'), 1)
+        self.assertLess(sidebar.index('st.button("📋 Gerar Relatório"'),
+                        sidebar.index('st.button("⚙️ Administração"'))
+        self.assertNotIn('with st.expander("📋 Gerar relatório', self.pagina)
+        self.assertIn('@st.dialog("📋 Gerar Relatório — Pontos de Atenção"', self.pagina)
+        self.assertIn('def _dialogo_gerar_relatorio(cidades, cidades_reparos):', self.pagina)
 
     def test_administracao_em_modal_e_protegida(self):
         self.assertIn('@st.dialog("⚙️ Administração — Gestão de Campo"', self.pagina)
