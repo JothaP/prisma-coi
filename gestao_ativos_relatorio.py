@@ -24,6 +24,19 @@ STATUS_RELATORIO = {
     "Operando": "🔵",
     "Não informado": "⚪",
 }
+STATUS_FECHAMENTOS_RELATORIO = {
+    "Pendente": "🔴",
+    "Em andamento": "🟡",
+    "Concluído": "🟢",
+    "Cancelado": "⚫",
+}
+CODIGOS_FECHAMENTO = {
+    "pendente": "Pendente",
+    "em_andamento": "Em andamento",
+    "concluido": "Concluído",
+    "cancelado": "Cancelado",
+}
+
 STATUS_CADASTRO = {
     "em_observacao": "Em Observação",
     "em_manutencao": "Em manutenção",
@@ -118,7 +131,55 @@ def _formatar_linha(item: dict, marcador: str, numero: int | None = None) -> str
     return prefixo + (" - " + " | ".join(complementos) if complementos else "")
 
 
-def gerar_pontos_atencao(municipio: str, data_relatorio: date, itens: list[dict]) -> str:
+
+
+
+def preparar_fechamentos_relatorio(fechamentos: list[dict]) -> list[dict]:
+    """Conserva os status definidos nas fichas; permite revisão antes da geração."""
+    registros = []
+    for reg in fechamentos:
+        status = CODIGOS_FECHAMENTO.get(_texto(reg.get("status")))
+        if status is None:
+            continue
+        registros.append({
+            "Incluir": status in ("Pendente", "Em andamento"),
+            "Ordem": len(registros) + 1,
+            "Status do fechamento": status,
+            "Líder": _texto(reg.get("lider")),
+            "Equipe": _texto(reg.get("equipe")),
+            "Matrícula": _texto(reg.get("matricula")),
+            "O.S.": _texto(reg.get("os")),
+            "Bairro": _texto(reg.get("bairro")),
+            "Data": _texto(reg.get("data"))[:10],
+        })
+    return registros
+
+
+def _data_relatorio_fechamento(valor: str) -> str:
+    valor = _texto(valor)
+    try:
+        return date.fromisoformat(valor[:10]).strftime("%d/%m/%Y")
+    except ValueError:
+        return valor
+
+
+def _formatar_fechamento(item: dict, numero: int) -> str:
+    partes = []
+    for chave, rotulo in (
+        ("Bairro", "Bairro"), ("Líder", "Líder"), ("Equipe", "Equipe"),
+        ("Matrícula", "Matrícula"), ("O.S.", "O.S."),
+        ("Data", "Data"),
+    ):
+        valor = _texto(item.get(chave))
+        if valor:
+            if chave == "Data":
+                valor = _data_relatorio_fechamento(valor)
+            partes.append(f"{rotulo}: {valor}")
+    return f"🚧 {numero}. " + (" | ".join(partes) if partes else "Reparo de rede")
+
+
+def gerar_pontos_atencao(municipio: str, data_relatorio: date, itens: list[dict],
+                         fechamentos: list[dict] | None = None) -> str:
     """Agrupa pelo status selecionado no relatório e usa sua cor como marcador."""
     if not isinstance(data_relatorio, (date, datetime)):
         raise ValueError("Data do relatório inválida.")
@@ -150,4 +211,26 @@ def gerar_pontos_atencao(municipio: str, data_relatorio: date, itens: list[dict]
             cabecalho.append("⚠️ OBSERVAÇÕES POÇOS:")
             for numero, item in enumerate(secoes["OBSERVAÇÕES POÇOS"], start=1):
                 cabecalho.append(_formatar_linha(item, simbolo, numero))
+    # A relação de fechamentos fica separada dos poços e agrupada pelo status
+    # atribuído ao reparo, sem qualquer inferência a partir da existência de O.S.
+    grupos_rede = {status: [] for status in STATUS_FECHAMENTOS_RELATORIO}
+    for _, reparo in sorted(enumerate(fechamentos or []),
+                            key=lambda par: _ordem_item(par[1], par[0])):
+        if reparo.get("Incluir") is not True:
+            continue
+        status = _texto(reparo.get("Status do fechamento"))
+        if status in grupos_rede:
+            grupos_rede[status].append(reparo)
+    if any(grupos_rede.values()):
+        cabecalho.extend(["______________", "🚧 FECHAMENTOS / REPAROS DE REDE"])
+        for status, lista in grupos_rede.items():
+            if not lista:
+                continue
+            cabecalho.extend([
+                "______________",
+                f"{STATUS_FECHAMENTOS_RELATORIO[status]} {status}:",
+                "_____________________",
+            ])
+            for numero, reparo in enumerate(lista, start=1):
+                cabecalho.append(_formatar_fechamento(reparo, numero))
     return "\n".join(cabecalho).strip() + "\n"
