@@ -778,59 +778,9 @@ def _dialogo_administracao():
                 st.error(f"Reset não realizado: {exc}")
 
 
-st.title("Gestão de Campo")
-st.caption("PRISMA · Poços, fechamentos e reparos de rede")
-
-try:
-    HISTORICO_DISPONIVEL = validar_historico()
-    cidades = _municipios()
-    cidades_reparos = _municipios_reparos()
-except ErroPRISMA as exc:
-    st.error(f"Não foi possível acessar o cadastro de ativos: {exc}")
-    st.stop()
-
-with st.sidebar:
-    st.markdown("### Gestão de Campo")
-    if st.button("← Retornar ao Menu Principal", key="ga_voltar",
-                 use_container_width=True):
-        st.switch_page("app.py")
-    st.divider()
-    st.markdown("**Cadastros**")
-    if st.button("＋ Novo Poço", key="ga_novo_poco", use_container_width=True,
-                 disabled=not pode_executar_acao("9", "criar") or not HISTORICO_DISPONIVEL):
-        st.session_state["ga_painel"] = {
-            "tipo": "novo", "coordenadas": None, "municipio_padrao": "TERESINA",
-        }
-    if st.button("🚧 Novo Fechamento", key="ga_novo_fechamento",
-                 use_container_width=True,
-                 disabled=not pode_executar_acao("9", "criar")):
-        # Sempre iniciar novo cadastro sem reutilizar coordenadas anteriores.
-        st.session_state.pop("ga_fechamento_lat_modal", None)
-        st.session_state.pop("ga_fechamento_lon_modal", None)
-        st.session_state["ga_modo_cadastro"] = False
-        st.session_state["ga_modo_fechamento"] = False
-        municipio_atual = st.session_state.get("ga_municipio_reparo")
-        municipio_padrao_dialogo = (
-            municipio_atual if municipio_atual and municipio_atual != "Todos"
-            else "TERESINA"
-        )
-        _dialogo_novo_fechamento(
-            [*cidades, *cidades_reparos],
-            municipio_padrao=municipio_padrao_dialogo,
-        )
-    if st.session_state.get("perfil") == "admin":
-        st.divider()
-        if st.button("⚙️ Administração", key="ga_admin",
-                     use_container_width=True):
-            _dialogo_administracao()
-    st.divider()
-
-if not HISTORICO_DISPONIVEL:
-    st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
-
-# Consulta apenas leitura e revisão em memória. Nenhuma classificação
-# automática dos status e nenhuma gravação em prisma_ativos.
-with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False):
+@st.dialog("📋 Gerar Relatório — Pontos de Atenção", width="large")
+def _dialogo_gerar_relatorio(cidades, cidades_reparos):
+    """Consulta fichas e edita o texto em memória; não modifica o Supabase."""
     st.caption(
         "Relatório dividido pelo status registrado na ficha: cada grupo e "
         "marcador utilizam a cor correspondente no mapa. Situação (Pendente / "
@@ -884,6 +834,7 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                 st.session_state["ga_relatorio_fichas"] = {
                     "municipio": municipio_relatorio,
                     "incluir_operando": incluir_operando,
+                    "data_referencia": data_relatorio.isoformat(),
                     "itens": linhas_relatorio,
                     "fechamentos": linhas_reparos_relatorio,
                 }
@@ -900,6 +851,7 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
         if fichas_revisao and (
             fichas_revisao["municipio"] != municipio_relatorio
             or fichas_revisao["incluir_operando"] != incluir_operando
+            or fichas_revisao.get("data_referencia") != data_relatorio.isoformat()
         ):
             st.warning(
                 "Os filtros foram alterados. Clique em Carregar fichas "
@@ -1006,6 +958,7 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
         if (fichas_revisao
                 and fichas_revisao["municipio"] == municipio_relatorio
                 and fichas_revisao["incluir_operando"] == incluir_operando
+                and fichas_revisao.get("data_referencia") == data_relatorio.isoformat()
                 and st.session_state.get("ga_relatorio_texto")):
             st.markdown("**Texto gerado — pronto para copiar e compartilhar**")
             texto_gerado = st.text_area(
@@ -1024,6 +977,60 @@ with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False
                 key="ga_relatorio_baixar",
             )
 
+
+st.title("Gestão de Campo")
+st.caption("PRISMA · Poços, fechamentos e reparos de rede")
+
+try:
+    HISTORICO_DISPONIVEL = validar_historico()
+    cidades = _municipios()
+    cidades_reparos = _municipios_reparos()
+except ErroPRISMA as exc:
+    st.error(f"Não foi possível acessar o cadastro de ativos: {exc}")
+    st.stop()
+
+with st.sidebar:
+    st.markdown("### Gestão de Campo")
+    if st.button("← Retornar ao Menu Principal", key="ga_voltar",
+                 use_container_width=True):
+        st.switch_page("app.py")
+    st.divider()
+    st.markdown("**Cadastros**")
+    if st.button("＋ Novo Poço", key="ga_novo_poco", use_container_width=True,
+                 disabled=not pode_executar_acao("9", "criar") or not HISTORICO_DISPONIVEL):
+        st.session_state["ga_painel"] = {
+            "tipo": "novo", "coordenadas": None, "municipio_padrao": "TERESINA",
+        }
+    if st.button("🚧 Novo Fechamento", key="ga_novo_fechamento",
+                 use_container_width=True,
+                 disabled=not pode_executar_acao("9", "criar")):
+        # Sempre iniciar novo cadastro sem reutilizar coordenadas anteriores.
+        st.session_state.pop("ga_fechamento_lat_modal", None)
+        st.session_state.pop("ga_fechamento_lon_modal", None)
+        st.session_state["ga_modo_cadastro"] = False
+        st.session_state["ga_modo_fechamento"] = False
+        municipio_atual = st.session_state.get("ga_municipio_reparo")
+        municipio_padrao_dialogo = (
+            municipio_atual if municipio_atual and municipio_atual != "Todos"
+            else "TERESINA"
+        )
+        _dialogo_novo_fechamento(
+            [*cidades, *cidades_reparos],
+            municipio_padrao=municipio_padrao_dialogo,
+        )
+    if st.button("📋 Gerar Relatório", key="ga_gerar_relatorio",
+                 use_container_width=True):
+        _dialogo_gerar_relatorio(cidades, cidades_reparos)
+    if st.session_state.get("perfil") == "admin":
+        st.divider()
+        if st.button("⚙️ Administração", key="ga_admin",
+                     use_container_width=True):
+            _dialogo_administracao()
+    st.divider()
+
+if not HISTORICO_DISPONIVEL:
+    st.warning("Histórico do Supabase não localizado. Consulta liberada; criação e edição bloqueadas.")
+
 if mensagem := st.session_state.pop("ga_mensagem", None):
     st.success(mensagem)
 if erro_status := st.session_state.pop("ga_erro_status", None):
@@ -1040,8 +1047,13 @@ with f1:
 with f2:
     pesquisa = st.text_input("Pesquisar planta ou nome", placeholder="Ex.: PL-THE-PCO0004")
 with f3:
-    status = st.selectbox("Status", ["Todos"] + list(STATUS)[1:],
-                          format_func=lambda s: s if s == "Todos" else STATUS[s])
+    status = st.multiselect(
+        "Status • Poços", options=list(STATUS)[1:], default=[],
+        format_func=lambda codigo: STATUS[codigo],
+        placeholder="Todos os status",
+        help="Selecione um ou mais status. Sem seleção, todos os poços são exibidos.",
+        key="ga_status_pocos_filtro",
+    )
 with f4:
     mapa_base = st.selectbox("Mapa-base", ["Padrão", "Satélite", "Terreno"])
 
@@ -1082,10 +1094,11 @@ with fr2:
         key="ga_bairro_reparo_filtro",
     )
 with fr3:
-    codigos_reparo = ["Todos"] + list(STATUS_FECHAMENTO)
-    status_reparo_filtro = st.selectbox(
-        "Status • Fechamentos", codigos_reparo,
-        format_func=lambda c: "Todos" if c == "Todos" else STATUS_FECHAMENTO[c][0],
+    status_reparo_filtro = st.multiselect(
+        "Status • Fechamentos", options=list(STATUS_FECHAMENTO), default=[],
+        format_func=lambda codigo: STATUS_FECHAMENTO[codigo][0],
+        placeholder="Todos os status",
+        help="Selecione um ou mais status. Sem seleção, todos os fechamentos são exibidos.",
         key="ga_status_reparo_filtro",
     )
 with fr4:
@@ -1142,11 +1155,11 @@ st.markdown(
 )
 
 try:
-    registros = _listar(municipio, pesquisa, status) if exibir_pocos else []
+    registros = _listar(municipio, pesquisa, tuple(status)) if exibir_pocos else []
     reparos_retornados = (
         _listar_reparos(
             municipio_reparo_filtro, bairro_reparo_filtro,
-            pesquisa_reparo_filtro, status_reparo_filtro,
+            pesquisa_reparo_filtro, tuple(status_reparo_filtro),
             dia_fechamentos_filtro,
         )
         if exibir_reparos else []
