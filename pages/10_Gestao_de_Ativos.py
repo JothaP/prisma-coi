@@ -543,6 +543,96 @@ def _painel_novo(coordenadas=None, municipio_padrao=""):
                 st.error(str(exc))
 
 
+def _painel_fechamento(registro=None, coordenadas=None, municipio_padrao=""):
+    """Ficha 🚧: três linhas exatas, sem modificar as fichas de poços."""
+    novo = registro is None
+    registro = registro or {}
+    bairro_atual = _texto(registro.get("bairro"))
+    titulo = ("🚧 Cadastrar fechamento / reparo de rede" if novo
+              else "🚧 Ficha do fechamento / reparo — " + bairro_atual)
+    with st.expander(titulo, expanded=True):
+        if novo:
+            lat, lon = coordenadas or (None, None)
+        else:
+            lat, lon = registro.get("latitude"), registro.get("longitude")
+        municipio_reparo = _texto(registro.get("municipio") or municipio_padrao)
+        st.caption(
+            f"Município: {municipio_reparo or 'não selecionado'} · "
+            f"Localização: {float(lat):.7f}, {float(lon):.7f}"
+            if lat is not None and lon is not None else
+            "Localização não definida: selecione um ponto no mapa."
+        )
+        st.button("Fechar ficha 🚧", key="ga_fechar_ficha_reparo",
+                  on_click=_fechar_painel)
+        with st.form("ga_form_fechamento_" + ("novo" if novo else str(registro["id"]))):
+            # Primeira linha: Líder e Equipe.
+            c1, c2 = st.columns(2)
+            with c1:
+                lider = st.text_input("Líder", value=_texto(registro.get("lider")),
+                                      max_chars=160)
+            with c2:
+                equipe = st.text_input("Equipe", value=_texto(registro.get("equipe")),
+                                       max_chars=160)
+            # Segunda linha: Matrícula, O.S. e Bairro.
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                matricula_reparo = st.text_input(
+                    "Matrícula", value=_texto(registro.get("matricula")), max_chars=80)
+            with c2:
+                os_reparo = st.text_input(
+                    "O.S.", value=_texto(registro.get("os")), max_chars=80)
+            with c3:
+                bairro_reparo = st.text_input(
+                    "Bairro", value=_texto(registro.get("bairro")), max_chars=160)
+            # Terceira linha: Data e Status.
+            c1, c2 = st.columns(2)
+            with c1:
+                data_reparo = st.date_input(
+                    "Data", value=_data(registro.get("data")) or datetime.now(FUSO).date(),
+                    format="DD/MM/YYYY",
+                )
+            with c2:
+                codigos = list(STATUS_FECHAMENTO)
+                atual = _texto(registro.get("status"))
+                status_reparo = st.selectbox(
+                    "Status", codigos,
+                    index=codigos.index(atual) if atual in codigos else 0,
+                    format_func=lambda codigo: STATUS_FECHAMENTO[codigo][0],
+                )
+            enviar = st.form_submit_button(
+                "Cadastrar fechamento 🚧" if novo else "Salvar fechamento 🚧",
+                type="primary", use_container_width=True,
+                disabled=not pode_executar_acao("9", "criar" if novo else "editar"),
+            )
+        if enviar:
+            campos_reparo = {
+                "lider": lider, "equipe": equipe,
+                "matricula": matricula_reparo, "os": os_reparo,
+                "bairro": bairro_reparo, "data": data_reparo,
+                "status": status_reparo, "municipio": municipio_reparo,
+            }
+            try:
+                if novo:
+                    salvo = criar_fechamento(campos_reparo, lat, lon)
+                    acao = "criar"
+                else:
+                    salvo = editar_fechamento(
+                        registro["id"], campos_reparo, registro.get("atualizado_em")
+                    )
+                    acao = "editar"
+                _auditar_reparo(acao, salvo)
+                _limpar_cache()
+                st.session_state["ga_painel"] = {
+                    "tipo": "fechamento", "id": salvo["id"],
+                }
+                st.session_state["ga_mensagem"] = (
+                    "Fechamento / reparo de rede salvo com sucesso."
+                )
+                st.rerun()
+            except ErroPRISMA as exc:
+                st.error(f"Não foi possível salvar o fechamento: {exc}")
+
+
 st.title("Gestão de Ativos")
 st.caption("PRISMA · Cadastro operacional georreferenciado no Supabase")
 col_voltar, col_novo = st.columns([4, 1])
