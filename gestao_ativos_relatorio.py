@@ -135,13 +135,22 @@ def _formatar_linha(item: dict, marcador: str, numero: int | None = None) -> str
 
 
 
-def preparar_fechamentos_relatorio(fechamentos: list[dict]) -> list[dict]:
-    """Conserva os status definidos nas fichas; permite revisão antes da geração."""
+def preparar_fechamentos_relatorio(
+    fechamentos: list[dict], data_referencia: date | None = None
+) -> list[dict]:
+    """Conserva status/data originais e identifica abertos de dias anteriores."""
     registros = []
     for reg in fechamentos:
         status = CODIGOS_FECHAMENTO.get(_texto(reg.get("status")))
         if status is None:
             continue
+        data_origem = _texto(reg.get("data"))[:10]
+        continua = False
+        if data_referencia is not None and status in ("Pendente", "Em andamento"):
+            try:
+                continua = date.fromisoformat(data_origem) < data_referencia
+            except ValueError:
+                pass
         registros.append({
             "Incluir": status in ("Pendente", "Em andamento"),
             "Ordem": len(registros) + 1,
@@ -151,7 +160,8 @@ def preparar_fechamentos_relatorio(fechamentos: list[dict]) -> list[dict]:
             "Matrícula": _texto(reg.get("matricula")),
             "O.S.": _texto(reg.get("os")),
             "Bairro": _texto(reg.get("bairro")),
-            "Data": _texto(reg.get("data"))[:10],
+            "Data": data_origem,
+            "Continuidade": "Sim" if continua else "",
             "O.S. de abertura": _texto(reg.get("os_abertura")),
             "Data da abertura": _texto(reg.get("data_abertura"))[:10],
         })
@@ -179,6 +189,8 @@ def _formatar_fechamento(item: dict, numero: int) -> str:
             if chave in ("Data", "Data da abertura"):
                 valor = _data_relatorio_fechamento(valor)
             partes.append(f"{rotulo}: {valor}")
+    if _texto(item.get("Continuidade")).lower() == "sim":
+        partes.append("Em continuidade de dias anteriores")
     return f"🚧 {numero}. " + (" | ".join(partes) if partes else "Reparo de rede")
 
 
