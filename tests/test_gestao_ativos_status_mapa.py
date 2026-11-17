@@ -171,6 +171,38 @@ class TestGestaoAtivosStatusMapa(unittest.TestCase):
             "|em_observacao|1763420000000_abcdefgh",
         ))
 
+    def test_selecao_de_ativo_nao_remonta_o_mapa_antes_do_submit(self):
+        """Selecionar marcador não pode mudar JS do folium por atributo show.
+
+        O st_folium gera a identidade pelo hash do JavaScript mesmo com key.
+        Um popup com show dependente da ficha recria o iframe entre a abertura
+        do marcador e o clique em Atualizar status.
+        """
+        fonte = FONTE.read_text(encoding="utf-8")
+        trecho_mapa = fonte.split(
+            'pode_editar_status = pode_executar_acao("9", "editar")', 1
+        )[1].split('resultado = st_folium(', 1)[0]
+        self.assertNotIn('id_selecionado', trecho_mapa)
+        self.assertNotIn('ga_painel', trecho_mapa)
+        arvore = ast.parse(trecho_mapa)
+        popups = [
+            no for no in ast.walk(arvore)
+            if isinstance(no, ast.Call)
+            and isinstance(no.func, ast.Attribute)
+            and no.func.attr == "Popup"
+            and isinstance(no.func.value, ast.Name)
+            and no.func.value.id == "folium"
+        ]
+        self.assertEqual(len(popups), 1)
+        self.assertFalse(
+            any(chave.arg == "show" for chave in popups[0].keywords),
+            "Popup com show dinâmico reinicia iframe no clique do marcador",
+        )
+        self.assertIn('_status_popup_html(registro, pode_editar_status)', trecho_mapa)
+        # A recriação intencional permanece reservada à gravação confirmada.
+        self.assertIn('st.session_state["ga_versao_mapa"] = ', fonte)
+        self.assertIn('_limpar_cache()', fonte)
+
     def test_codigo_sintaticamente_valido(self):
         ast.parse(FONTE.read_text(encoding="utf-8"), filename=str(FONTE))
 
