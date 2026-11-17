@@ -95,6 +95,40 @@ def listar_ativos(municipio=None, pesquisa="", status=None):
     return _tabela("prisma_ativos", params=params)
 
 
+
+def listar_fichas_para_relatorio(municipio: str) -> list[dict]:
+    """Consulta SOMENTE fichas do município, sem modificar o banco de ativos.
+
+    A leitura é paginada; não usa MAX_MARCADORES do mapa, para não
+    omitir fichas que estejam fora do recorte visual.
+    """
+    _exigir_leitura()
+    municipio = str(municipio or "").strip()
+    if not municipio or len(municipio) > 100 or "*" in municipio:
+        raise ErroPRISMA("Selecione um município válido para gerar o relatório.")
+    registros = []
+    limite = 1000
+    inicio = 0
+    while True:
+        lote = _tabela("prisma_ativos", params={
+            "select": ("id,planta,nome,tipo,municipio,status,observacao,"
+                       "ultima_os_operacao,ultima_os_eletromecanica,"
+                       "protocolo_equatorial,atualizado_em"),
+            "municipio": "ilike." + municipio,
+            "order": "planta.asc",
+            "limit": str(limite),
+            "offset": str(inicio),
+        })
+        registros.extend(lote)
+        if len(lote) < limite:
+            break
+        inicio += limite
+        if inicio >= 10000:
+            raise ErroPRISMA(
+                "Município com mais de 10.000 ativos; refine a consulta antes do relatório."
+            )
+    return registros
+
 def obter_ativo(ativo_id):
     _exigir_leitura()
     registros = _tabela("prisma_ativos", params={
