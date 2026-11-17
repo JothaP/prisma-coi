@@ -682,9 +682,13 @@ mapa.get_root().header.add_child(Element(ESTILO_STATUS_NO_MAPA))
 mapa.add_child(PonteStatusFolium())
 
 pode_editar_status = pode_executar_acao("9", "editar") and HISTORICO_DISPONIVEL
-painel_mapa = st.session_state.get("ga_painel") or {}
-id_selecionado = str(painel_mapa.get("id") or "") if painel_mapa.get("tipo") == "ficha" else ""
 
+# Não variar o JavaScript/HTML do mapa em função do painel selecionado.
+# streamlit-folium 0.27.4 calcula a identidade pelo hash do JS gerado,
+# MESMO quando o componente possui "key". A opção "show=..." no popup
+# recriava o iframe logo após clicar no marcador, fazendo o submit seguinte
+# se perder quando o usuário agia antes do fim da montagem do mapa.
+# A abertura do popup é controlada pelo próprio Leaflet, no clique.
 for registro in ativos:
     if registro.get("latitude") is None or registro.get("longitude") is None:
         continue
@@ -706,7 +710,6 @@ for registro in ativos:
         [lat, lon], tooltip=folium.Tooltip(tooltip, sticky=True),
         popup=folium.Popup(
             _status_popup_html(registro, pode_editar_status), max_width=390,
-            show=str(registro["id"]) == id_selecionado,
         ),
         icon=_icone_marcador_status(registro.get("status")),
         z_index_offset=300,
