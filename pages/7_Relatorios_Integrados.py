@@ -42,6 +42,9 @@ from farol_vinculos_os_manuais import (
     aplicar_vinculos_manuais, eventos_manuais_do_grupo,
 )
 from farol_mesclagem_operacional import chave_evento as chave_evento_farol
+from farol_eventos_relatorio_integrado import (
+    bairros_do_farol, eventos_do_grupo_farol, classificar_os_por_evento,
+)
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
 # usado para formar as concentrações ou associar medições do Módulo 1).
@@ -1389,90 +1392,31 @@ def ativos_da_concentracao(c,contexto,raio):
     return sorted(achados,key=lambda v:float(v[3].split()[0]))
 
 
-def evento_tem_abrangencia_municipal(texto):
-    return bool(re.search(r"(?:TODA A CIDADE|TODO O MUNICIPIO|MUNICIPIO INTEIRO|TODOS OS BAIRROS)", normalizar(texto)))
+def eventos_da_concentracao(c, contexto, inicio, fim, grupo, bairros_geograficos):
+    """Associação territorial equivalente à do Módulo 3, por O.S.
+
+    A concentração aqui representa apenas o conjunto de ordens; cada evento
+    recebe índices explícitos das O.S. territorialmente correspondentes, por
+    polígono, bairro ou endereço. Datas são avaliadas no intervalo selecionado.
+    """
+    eventos = contexto.get("EVENTOS", pd.DataFrame())
+    relacionados = eventos_do_grupo_farol(
+        grupo, eventos, bairros_geograficos, inicio, fim
+    )
+    return relacionados.to_dict("records")
 
 
-def nomes_bairros_evento(texto):
-    bruto=normalizar(texto)
-    bruto=re.sub(r"BAIRROS?\s*(?:IMPACTADOS?|AFETADOS?)?\s*:",";",bruto)
-    bruto=re.sub(r"AREAS?\s+IMPACTADAS?\s*:",";",bruto)
-    return {re.sub(r"\s*\(PARCIAL\)","",p).strip(" .:-")
-            for p in re.split(r"[,;\n]+",bruto) if p.strip(" .:-")}
-
-
-def evento_na_janela(evento, inicio, fim):
-    """Verifica interseção temporal, sem declarar ativo evento encerrado sem término."""
-    ini=data_parse(evento.get("Início", ""))
-    term=data_parse(evento.get("Término Real", ""))
-    if pd.isna(ini):return False
-    finalizado=any(p in normalizar(evento.get("Status","")) for p in ("FINALIZ", "CONCLUID", "ENCERRAD"))
-    if pd.isna(term) and finalizado:return False
-    if pd.notna(term) and term.date()<inicio:return False
-    if ini.date()>fim:return False
-    return True
-
-
-def eventos_da_concentracao(c,contexto,inicio=None,fim=None):
-    """Mesmas chaves de município/bairro do Farol, e evento ativo no período."""
-    eventos=contexto.get("EVENTOS",pd.DataFrame())
-    if eventos is None or eventos.empty:return []
-    pares=set(c.get("_pares_bairro", []))
-    municipios={municipio for municipio,_ in pares}
-    municipios.update(normalizar(v) for v in str(c.get("Município","")).split(",") if v.strip())
-    encontrados=[]
-    for _,e in eventos.iterrows():
-        mun=normalizar(e.get("Cidade",""))
-        if mun not in municipios:continue
-        if inicio is not None and fim is not None and not evento_na_janela(e,inicio,fim):continue
-        areas=e.get("Áreas Impactadas", "")
-        municipal=evento_tem_abrangencia_municipal(areas)
-        coincidentes=sorted({bairro for cidade,bairro in pares
-                            if cidade==mun and bairro in nomes_bairros_evento(areas)})
-        if not municipal and not coincidentes:continue
-        item=e.to_dict()
-        item["Bairros coincidentes"]="Todo o município" if municipal and not coincidentes else ", ".join(coincidentes)
-        encontrados.append(item)
-    return encontrados
-
-
-def horario_operacional(valor):
-    """Data sem hora não basta para vincular uma O.S. temporalmente ao evento."""
-    texto=str(valor or "").strip()
-    if not texto or re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}|\d{4}-\d{2}-\d{2}",texto):
-        return pd.NaT
-    return data_parse(texto)
-
-
-def classificar_os_eventos(grupo,eventos):
-    """Classificação Farol: município, bairro e horário [início, fim + 3h]."""
-    vinculadas=[]; nao_vinculadas=[]
-    agora=pd.Timestamp.now().tz_localize(None)
-    for _,osr in grupo.iterrows():
-        data_os=horario_operacional(osr.get("Dt. Emissão", ""))
-        cidade=normalizar(osr.get("Cidade", ""))
-        bairro=normalizar(osr.get("Bairro", ""))
-        protocolos=[]
-        if pd.notna(data_os):
-            for e in eventos:
-                if cidade!=normalizar(e.get("Cidade", "")):continue
-                b_evt=nomes_bairros_evento(e.get("Bairros coincidentes", ""))
-                if ("TODO O MUNICIPIO" not in normalizar(e.get("Bairros coincidentes", ""))
-                    and bairro not in b_evt):
-                    continue
-                ini=horario_operacional(e.get("Início", ""))
-                fim=horario_operacional(e.get("Término Real", ""))
-                if pd.isna(ini):continue
-                finalizado=any(p in normalizar(e.get("Status","")) for p in ("FINALIZ","CONCLUID","ENCERRAD"))
-                if pd.isna(fim):
-                    if finalizado:continue
-                    fim=agora
-                if ini <= data_os <= fim+pd.Timedelta(hours=3):
-                    protocolos.append(str(e.get("Protocolo","") or e.get("Serviço", "") or "Evento"))
-        registro=osr.to_dict()
-        registro["Eventos vinculados"]="; ".join(dict.fromkeys(protocolos))
-        (vinculadas if protocolos else nao_vinculadas).append(registro)
-    return vinculadas,nao_vinculadas
+def classificar_os_eventos(grupo, eventos):
+    """Aplica a janela temporal do Farol por O.S. sem espalhar vínculos ao grupo."""
+    relacionados = pd.DataFrame(eventos)
+    vinculadas, nao_vinculadas = classificar_os_por_evento(grupo, relacionados)
+    def ajustar(base):
+        registros = []
+        for item in base.to_dict("records"):
+            item["Eventos vinculados"] = item.pop("Evento(s) vinculado(s)", "")
+            registros.append(item)
+        return registros
+    return ajustar(vinculadas), ajustar(nao_vinculadas)
 
 
 def protocolo_os_relatorio(reg):
@@ -2855,6 +2799,13 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
     manuais_relatorio = listar_vinculos_os_manuais(
         grupos.get("Nº da O.S", [])
     )
+    # Mesmos GPKG/KMZ do Farol, carregados uma única vez para todo o PDF.
+    # Nenhuma consulta territorial por raio ou nome de ativo é presumida.
+    bairros_geograficos = (
+        bairros_do_farol()
+        if not contexto.get("EVENTOS", pd.DataFrame()).empty and not grupos.empty
+        else []
+    )
 
     def terminar_pagina():
         nonlocal numero_de_paginas
@@ -2870,7 +2821,9 @@ def pdf_relatorio(resumo, associados, territoriais, achados, inicio, fim, raio, 
             codigo = str(conc['Concentração'])
             grupo = grupos[grupos['_grupo']==conc['_grupo']].copy()
             grupo = ri7_rotular_status_os_grupo(grupo, indice_pressao_os)
-            eventos = eventos_da_concentracao(conc,contexto,inicio,fim)
+            eventos = eventos_da_concentracao(
+                conc, contexto, inicio, fim, grupo, bairros_geograficos
+            )
             vinculadas,nao = classificar_os_eventos(grupo,eventos)
             vinculadas,nao = aplicar_vinculos_manuais(
                 vinculadas, nao, manuais_relatorio,
@@ -3016,7 +2969,7 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
         pressao_sem_conc = bp.iloc[:0].copy()
 
     return {
-        "versao_esquema": 13,
+        "versao_esquema": 14,
         "consultado_em": datetime.now(FUSO_LOGGERS).strftime("%d/%m/%Y %H:%M:%S"),
         "municipio_filtro": municipio_filtro,
         "resumo": resumo, "associados": associados, "territoriais": territoriais,
@@ -3062,7 +3015,7 @@ _chaves_necessarias = {
 }
 if r is not None and (
     not isinstance(r, dict)
-    or r.get("versao_esquema") != 13
+    or r.get("versao_esquema") != 14
     or not _chaves_necessarias.issubset(r)
 ):
     st.session_state.pop("relatorio_coi_integrado", None)
