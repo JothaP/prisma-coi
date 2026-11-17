@@ -111,7 +111,18 @@ const form3 = {
 };
 handlerSubmit({ ...evt, target: form3 });
 assert.equal(fallback, 1);
-console.log("Ponte de status: primeira submissão capturada.");
+
+// Novo status deve chegar ao servidor já no primeiro clique.
+radio.value = "em_observacao";
+global.window.Streamlit = { setComponentValue: (payload) => chamados.push(payload) };
+const novoFormulario = {
+  dataset: { ativo: "12345678-1234-1234-1234-123456789012", atual: "operando" },
+  matches: form.matches, querySelector: form.querySelector
+};
+handlerSubmit({ ...evt, target: novoFormulario });
+assert.equal(chamados.length, 2);
+assert.match(chamados[1].last_object_clicked_tooltip, /\\|em_observacao\\|/);
+console.log("Ponte de status: primeira submissão e Em Observação capturados.");
 """
 
 
@@ -134,6 +145,31 @@ class TestGestaoAtivosStatusMapa(unittest.TestCase):
         self.assertIn('_auditar("editar", salvo)', codigo)
         self.assertIn('_limpar_cache()', codigo)
         self.assertIn('key=f"ga_mapa_interativo_{st.session_state.get(\'ga_versao_mapa\', 0)}"', codigo)
+
+    def test_em_observacao_integrado_na_ficha_mapa_e_backend(self):
+        import re
+        fonte = FONTE.read_text(encoding="utf-8")
+        backend = (FONTE.parent.parent / "gestao_ativos_backend.py").read_text(
+            encoding="utf-8")
+        self.assertIn('"em_observacao": "Em Observação"', fonte)
+        self.assertIn('"em_observacao": "#9333EA"', fonte)
+        self.assertIn('"em_observacao","inativo","validar"', fonte)
+        self.assertIn('"em_observacao"', backend)
+        arvore = ast.parse(fonte)
+        padroes = [
+            no.value.args[0].value for no in ast.walk(arvore)
+            if isinstance(no, ast.Assign)
+            and any(isinstance(x, ast.Name) and x.id == "sinal_status"
+                    for x in no.targets)
+            and isinstance(no.value, ast.Call)
+            and no.value.args and isinstance(no.value.args[0], ast.Constant)
+        ]
+        self.assertEqual(len(padroes), 1)
+        self.assertIsNotNone(re.fullmatch(
+            padroes[0],
+            "PRISMA_STATUS=12345678-1234-1234-1234-123456789012"
+            "|em_observacao|1763420000000_abcdefgh",
+        ))
 
     def test_codigo_sintaticamente_valido(self):
         ast.parse(FONTE.read_text(encoding="utf-8"), filename=str(FONTE))
