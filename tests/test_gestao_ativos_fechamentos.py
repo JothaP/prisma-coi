@@ -185,7 +185,7 @@ class TestFechamentosRede(unittest.TestCase):
             RAIZ / "gestao_ativos_relatorio.py").read_text(encoding="utf-8"))
         self.assertIn('st.selectbox(\n        "Município • Fechamentos"', pagina)
         self.assertIn('st.text_input(\n        "Bairro • Fechamentos"', pagina)
-        self.assertIn('st.selectbox(\n        "Status • Fechamentos"', pagina)
+        self.assertIn('st.multiselect(\n        "Status • Fechamentos"', pagina)
         self.assertIn('"ga_pesquisa_reparo_filtro"', pagina)
         self.assertIn('folium.DivIcon(', pagina)
         self.assertIn("PRISMA_FECHAMENTO=", pagina)
