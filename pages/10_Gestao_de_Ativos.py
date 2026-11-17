@@ -327,36 +327,46 @@ class PonteStatusFolium(MacroElement):
 {% macro script(this, kwargs) %}
 (function() {
     var mapa = {{this._parent.get_name()}};
-    mapa.on("popupopen", function(e) {
-        var el = e.popup && e.popup.getElement();
-        var form = el && el.querySelector(".ga-status-form");
-        if (!form || form.dataset.conectado === "1") return;
-        form.dataset.conectado = "1";
-        var marcador = e.popup._source;
-        if (!marcador || !marcador.getLatLng) return;
-        L.DomEvent.disableClickPropagation(el);
-        L.DomEvent.disableScrollPropagation(el);
-        form.addEventListener("submit", function(evento) {
-            evento.preventDefault();
-            evento.stopPropagation();
-            var msg = form.querySelector(".ga-status-mensagem");
-            var radio = form.querySelector('input[name="ga_status"]:checked');
-            if (!radio) { msg.textContent = "Selecione um status."; return; }
-            if (radio.value === form.dataset.atual) {
-                msg.textContent = "O status selecionado já é o atual.";
-                return;
-            }
-            if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) {
-                msg.textContent = "Status inválido.";
-                return;
-            }
-            if (form.dataset.enviando === "1") return;
-            var token = String(Date.now())+"_"+Math.random().toString(36).slice(2,10);
-            var comando = "PRISMA_STATUS="+form.dataset.ativo+"|"+radio.value+"|"+token;
-            var dados = window.__GLOBAL_DATA__;
-            var ponte = window.Streamlit;
-            // A emissão direta evita a perda do comando quando o tooltip é
-            // restaurado ou o popup é fechado antes do evento ser serializado.
+
+    // O listener é instalado no container do mapa no carregamento,
+    // antes de qualquer popup ser aberto. "popupopen" pode preceder a
+    // disponibilidade completa do HTML interno; nesse caso o formulário
+    // não recebia o listener e o primeiro clique não era processado.
+    mapa.getContainer().addEventListener("submit", function(evento) {
+        var form = evento.target;
+        if (!form || !form.matches || !form.matches(".ga-status-form")) return;
+        evento.preventDefault();
+        evento.stopPropagation();
+
+        var msg = form.querySelector(".ga-status-mensagem");
+        var radio = form.querySelector('input[name="ga_status"]:checked');
+        if (!radio) {
+            if (msg) msg.textContent = "Selecione um status.";
+            return;
+        }
+        if (radio.value === form.dataset.atual) {
+            if (msg) msg.textContent = "O status selecionado já é o atual.";
+            return;
+        }
+        if (["operando","parado","em_manutencao","inativo","validar"].indexOf(radio.value) < 0) {
+            if (msg) msg.textContent = "Status inválido.";
+            return;
+        }
+        if (form.dataset.enviando === "1") return;
+
+        // Leaflet conserva a origem do popup atual, mesmo se o formulário
+        // ainda não estava presente quando ocorreu "popupopen".
+        var popup = mapa._popup;
+        var marcador = (form.__prismaMarcador || (popup && popup._source));
+        if (!marcador || !marcador.getLatLng) {
+            if (msg) msg.textContent = "Não foi possível identificar o ativo. Reabra o marcador.";
+            return;
+        }
+        var token = String(Date.now())+"_"+Math.random().toString(36).slice(2,10);
+        var comando = "PRISMA_STATUS="+form.dataset.ativo+"|"+radio.value+"|"+token;
+        var dados = window.__GLOBAL_DATA__;
+        var ponte = window.Streamlit;
+        try {
             if (dados && ponte && typeof ponte.setComponentValue === "function") {
                 dados.last_object_clicked = marcador.getLatLng();
                 dados.last_object_clicked_count = (Number(dados.last_object_clicked_count) || 0) + 1;
@@ -366,22 +376,39 @@ class PonteStatusFolium(MacroElement):
                     last_object_clicked_count: dados.last_object_clicked_count,
                     last_object_clicked_tooltip: comando
                 };
+                // Mantém o estado sincronizado com o debounce interno do
+                // streamlit-folium; não restaura a tooltip antes da captura.
                 dados.previous_data = retorno;
                 ponte.setComponentValue(retorno);
             } else if (marcador.getTooltip && marcador.getTooltip()) {
-                // Compatibilidade: reutiliza o evento nativo, sem restaurar o
-                // tooltip antes da captura pela versão atual do componente.
                 marcador.setTooltipContent(comando);
-                marcador.fire("click", {latlng: marcador.getLatLng(), sourceTarget: marcador});
+                marcador.fire("click", {
+                    latlng: marcador.getLatLng(), sourceTarget: marcador
+                });
             } else {
-                msg.textContent = "Não foi possível comunicar com o mapa. Reabra o marcador.";
+                if (msg) msg.textContent = "Não foi possível comunicar com o mapa. Reabra o marcador.";
                 return;
             }
-            form.dataset.enviando = "1";
-            var botao = form.querySelector(".ga-status-salvar");
-            if (botao) botao.disabled = true;
-            msg.textContent = "Enviando atualização ao PRISMA...";
-        });
+        } catch (erro) {
+            form.dataset.enviando = "0";
+            if (msg) msg.textContent = "Falha no envio. Tente novamente.";
+            return;
+        }
+        form.dataset.enviando = "1";
+        var botao = form.querySelector(".ga-status-salvar");
+        if (botao) botao.disabled = true;
+        if (msg) msg.textContent = "Enviando atualização ao PRISMA...";
+    }, true);
+
+    // A abertura do popup cuida apenas da propagação do clique e,
+    // quando possível, associa o marcador ao formulário.
+    mapa.on("popupopen", function(e) {
+        var el = e.popup && e.popup.getElement();
+        if (!el) return;
+        L.DomEvent.disableClickPropagation(el);
+        L.DomEvent.disableScrollPropagation(el);
+        var form = el.querySelector(".ga-status-form");
+        if (form) form.__prismaMarcador = e.popup._source;
     });
 })();
 {% endmacro %}
