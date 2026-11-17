@@ -126,6 +126,25 @@ def _coordenada(valor: object, tipo: str) -> float | None:
     return numero
 
 
+def _m8_interpretar_coordenadas(latitude: str, longitude: str) -> tuple[float, float]:
+    """Valida WGS84 em graus decimais (ponto ou vírgula), sem consultar cadastros."""
+    def converter(texto: str, nome: str, minimo: float, maximo: float) -> float:
+        valor = str(texto or "").strip()
+        if not re.fullmatch(r"[+-]?\d{1,3}(?:[.,]\d{1,12})?", valor):
+            raise ValueError(
+                f"{nome}: informe graus decimais, por exemplo -5.089 ou -5,089."
+            )
+        numero = float(valor.replace(",", "."))
+        if not math.isfinite(numero) or not minimo <= numero <= maximo:
+            raise ValueError(f"{nome} fora do intervalo válido ({minimo:g} a {maximo:g}).")
+        return numero
+
+    return (
+        converter(latitude, "Latitude", -90, 90),
+        converter(longitude, "Longitude", -180, 180),
+    )
+
+
 def _assinatura(caminho: Path) -> tuple[str, int, int]:
     info = caminho.stat()
     return str(caminho), info.st_size, info.st_mtime_ns
@@ -1211,14 +1230,17 @@ def _m8_adicionar_rotulo(mapa_grupo, lat, lon, texto, tipo="matricula", deslocam
 
 
 def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
-                        rede, cotas, exibir_rotulos=True):
+                        rede, cotas, exibir_rotulos=True, ponto_pesquisado=None):
     """Mapa único: só matrículas pesquisadas; demais matrículas apenas na tabela."""
     from shapely.geometry import mapping
 
     lats = clientes["_lat"].astype(float).tolist()
     lons = clientes["_lon"].astype(float).tolist()
-    # Mapa independente da pesquisa de matrícula.
-    if lats:
+    # Pesquisa por coordenadas tem prioridade de enquadramento no mapa.
+    if ponto_pesquisado is not None:
+        centro = [float(ponto_pesquisado[0]), float(ponto_pesquisado[1])]
+        zoom_inicial = 17
+    elif lats:
         centro = [sum(lats) / len(lats), sum(lons) / len(lons)]
         zoom_inicial = 16 if len(clientes) == 1 else 13
     elif area is not None:
@@ -1316,6 +1338,29 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
             ),
         ).add_to(mapa)
 
+    if ponto_pesquisado is not None:
+        lat, lon = (float(coordenada) for coordenada in ponto_pesquisado)
+        elevacao = _m8_formatar_cota(cotas.get((lat, lon)))
+        popup_ponto = (
+            "<div style='min-width:180px'><b>Ponto pesquisado</b>"
+            f"<div><b>Latitude:</b> {lat:.8f}</div>"
+            f"<div><b>Longitude:</b> {lon:.8f}</div>"
+            + (f"<div><b>Cota da superfície:</b> {elevacao}</div>"
+               if elevacao else "")
+            + "</div>"
+        )
+        folium.Marker(
+            [lat, lon],
+            tooltip="Ponto pesquisado por coordenadas",
+            popup=folium.Popup(popup_ponto, max_width=300),
+            icon=folium.Icon(color="red", icon="crosshairs", prefix="fa"),
+        ).add_to(mapa)
+        folium.CircleMarker(
+            location=[lat, lon], radius=5, color="#B91C1C",
+            weight=2, fill=True, fill_color="#FFFFFF", fill_opacity=1,
+            tooltip="Localização pesquisada",
+        ).add_to(mapa)
+
     # Os demais registros do polígono são apresentados apenas na tabela e no CSV.
     # Nunca criar marcadores ou rótulos para centenas de matrículas da área.
     # Assim, a leitura visual prioriza a matrícula pesquisada e os equipamentos.
@@ -1395,7 +1440,10 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
                        "rectangle": True, "polyline": False, "circle": False,
                        "circlemarker": False, "marker": False},
          edit_options={"edit": False, "remove": True}).add_to(mapa)
-    if area is not None:
+    if ponto_pesquisado is not None:
+        # Não deixar fit_bounds de matrículas ou desenhos antigos desviar o foco.
+        pass
+    elif area is not None:
         oeste, sul, leste, norte = area.bounds
         mapa.fit_bounds([[sul, oeste], [norte, leste]], padding=(35, 35), max_zoom=17)
     elif len(clientes) > 1:
@@ -1454,6 +1502,52 @@ def exibir_consulta_operacional() -> None:
             use_container_width=True,
         )
 
+    with st.form("m8_busca_coordenadas"):
+        st.markdown("**📍 Localizar ponto por coordenadas**")
+        col_lat, col_lon = st.columns(2)
+        with col_lat:
+            latitude_digitada = st.text_input(
+                "Latitude", key="m8_latitude_pesquisa",
+                placeholder="Ex.: -5.0890 ou -5,0890",
+            )
+        with col_lon:
+            longitude_digitada = st.text_input(
+                "Longitude", key="m8_longitude_pesquisa",
+                placeholder="Ex.: -42.8010 ou -42,8010",
+            )
+        localizar_ponto = st.form_submit_button(
+            "📍 Localizar coordenadas", use_container_width=True,
+        )
+
+    if localizar_ponto:
+        try:
+            ponto_encontrado = _m8_interpretar_coordenadas(
+                latitude_digitada, longitude_digitada
+            )
+        except ValueError as erro:
+            st.error(str(erro))
+        else:
+            st.session_state["m8_ponto_pesquisado"] = ponto_encontrado
+            st.session_state["m8_integrado_versao_mapa"] = (
+                st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+            )
+            st.rerun()
+
+    if (ponto_atual := st.session_state.get("m8_ponto_pesquisado")) is not None:
+        col_ponto, col_apagar = st.columns([4, 1], vertical_alignment="center")
+        with col_ponto:
+            st.caption(
+                f"📍 Ponto localizado: {ponto_atual[0]:.8f}, {ponto_atual[1]:.8f} "
+                "(latitude, longitude)."
+            )
+        with col_apagar:
+            if st.button("Limpar ponto", key="m8_limpar_ponto"):
+                st.session_state.pop("m8_ponto_pesquisado", None)
+                st.session_state["m8_integrado_versao_mapa"] = (
+                    st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+                )
+                st.rerun()
+
     st.button(
         "🧹 Limpar pesquisa", key="m8_limpar_pesquisa",
         on_click=_m8_limpar_pesquisa,
@@ -1474,6 +1568,8 @@ def exibir_consulta_operacional() -> None:
                 codigos, int(raio), bool(mostrar_bairros)
             )
             if codigos:
+                # Uma nova busca por matrícula assume novamente o foco do mapa.
+                st.session_state.pop("m8_ponto_pesquisado", None)
                 st.session_state.pop("m8_integrado_area", None)
                 st.session_state.pop("m8_integrado_rede_id", None)
                 st.session_state["m8_integrado_versao_mapa"] = (
@@ -1481,6 +1577,7 @@ def exibir_consulta_operacional() -> None:
                 )
             st.rerun()
 
+    ponto_pesquisado = st.session_state.get("m8_ponto_pesquisado")
     atual = st.session_state.get("m8_integrado_consulta")
     codigos, raio, mostrar_bairros = (
         atual if atual is not None else ([], int(raio), bool(mostrar_bairros))
@@ -1531,7 +1628,8 @@ def exibir_consulta_operacional() -> None:
     # da cidade inteira nem todas as matrículas na interface.
     influencias = []
     arquivo_influencias = _caminho_influencias()
-    if arquivo_influencias and (area is not None or not validos.empty):
+    if arquivo_influencias and (area is not None or not validos.empty
+                               or ponto_pesquisado is not None):
         try:
             todas_influencias = _ler_influencias(_assinatura(arquivo_influencias))
             if not validos.empty:
@@ -1540,7 +1638,10 @@ def exibir_consulta_operacional() -> None:
                     or "Área de influência não identificada", axis=1)
             # No mapa, apenas feições próximas; o catálogo completo não é enviado.
             from shapely.geometry import box
-            if area is not None:
+            if ponto_pesquisado is not None:
+                lat_p, lon_p = ponto_pesquisado
+                contexto = box(lon_p-.008, lat_p-.008, lon_p+.008, lat_p+.008)
+            elif area is not None:
                 contexto = box(*area.bounds).buffer(.008)
             else:
                 contexto = box(min(validos["_lon"])-.008, min(validos["_lat"])-.008,
@@ -1579,7 +1680,11 @@ def exibir_consulta_operacional() -> None:
             f"Base geográfica: {len(assinaturas_bairros)} arquivo(s) "
             f"e {len(todas)} feição(ões) poligonais reconhecidas."
         )
-        if area is not None:
+        if ponto_pesquisado is not None:
+            lat_p, lon_p = ponto_pesquisado
+            oeste, sul = lon_p-.008, lat_p-.008
+            leste, norte = lon_p+.008, lat_p+.008
+        elif area is not None:
             oeste, sul, leste, norte = (
                 area.bounds[0]-.008, area.bounds[1]-.008,
                 area.bounds[2]+.008, area.bounds[3]+.008,
@@ -1591,7 +1696,7 @@ def exibir_consulta_operacional() -> None:
             # Consulta livre: inclui todas as feições dos arquivos encontrados,
             # sem escolher apenas a primeira camada/um único GeoPackage.
             bairros = todas
-        if area is not None or not validos.empty:
+        if area is not None or not validos.empty or ponto_pesquisado is not None:
             # Só enviar ao navegador as feições que cruzem o contexto da
             # análise, mantendo o conjunto completo no cache do servidor.
             bairros = [
@@ -1612,7 +1717,7 @@ def exibir_consulta_operacional() -> None:
 
     bases = {}
     # Evita carregar milhares de ativos antes da primeira consulta/desenho.
-    if area is not None or not validos.empty:
+    if area is not None or not validos.empty or ponto_pesquisado is not None:
         for tipo, caminho in (("Poço / Ativo", ARQUIVO_POCOS), ("Logger", ARQUIVO_LOGGERS)):
             if not caminho.is_file():
                 st.warning(f"Cadastro ausente: {caminho.name}.")
@@ -1629,13 +1734,25 @@ def exibir_consulta_operacional() -> None:
         ativos_perto = []
     else:
         proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
+    ativos_ponto = []
+    proximidade_ponto = pd.DataFrame()
+    if ponto_pesquisado is not None:
+        lat_p, lon_p = ponto_pesquisado
+        referencia_ponto = pd.DataFrame([{
+            "NUM_LIGACAO": "Ponto pesquisado", "_lat": lat_p, "_lon": lon_p,
+        }])
+        proximidade_ponto, ativos_ponto = _consultar_proximidade(
+            referencia_ponto, bases, raio
+        )
     ativos_area = _m8_ativos_na_area(area, bases)
-    ativos = _m8_unir_ativos(ativos_perto, ativos_area)
+    ativos = _m8_unir_ativos([*ativos_perto, *ativos_ponto], ativos_area)
 
     # As cotas do DSM/MDE são calculadas apenas para matrículas consultadas
     # e equipamentos que serão desenhados no mapa. Matrículas adicionais do
     # polígono ficam exclusivamente na tabela, evitando leituras desnecessárias.
     coords_selecionadas = [(float(r["_lat"]), float(r["_lon"])) for _, r in validos.iterrows()]
+    if ponto_pesquisado is not None:
+        coords_selecionadas.append(tuple(ponto_pesquisado))
     coords_equipamentos = []
     for tipo in ("Poço / Ativo", "Logger"):
         equipamento_tipo = [a for a in ativos if a.get("_tipo") == tipo]
@@ -1692,7 +1809,8 @@ def exibir_consulta_operacional() -> None:
     rotulos = st.checkbox("Exibir rótulos das matrículas consultadas e equipamentos", value=True,
                          key="m8_integrado_rotulos")
     mapa = _m8_mapa_unificado(validos, ativos, raio, bairros, influencias, area,
-                              rede, mapa_cotas, rotulos)
+                              rede, mapa_cotas, rotulos,
+                              ponto_pesquisado=ponto_pesquisado)
     # Trocar a chave ao alternar rótulos força a reconstrução correta do
     # componente Leaflet. A consulta, a área desenhada e os filtros continuam
     # preservados em st.session_state, sem alterar a base de matrículas.
@@ -1773,11 +1891,29 @@ def exibir_consulta_operacional() -> None:
             st.caption("As matrículas adicionais do polígono são exibidas somente nesta tabela e no CSV. "
                        "O mapa mantém os marcadores das matrículas pesquisadas e dos equipamentos.")
 
+    if ponto_pesquisado is not None:
+        elevacao_pesquisada = _m8_formatar_cota(
+            mapa_cotas.get(tuple(ponto_pesquisado))
+        )
+        if elevacao_pesquisada:
+            st.caption(f"Cota da superfície no ponto pesquisado: {elevacao_pesquisada}.")
+        if not proximidade_ponto.empty:
+            with st.expander("Equipamentos próximos às coordenadas", expanded=False):
+                st.dataframe(
+                    proximidade_ponto.rename(columns={"Matrícula": "Referência"}),
+                    hide_index=True, use_container_width=True
+                )
+        else:
+            st.caption(
+                f"Nenhum poço ou logger cadastrado a até {raio} m do ponto pesquisado."
+            )
+
     st.markdown("#### Equipamentos próximos")
     if ativos:
         tipos = [str(a.get("_tipo", "")) for a in ativos]
         st.caption(f"{tipos.count('Poço / Ativo')} poço(s)/ativo(s) e {tipos.count('Logger')} logger(s) "
-                   "próximos às matrículas consultadas ou dentro da área desenhada.")
+                   "próximos à localização pesquisada, às matrículas consultadas "
+                   "ou dentro da área desenhada.")
         resumo_ativos = pd.DataFrame([{
             "Tipo": a.get("_tipo", ""), "Identificação": a.get("IDENTIFICACAO_ATIVO", ""),
             "Nome / Endereço": a.get("_nome", ""),
