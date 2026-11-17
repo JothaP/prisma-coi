@@ -8,6 +8,8 @@ on:
       - 'tests/test_gestao_ativos_protocolo_equatorial.py'
       - 'tests/test_gestao_ativos_reset_admin.py'
       - 'tests/test_gestao_ativos_relatorio.py'
+      - 'tests/test_gestao_ativos_fechamentos.py'
+      - 'gestao_ativos_fechamentos.py'
       - 'gestao_ativos_relatorio.py'
       - 'gestao_ativos_backend.py'
       - '.github/workflows/testar-status-gestao-ativos.yml'
@@ -29,6 +31,6 @@ jobs:
         with:
           node-version: '22'
       - name: Validar sintaxe
-        run: python -m py_compile pages/10_Gestao_de_Ativos.py gestao_ativos_backend.py gestao_ativos_relatorio.py
+        run: python -m py_compile pages/10_Gestao_de_Ativos.py gestao_ativos_backend.py gestao_ativos_relatorio.py gestao_ativos_fechamentos.py
       - name: Validar envio do status pelo popup
         run: python -m unittest discover -s tests -p 'test_gestao_ativos_*.py' -v
