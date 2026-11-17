@@ -716,6 +716,9 @@ with col_novo:
     with b_reparo:
         if st.button("🚧 Novo fechamento", use_container_width=True,
                      disabled=not pode_executar_acao("9", "criar")):
+            # Cada novo cadastro começa sem coordenadas herdadas do último.
+            st.session_state.pop("ga_fechamento_lat_modal", None)
+            st.session_state.pop("ga_fechamento_lon_modal", None)
             # Abre formulário completo sem depender de clique prévio no mapa.
             st.session_state["ga_modo_cadastro"] = False
             st.session_state["ga_modo_fechamento"] = False
