@@ -33,13 +33,9 @@ const chamados = [];
 const radio = { value: "parado" };
 const mensagem = { textContent: "" };
 const botao = { disabled: false };
-let handleSubmit = null;
-const form = {
-  dataset: { ativo: "12345678-1234-1234-1234-123456789012", atual: "operando" },
-  querySelector: s => s.includes("ga-status-mensagem") ? mensagem : s.includes("ga-status-salvar") ? botao : radio,
-  addEventListener: (nome, callback) => { if (nome === "submit") handleSubmit = callback; }
-};
-const element = { querySelector: () => form };
+let handlerSubmit = null;
+let handlerCapture = false;
+let formularioAberto = false;
 let fallback = 0;
 let tooltip = "Informações do ativo";
 const marcador = {
@@ -48,20 +44,36 @@ const marcador = {
   setTooltipContent: (v) => { tooltip = v; },
   fire: () => { fallback++; }
 };
-global.L = {
-  DomEvent: { disableClickPropagation: () => {}, disableScrollPropagation: () => {} }
+const form = {
+  dataset: { ativo: "12345678-1234-1234-1234-123456789012", atual: "operando" },
+  matches: s => s === ".ga-status-form",
+  querySelector: s => s.includes("ga-status-mensagem") ? mensagem : s.includes("ga-status-salvar") ? botao : radio
 };
-global.mapa = { on: (nome, callback) => { eventos[nome] = callback; } };
+const container = {
+  addEventListener: (name, fn, capture) => {
+    if (name === "submit") { handlerSubmit = fn; handlerCapture = capture; }
+  }
+};
+global.L = { DomEvent: {
+  disableClickPropagation: () => {}, disableScrollPropagation: () => {}
+}};
+global.mapa = {
+  _popup: { _source: marcador },
+  getContainer: () => container,
+  on: (nome, callback) => { eventos[nome] = callback; }
+};
 global.window = {
   __GLOBAL_DATA__: { last_object_clicked_count: 2, lat_lng_clicked: null },
   Streamlit: { setComponentValue: (payload) => chamados.push(payload) }
 };
 eval(ponte);
+assert.equal(typeof handlerSubmit, "function", "listener deve existir ANTES de abrir popup");
+assert.equal(handlerCapture, true, "listener deve capturar primeiro envio");
 assert.equal(typeof eventos.popupopen, "function");
-eventos.popupopen({ popup: { getElement: () => element, _source: marcador }});
-assert.equal(typeof handleSubmit, "function");
-const evt = { preventDefault(){}, stopPropagation(){} };
-handleSubmit(evt);
+
+// PRIMEIRA submissão sem evento popupopen: antigo código perdia este clique.
+const evt = {target: form, preventDefault(){}, stopPropagation(){}};
+handlerSubmit(evt);
 assert.equal(chamados.length, 1);
 assert.deepEqual(Object.keys(chamados[0]).sort(), [
   "last_clicked", "last_object_clicked_count", "last_object_clicked_tooltip"
@@ -71,21 +83,35 @@ assert.match(chamados[0].last_object_clicked_tooltip,
   /^PRISMA_STATUS=12345678-1234-1234-1234-123456789012\|parado\|[0-9]{10,16}_[a-z0-9]{4,12}$/);
 assert.equal(botao.disabled, true);
 assert.equal(fallback, 0);
-handleSubmit(evt);
+handlerSubmit(evt);
 assert.equal(chamados.length, 1, "Dois submits não podem duplicar o PATCH");
 
-// O caminho alternativo não remove o comando da tooltip antes de ser capturado.
+// Abertura do popup deve apenas configurar o marcador e impedir propagação.
+eventos.popupopen({ popup: { getElement: () => ({
+  querySelector: () => form
+}), _source: marcador }});
+assert.equal(form.__prismaMarcador, marcador);
+
+// Fallback: mesma ação, sem duplicar o envio quando a API direta não existir.
 const form2 = {
   dataset: { ativo: "12345678-1234-1234-1234-123456789012", atual: "operando" },
-  querySelector: form.querySelector,
-  addEventListener: (nome, fn) => { if (nome === "submit") handleSubmit = fn; }
+  matches: form.matches,
+  querySelector: form.querySelector
 };
 global.window.Streamlit = null;
-eventos.popupopen({popup:{ getElement: () => ({querySelector: () => form2}), _source: marcador }});
-handleSubmit(evt);
+handlerSubmit({ ...evt, target: form2 });
 assert.equal(fallback, 1);
 assert.match(tooltip, /^PRISMA_STATUS=/);
-console.log("Ponte de status validada.");
+
+// Status igual ao atual não deve enviar requisição.
+const form3 = {
+  dataset: { ativo: "12345678-1234-1234-1234-123456789012", atual: "parado" },
+  matches: form.matches,
+  querySelector: form.querySelector
+};
+handlerSubmit({ ...evt, target: form3 });
+assert.equal(fallback, 1);
+console.log("Ponte de status: primeira submissão capturada.");
 """
 
 
