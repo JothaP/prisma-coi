@@ -129,6 +129,69 @@ def municipios_fechamentos():
     return sorted((n for n in nomes if n), key=str.casefold)
 
 
+def _filtros_continuidade(status=None, data_referencia=None,
+                         incluir_arquivados_do_dia=False) -> dict:
+    """Filtro operacional sem cópia diária nem alteração dos cadastros.
+
+    Na data selecionada entram ocorrências ainda abertas, iniciadas até esse
+    dia. Encerradas/canceladas aparecem somente quando o status é pedido
+    explicitamente ou na revisão opcional do relatório (com data original).
+    Sem data, a consulta é histórica: recupera todos os registros.
+    O status é o estado ATUAL do cadastro, não um snapshot histórico.
+    """
+    selecionados = (
+        [status] if isinstance(status, str) and status != "Todos"
+        else list(status or []) if not isinstance(status, str) else []
+    )
+    if any(codigo not in STATUS_FECHAMENTO for codigo in selecionados):
+        raise ErroPRISMA("Um dos status de fechamento selecionados é inválido.")
+
+    abertos = {"pendente", "em_andamento"}
+    arquivados = {"encerrado", "concluido", "cancelado"}
+    codigos = set(selecionados)
+    if "encerrado" in codigos:
+        codigos.add("concluido")  # Leitura de encerramentos legados.
+
+    def condicao(campo, valores):
+        valores = sorted(valores)
+        return ("eq." + valores[0]) if len(valores) == 1 else (
+            "in.(" + ",".join(valores) + ")"
+        )
+
+    if data_referencia is None:
+        return {"status": condicao("status", codigos)} if codigos else {}
+    try:
+        dia = date.fromisoformat(
+            data_referencia.isoformat() if isinstance(data_referencia, date)
+            else str(data_referencia)[:10]
+        ).isoformat()
+    except (ValueError, TypeError) as exc:
+        raise ErroPRISMA("Selecione uma data válida para filtrar fechamentos.") from exc
+
+    # Sem seleção, mapa diário exibe apenas abertos; relatório também mostra
+    # os encerrados/cancelados iniciados no dia (desmarcados para inclusão).
+    atuais = (codigos & abertos) if selecionados else set(abertos)
+    encerrados = (codigos & arquivados) if selecionados else (
+        set(arquivados) if incluir_arquivados_do_dia else set()
+    )
+
+    if atuais and encerrados:
+        # 'and' em paralelo ao 'or' da pesquisa textual preserva ambos os
+        # filtros do PostgREST e aplica as condições antes do limite do mapa.
+        regra = (
+            "or("
+            f"and(status.{condicao('status', atuais)},data.lte.{dia}),"
+            f"and(status.{condicao('status', encerrados)},data.eq.{dia})"
+            ")"
+        )
+        return {"and": "(" + regra + ")"}
+    if atuais:
+        return {"status": condicao("status", atuais), "data": "lte." + dia}
+    if encerrados:
+        return {"status": condicao("status", encerrados), "data": "eq." + dia}
+    return {"status": "eq.__nenhum_status_valido__"}
+
+
 def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None,
                        data_referencia=None):
     _leitura()
@@ -139,33 +202,9 @@ def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None,
     }
     if municipio and municipio != "Todos":
         parametros["municipio"] = "ilike." + str(municipio).strip()[:100]
-    # A seleção múltipla é aplicada no banco, antes da limitação de
-    # marcadores. Nenhuma seleção = todos os status.
-    selecionados = (
-        [status] if isinstance(status, str) and status != "Todos"
-        else list(status or []) if not isinstance(status, str) else []
-    )
-    if selecionados:
-        if any(codigo not in STATUS_FECHAMENTO for codigo in selecionados):
-            raise ErroPRISMA("Um dos status de fechamento selecionados é inválido.")
-        codigos = set(selecionados)
-        # Registros anteriores continuam consultáveis como Encerrado.
-        if "encerrado" in codigos:
-            codigos.add("concluido")
-        codigos = sorted(codigos)
-        if len(codigos) == 1:
-            parametros["status"] = "eq." + codigos[0]
-        else:
-            parametros["status"] = "in.(" + ",".join(codigos) + ")"
-    if data_referencia is not None:
-        try:
-            dia = date.fromisoformat(
-                data_referencia.isoformat() if isinstance(data_referencia, date)
-                else str(data_referencia)[:10]
-            )
-        except (ValueError, TypeError) as exc:
-            raise ErroPRISMA("Selecione uma data válida para filtrar fechamentos.") from exc
-        parametros["data"] = "eq." + dia.isoformat()
+    parametros.update(_filtros_continuidade(
+        status=status, data_referencia=data_referencia
+    ))
     bairro = re.sub(r"[^\w\s\-]", "", bairro or "", flags=re.UNICODE).strip()[:80]
     if bairro:
         parametros["bairro"] = "ilike.*" + bairro + "*"
@@ -217,21 +256,17 @@ def editar_fechamento(identificador, dados, versao):
 
 
 def listar_fechamentos_relatorio(municipio: str, data_referencia=None):
-    """Lê fechamentos do município; data opcional para relatório diário."""
+    """Seleciona abertos em continuidade e arquivados do dia para revisão."""
     _leitura()
     municipio = str(municipio or "").strip()
     if not municipio or len(municipio) > 100:
         raise ErroPRISMA("Selecione um município válido para o relatório.")
-    filtros = {"municipio": "ilike." + municipio}
-    if data_referencia is not None:
-        try:
-            dia = date.fromisoformat(
-                data_referencia.isoformat() if isinstance(data_referencia, date)
-                else str(data_referencia)[:10]
-            )
-        except (ValueError, TypeError) as exc:
-            raise ErroPRISMA("Data do relatório inválida.") from exc
-        filtros["data"] = "eq." + dia.isoformat()
+    filtros = {
+        "municipio": "ilike." + municipio,
+        **_filtros_continuidade(
+            data_referencia=data_referencia, incluir_arquivados_do_dia=True
+        ),
+    }
     registros = []
     offset = 0
     while True:
