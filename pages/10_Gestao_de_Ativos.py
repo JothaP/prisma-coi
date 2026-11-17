@@ -13,6 +13,7 @@ import sys
 from zoneinfo import ZoneInfo
 
 import folium
+import pandas as pd
 from folium.plugins import Fullscreen
 from branca.element import Element, MacroElement
 from jinja2 import Template
@@ -26,8 +27,12 @@ if str(RAIZ) not in sys.path:
 from auth import exigir_acesso_modulo, pode_executar_acao, registrar_atividade
 from gestao_ativos_backend import (
     CAMPOS_EDITAVEIS, CONFIRMACAO_RESET_ATIVOS, MAX_MARCADORES, criar_ativo,
-    editar_ativo, historico_ativo, listar_ativos, municipios, obter_ativo,
-    resetar_fichas_e_historico, validar_historico,
+    editar_ativo, historico_ativo, listar_ativos, listar_fichas_para_relatorio,
+    municipios, obter_ativo, resetar_fichas_e_historico, validar_historico,
+)
+from gestao_ativos_relatorio import (
+    SECOES as SECOES_RELATORIO, SITUACOES as SITUACOES_RELATORIO,
+    gerar_pontos_atencao, preparar_itens_relatorio,
 )
 from prisma_backend import ErroPRISMA
 
@@ -585,6 +590,144 @@ if st.session_state.get("perfil") == "admin":
                     st.rerun()
                 except ErroPRISMA as exc:
                     st.error(f"Reset não realizado: {exc}")
+
+# Consulta apenas leitura e revisão em memória. Nenhuma classificação
+# automática dos status e nenhuma gravação em prisma_ativos.
+with st.expander("📋 Gerar relatório — Pontos de Atenção", expanded=False):
+    st.caption(
+        "Modelo de relatório operacional para copiar ou baixar como texto. "
+        "As situações Pendente / Em andamento e as seções são escolhas "
+        "independentes do status cadastrado no PRISMA."
+    )
+    cidades_relatorio = sorted(
+        {str(c).strip().upper() for c in cidades if str(c).strip()}
+    )
+    if not cidades_relatorio:
+        st.info("Nenhum município cadastrado para gerar relatório.")
+    else:
+        col_cidade_relatorio, col_data_relatorio = st.columns(2)
+        with col_cidade_relatorio:
+            indice_cidade = (
+                cidades_relatorio.index("TERESINA")
+                if "TERESINA" in cidades_relatorio else 0
+            )
+            municipio_relatorio = st.selectbox(
+                "Município do relatório", cidades_relatorio, index=indice_cidade,
+                key="ga_relatorio_municipio",
+            )
+        with col_data_relatorio:
+            data_relatorio = st.date_input(
+                "Data de referência", value=datetime.now(FUSO).date(),
+                format="DD/MM/YYYY", key="ga_relatorio_data",
+            )
+        incluir_operando = st.checkbox(
+            "Mostrar também ativos com status Operando para seleção manual",
+            value=False, key="ga_relatorio_mostrar_operando",
+            help="Ativos Operando ficam desmarcados por padrão e não são "
+                 "incluídos no relatório sem seleção expressa.",
+        )
+        if st.button(
+            "Carregar fichas", key="ga_relatorio_carregar",
+            help="Consulta as fichas do município; não modifica nenhum registro.",
+        ):
+            try:
+                with st.spinner("Consultando as fichas de ativos no Supabase..."):
+                    registros_relatorio = listar_fichas_para_relatorio(municipio_relatorio)
+                linhas_relatorio = preparar_itens_relatorio(
+                    registros_relatorio, incluir_operando=incluir_operando
+                )
+                st.session_state["ga_relatorio_fichas"] = {
+                    "municipio": municipio_relatorio,
+                    "incluir_operando": incluir_operando,
+                    "itens": linhas_relatorio,
+                }
+                st.session_state["ga_relatorio_versao"] = (
+                    st.session_state.get("ga_relatorio_versao", 0) + 1
+                )
+                st.session_state.pop("ga_relatorio_texto", None)
+                if not linhas_relatorio:
+                    st.info("Nenhuma ficha operacional preenchida para esses filtros.")
+            except ErroPRISMA as exc:
+                st.error(f"Não foi possível consultar as fichas: {exc}")
+
+        fichas_revisao = st.session_state.get("ga_relatorio_fichas")
+        if fichas_revisao and (
+            fichas_revisao["municipio"] != municipio_relatorio
+            or fichas_revisao["incluir_operando"] != incluir_operando
+        ):
+            st.warning(
+                "Os filtros foram alterados. Clique em Carregar fichas "
+                "novamente para montar a lista correspondente."
+            )
+        elif fichas_revisao and fichas_revisao["itens"]:
+            st.caption(
+                f"{len(fichas_revisao['itens'])} ficha(s) disponível(is). "
+                "Revise a descrição e a O.S., selecione a seção e a situação, "
+                "e desmarque os itens que não devem aparecer. "
+                "É possível incluir linhas manuais (por exemplo, dois poços "
+                "referenciados por uma mesma planta), sem modificar o cadastro."
+            )
+            with st.form("ga_relatorio_editor_form"):
+                dados_editor = st.data_editor(
+                    pd.DataFrame(fichas_revisao["itens"]),
+                    key=f"ga_relatorio_editor_{st.session_state.get('ga_relatorio_versao', 0)}",
+                    use_container_width=True, hide_index=True,
+                    num_rows="dynamic",
+                    disabled=["Planta de origem"],
+                    column_config={
+                        "Incluir": st.column_config.CheckboxColumn("Incluir"),
+                        "Ordem": st.column_config.NumberColumn(
+                            "Posição", min_value=0, step=1, format="%d"),
+                        "Seção": st.column_config.SelectboxColumn(
+                            "Seção", options=list(SECOES_RELATORIO), required=True),
+                        "Situação": st.column_config.SelectboxColumn(
+                            "Situação do relatório", options=list(SITUACOES_RELATORIO),
+                            required=True),
+                        "Poço / ativo": st.column_config.TextColumn(
+                            "Poço / ativo", required=True),
+                        "Observação": st.column_config.TextColumn("Descrição da ocorrência"),
+                        "O.S.": st.column_config.TextColumn("Ordem de serviço"),
+                        "Nota": st.column_config.TextColumn("Nota (opcional)"),
+                        "Planta de origem": st.column_config.TextColumn("Planta (referência)"),
+                    },
+                )
+                montar_relatorio = st.form_submit_button(
+                    "Gerar texto do relatório", type="primary",
+                    use_container_width=True,
+                )
+            if montar_relatorio:
+                registros_editados = dados_editor.to_dict("records")
+                if not any(
+                    item.get("Incluir") is True
+                    and str(item.get("Poço / ativo") or "").strip()
+                    for item in registros_editados
+                ):
+                    st.warning("Selecione pelo menos um item com identificação.")
+                else:
+                    st.session_state["ga_relatorio_texto"] = gerar_pontos_atencao(
+                        municipio_relatorio, data_relatorio, registros_editados
+                    )
+
+        if (fichas_revisao
+                and fichas_revisao["municipio"] == municipio_relatorio
+                and fichas_revisao["incluir_operando"] == incluir_operando
+                and st.session_state.get("ga_relatorio_texto")):
+            st.markdown("**Texto gerado — pronto para copiar e compartilhar**")
+            texto_gerado = st.text_area(
+                "Relatório final (editável antes de copiar)",
+                key="ga_relatorio_texto", height=420,
+            )
+            nome_arquivo_relatorio = (
+                "pontos_atencao_" + re.sub(r"[^a-z0-9]+", "_",
+                    municipio_relatorio.lower()).strip("_")
+                + f"_{data_relatorio:%Y%m%d}.txt"
+            )
+            st.download_button(
+                "Baixar relatório (.txt)",
+                data=texto_gerado.encode("utf-8-sig"),
+                file_name=nome_arquivo_relatorio, mime="text/plain",
+                key="ga_relatorio_baixar",
+            )
 
 if mensagem := st.session_state.pop("ga_mensagem", None):
     st.success(mensagem)
