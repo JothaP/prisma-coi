@@ -180,7 +180,7 @@ class TestGestaoAtivosStatusMapa(unittest.TestCase):
         """
         fonte = FONTE.read_text(encoding="utf-8")
         trecho_mapa = fonte.split(
-            'pode_editar_status = pode_executar_acao("9", "editar")', 1
+            'pode_editar_status = pode_executar_acao("9", "editar") and HISTORICO_DISPONIVEL', 1
         )[1].split('resultado = st_folium(', 1)[0]
         self.assertNotIn('id_selecionado', trecho_mapa)
         self.assertNotIn('ga_painel', trecho_mapa)
