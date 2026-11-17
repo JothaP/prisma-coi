@@ -10,6 +10,7 @@ on:
       - 'tests/test_gestao_ativos_relatorio.py'
       - 'tests/test_gestao_ativos_fechamentos.py'
       - 'tests/test_gestao_ativos_sidebar.py'
+      - 'tests/test_gestao_ativos_multistatus.py'
       - 'app.py'
       - 'gestao_ativos_fechamentos.py'
       - 'gestao_ativos_relatorio.py'
