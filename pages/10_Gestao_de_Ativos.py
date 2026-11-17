@@ -60,6 +60,8 @@ ROTULOS = {
     "data_ultima_os_operacao": "Data da O.S. Operação",
     "ultima_os_eletromecanica": "Última O.S. Eletromecânica",
     "data_ultima_os_eletromecanica": "Data da O.S. Eletromecânica",
+    "protocolo_equatorial": "Protocolo Equatorial",
+    "data_protocolo_equatorial": "Data — Protocolo",
     "observacao": "Observação", "latitude": "Latitude",
     "longitude": "Longitude",
 }
@@ -120,6 +122,16 @@ def _campos_formulario(registro, prefixo, *, novo=False, coords=None, municipio_
             data_eletro = st.date_input("Data — Eletromecânica",
                                        value=_data(registro.get("data_ultima_os_eletromecanica")),
                                        format="DD/MM/YYYY")
+        col1, col2 = st.columns(2)
+        with col1:
+            protocolo_equatorial = st.text_input(
+                "Protocolo Equatorial",
+                value=_texto(registro.get("protocolo_equatorial")))
+        with col2:
+            data_protocolo_equatorial = st.date_input(
+                "Data — Protocolo",
+                value=_data(registro.get("data_protocolo_equatorial")),
+                format="DD/MM/YYYY")
         municipio = st.text_input(
             "Município", value=_texto(registro.get("municipio") or municipio_padrao))
         latitude = longitude = None
@@ -144,6 +156,10 @@ def _campos_formulario(registro, prefixo, *, novo=False, coords=None, municipio_
         "data_ultima_os_operacao": data_operacao.isoformat() if data_operacao else None,
         "ultima_os_eletromecanica": os_eletro,
         "data_ultima_os_eletromecanica": data_eletro.isoformat() if data_eletro else None,
+        "protocolo_equatorial": protocolo_equatorial,
+        "data_protocolo_equatorial": (
+            data_protocolo_equatorial.isoformat() if data_protocolo_equatorial else None
+        ),
         "municipio": municipio, "observacao": observacao,
     }
     return enviar, campos, latitude, longitude
