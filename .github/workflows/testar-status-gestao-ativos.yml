@@ -5,6 +5,8 @@ on:
     paths:
       - 'pages/10_Gestao_de_Ativos.py'
       - 'tests/test_gestao_ativos_status_mapa.py'
+      - 'tests/test_gestao_ativos_protocolo_equatorial.py'
+      - 'gestao_ativos_backend.py'
       - '.github/workflows/testar-status-gestao-ativos.yml'
   workflow_dispatch:
 
@@ -24,6 +26,6 @@ jobs:
         with:
           node-version: '22'
       - name: Validar sintaxe
-        run: python -m py_compile pages/10_Gestao_de_Ativos.py
+        run: python -m py_compile pages/10_Gestao_de_Ativos.py gestao_ativos_backend.py
       - name: Validar envio do status pelo popup
-        run: python -m unittest discover -s tests -p 'test_gestao_ativos_status_mapa.py' -v
+        run: python -m unittest discover -s tests -p 'test_gestao_ativos_*.py' -v
