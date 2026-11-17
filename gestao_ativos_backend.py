@@ -18,6 +18,7 @@ CAMPOS_EDITAVEIS = (
     "planta", "nome", "matricula", "status",
     "ultima_os_operacao", "data_ultima_os_operacao",
     "ultima_os_eletromecanica", "data_ultima_os_eletromecanica",
+    "protocolo_equatorial", "data_protocolo_equatorial",
     "observacao", "municipio",
 )
 STATUS = {"operando", "parado", "em_manutencao", "inativo", "validar"}
@@ -78,6 +79,7 @@ def listar_ativos(municipio=None, pesquisa="", status=None):
         "select": ("id,tipo,planta,nome,municipio,latitude,longitude,"
                    "matricula,status,ultima_os_operacao,data_ultima_os_operacao,"
                    "ultima_os_eletromecanica,data_ultima_os_eletromecanica,"
+                   "protocolo_equatorial,data_protocolo_equatorial,"
                    "observacao,atualizado_em"),
         "order": "planta.asc",
         "limit": str(MAX_MARCADORES + 1),
@@ -118,7 +120,8 @@ def _validar_campos(campos):
     if dados["status"] not in STATUS and dados["status"] is not None:
         raise ErroPRISMA("Status inválido.")
     for campo in ("nome", "matricula", "ultima_os_operacao",
-                  "ultima_os_eletromecanica", "observacao", "municipio"):
+                  "ultima_os_eletromecanica", "protocolo_equatorial",
+                  "observacao", "municipio"):
         dados[campo] = str(dados[campo]).strip() if dados[campo] is not None else None
         if dados[campo] == "":
             dados[campo] = None
