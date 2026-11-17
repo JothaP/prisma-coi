@@ -738,9 +738,9 @@ MODULOS = [
         "visivel": True,
     },
     {
-        "numero": "9", "titulo": "Gestão de Ativos", "icone": "🏭",
-        "descricao": "Cadastro e histórico de ativos georreferenciados no Supabase.",
-        "botao": "Acessar Gestão de Ativos", "chave": "acessar_gestao_ativos",
+        "numero": "9", "titulo": "Gestão de Campo", "icone": "🗺️",
+        "descricao": "Gestão georreferenciada de poços e fechamentos/reparos de rede.",
+        "botao": "Acessar Gestão de Campo", "chave": "acessar_gestao_ativos",
         "pagina": "pages/10_Gestao_de_Ativos.py", "autorizado": acessos["9"],
         "visivel": True,
     },
