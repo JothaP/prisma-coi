@@ -18,9 +18,11 @@ from prisma_backend import _tabela, ErroPRISMA
 STATUS_FECHAMENTO = {
     "pendente": ("Pendente", "#EF4444", "🔴"),
     "em_andamento": ("Em andamento", "#FACC15", "🟡"),
-    "concluido": ("Concluído", "#16A34A", "🟢"),
+    "encerrado": ("Encerrado", "#16A34A", "🟢"),
     "cancelado": ("Cancelado", "#111111", "⚫"),
 }
+# Status anterior mantido apenas para leitura de registros antigos.
+STATUS_LEGADO = {"concluido": STATUS_FECHAMENTO["encerrado"]}
 LIMITE_MARCADORES_FECHAMENTOS = 450
 
 
@@ -51,7 +53,7 @@ def _campos(dados: dict) -> dict:
     resultado = {}
     limites = {
         "lider": 160, "equipe": 160, "matricula": 80, "os": 80,
-        "bairro": 160, "municipio": 100,
+        "bairro": 160, "municipio": 100, "os_abertura": 80,
     }
     for campo, limite in limites.items():
         valor = str(dados.get(campo) or "").strip()
@@ -71,6 +73,25 @@ def _campos(dados: dict) -> dict:
     except (ValueError, TypeError) as exc:
         raise ErroPRISMA("Informe uma data válida para o fechamento.") from exc
     resultado["data"] = data.isoformat()
+    data_abertura = dados.get("data_abertura")
+    if data_abertura in ("", None):
+        resultado["data_abertura"] = None
+    else:
+        try:
+            data_abertura = date.fromisoformat(
+                data_abertura.isoformat() if isinstance(data_abertura, date)
+                else str(data_abertura)[:10]
+            )
+        except (ValueError, TypeError) as exc:
+            raise ErroPRISMA("Informe uma data de abertura válida.") from exc
+        resultado["data_abertura"] = data_abertura.isoformat()
+    if status == "encerrado" and (
+        not resultado["os_abertura"] or not resultado["data_abertura"]
+    ):
+        raise ErroPRISMA(
+            "Para marcar o fechamento como Encerrado, preencha a "
+            "O.S. de abertura e a data da abertura."
+        )
     return resultado
 
 
@@ -108,7 +129,8 @@ def municipios_fechamentos():
     return sorted((n for n in nomes if n), key=str.casefold)
 
 
-def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None):
+def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None,
+                       data_referencia=None):
     _leitura()
     parametros = {
         "select": "*",
@@ -121,6 +143,15 @@ def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None):
         if status not in STATUS_FECHAMENTO:
             raise ErroPRISMA("Status de fechamento inválido.")
         parametros["status"] = "eq." + status
+    if data_referencia is not None:
+        try:
+            dia = date.fromisoformat(
+                data_referencia.isoformat() if isinstance(data_referencia, date)
+                else str(data_referencia)[:10]
+            )
+        except (ValueError, TypeError) as exc:
+            raise ErroPRISMA("Selecione uma data válida para filtrar fechamentos.") from exc
+        parametros["data"] = "eq." + dia.isoformat()
     bairro = re.sub(r"[^\w\s\-]", "", bairro or "", flags=re.UNICODE).strip()[:80]
     if bairro:
         parametros["bairro"] = "ilike.*" + bairro + "*"
@@ -128,7 +159,7 @@ def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None):
     if termo:
         parametros["or"] = "(" + ",".join(
             f"{campo}.ilike.*{termo}*"
-            for campo in ("lider", "equipe", "matricula", "os", "bairro")
+            for campo in ("lider", "equipe", "matricula", "os", "os_abertura", "bairro")
         ) + ")"
     return _tabela("prisma_fechamentos_rede", params=parametros)
 
@@ -171,17 +202,27 @@ def editar_fechamento(identificador, dados, versao):
     return resultado[0]
 
 
-def listar_fechamentos_relatorio(municipio: str):
-    """Lê todos os fechamentos do município, independente do filtro visual."""
+def listar_fechamentos_relatorio(municipio: str, data_referencia=None):
+    """Lê fechamentos do município; data opcional para relatório diário."""
     _leitura()
     municipio = str(municipio or "").strip()
     if not municipio or len(municipio) > 100:
         raise ErroPRISMA("Selecione um município válido para o relatório.")
+    filtros = {"municipio": "ilike." + municipio}
+    if data_referencia is not None:
+        try:
+            dia = date.fromisoformat(
+                data_referencia.isoformat() if isinstance(data_referencia, date)
+                else str(data_referencia)[:10]
+            )
+        except (ValueError, TypeError) as exc:
+            raise ErroPRISMA("Data do relatório inválida.") from exc
+        filtros["data"] = "eq." + dia.isoformat()
     registros = []
     offset = 0
     while True:
         lote = _tabela("prisma_fechamentos_rede", params={
-            "select": "*", "municipio": "ilike." + municipio,
+            "select": "*", **filtros,
             "order": "data.desc,criado_em.desc",
             "limit": "1000", "offset": str(offset),
         })
