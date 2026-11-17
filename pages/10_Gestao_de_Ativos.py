@@ -782,10 +782,10 @@ def _dialogo_administracao():
 def _dialogo_gerar_relatorio(cidades, cidades_reparos):
     """Consulta fichas e edita o texto em memória; não modifica o Supabase."""
     st.caption(
-        "Relatório dividido pelo status registrado na ficha: cada grupo e "
-        "marcador utilizam a cor correspondente no mapa. Situação (Pendente / "
-        "Em andamento) permanece um campo independente e não altera o status "
-        "cadastrado. As edições feitas aqui valem apenas para o relatório."
+        "Inclui automaticamente fechamentos Pendentes e Em andamento iniciados "
+        "em dias anteriores, sem duplicar fichas. Encerrados e Cancelados do "
+        "dia de origem ficam disponíveis para seleção manual. Os status exibidos "
+        "são os atuais; as edições do relatório não alteram o cadastro."
     )
     cidades_relatorio = sorted(
         {str(c).strip().upper() for c in [*cidades, *cidades_reparos]
@@ -829,7 +829,7 @@ def _dialogo_gerar_relatorio(cidades, cidades_reparos):
                     registros_relatorio, incluir_operando=incluir_operando
                 )
                 linhas_reparos_relatorio = preparar_fechamentos_relatorio(
-                    registros_reparos_relatorio
+                    registros_reparos_relatorio, data_referencia=data_relatorio
                 )
                 st.session_state["ga_relatorio_fichas"] = {
                     "municipio": municipio_relatorio,
@@ -905,11 +905,11 @@ def _dialogo_gerar_relatorio(cidades, cidades_reparos):
                     pd.DataFrame(fichas_revisao.get("fechamentos", []), columns=[
                         "Incluir", "Ordem", "Status do fechamento",
                         "Líder", "Equipe", "Matrícula", "O.S.", "Bairro", "Data",
-                        "O.S. de abertura", "Data da abertura",
+                        "O.S. de abertura", "Data da abertura", "Continuidade",
                     ]),
                     key=f"ga_relatorio_reparos_{st.session_state.get('ga_relatorio_versao', 0)}",
                     use_container_width=True, hide_index=True,
-                    num_rows="dynamic",
+                    num_rows="dynamic", disabled=["Continuidade"],
                     column_config={
                         "Incluir": st.column_config.CheckboxColumn("Incluir"),
                         "Ordem": st.column_config.NumberColumn(
@@ -928,6 +928,9 @@ def _dialogo_gerar_relatorio(cidades, cidades_reparos):
                         "O.S. de abertura": st.column_config.TextColumn("O.S. de abertura"),
                         "Data da abertura": st.column_config.TextColumn(
                             "Data da abertura (AAAA-MM-DD)"),
+                        "Continuidade": st.column_config.TextColumn(
+                            "De dias anteriores", help="Marcado automaticamente "
+                            "para reparos ainda abertos iniciados antes da data do relatório."),
                     },
                 )
                 montar_relatorio = st.form_submit_button(
@@ -1063,7 +1066,8 @@ with st.sidebar:
     data_fechamentos = st.date_input(
         "Data dos fechamentos", value=datetime.now(FUSO).date(),
         format="DD/MM/YYYY", key="ga_data_fechamentos",
-        help="Seleciona os fechamentos conforme a Data informada na ficha."
+        help="Mostra os abertos iniciados até esta data. Encerrados/Cancelados "
+             "ficam nas consultas históricas."
     )
     todas_datas_fechamentos = st.checkbox(
         "Exibir todas as datas", value=False, key="ga_todas_datas_fechamentos",
@@ -1097,8 +1101,11 @@ with fr3:
     status_reparo_filtro = st.multiselect(
         "Status • Fechamentos", options=list(STATUS_FECHAMENTO), default=[],
         format_func=lambda codigo: STATUS_FECHAMENTO[codigo][0],
-        placeholder="Todos os status",
-        help="Selecione um ou mais status. Sem seleção, todos os fechamentos são exibidos.",
+        placeholder=("Todos os status" if todas_datas_fechamentos
+                     else "Pendentes e em andamento"),
+        help="Selecione um ou mais status. Na consulta diária, sem seleção, "
+             "aparecem os reparos ainda abertos desde dias anteriores. Para "
+             "consultar todos os encerrados e cancelados, use Exibir todas as datas.",
         key="ga_status_reparo_filtro",
     )
 with fr4:
@@ -1172,8 +1179,18 @@ limitado = len(registros) > MAX_MARCADORES
 ativos = registros[:MAX_MARCADORES]
 reparos_limitados = len(reparos_retornados) > LIMITE_MARCADORES_FECHAMENTOS
 reparos_visiveis = reparos_retornados[:LIMITE_MARCADORES_FECHAMENTOS]
+reparos_em_continuidade = (
+    sum(
+        1 for r in reparos_visiveis
+        if r.get("status") in ("pendente", "em_andamento")
+        and str(r.get("data") or "")[:10] < dia_fechamentos_filtro.isoformat()
+    )
+    if dia_fechamentos_filtro is not None else 0
+)
 st.caption(
     f"{len(ativos)} poços · {len(reparos_visiveis)} fechamentos/reparos 🚧 no mapa"
+    + (f" · {reparos_em_continuidade} em continuidade de dias anteriores"
+       if reparos_em_continuidade else "")
     + (" · Refine os filtros de poços para exibir mais." if limitado else "")
     + (" · Refine os filtros de fechamentos para exibir mais."
        if reparos_limitados else "")
@@ -1266,13 +1283,22 @@ for reparo in reparos_visiveis:
     lat, lon = float(reparo["latitude"]), float(reparo["longitude"])
     codigo_reparo = str(reparo.get("status") or "")
     rotulo_status, cor_reparo, _ = STATUS_FECHAMENTO.get(
-        codigo_reparo, ("Não informado", "#94A3B8", "⚪")
+        codigo_reparo,
+        ("Encerrado", "#16A34A", "🟢") if codigo_reparo == "concluido"
+        else ("Não informado", "#94A3B8", "⚪")
+    )
+    continuacao_reparo = (
+        dia_fechamentos_filtro is not None
+        and codigo_reparo in ("pendente", "em_andamento")
+        and str(reparo.get("data") or "")[:10] < dia_fechamentos_filtro.isoformat()
     )
     bairro_reparo = escape(_texto(reparo.get("bairro")))
     tooltip_reparo = (
         f"<span style='display:none'>PRISMA_FECHAMENTO={reparo['id']}</span>"
         f"🚧 <b>Fechamento / reparo</b> · {bairro_reparo}"
         f"<br><b>Status:</b> {escape(rotulo_status)}"
+        + ("<br><b>Em continuidade de dias anteriores</b>"
+           if continuacao_reparo else "")
     )
     detalhes_reparo = (
         ("Líder", "lider"), ("Equipe", "equipe"),
@@ -1289,6 +1315,8 @@ for reparo in reparos_visiveis:
             for titulo, campo in detalhes_reparo
         )
         + f"<div><b>Status:</b> {escape(rotulo_status)}</div>"
+        + ("<div><b>Em continuidade de dias anteriores</b></div>"
+           if continuacao_reparo else "")
         + "<small>Para editar, consulte a ficha abaixo do mapa.</small></div>"
     )
     folium.Marker(
