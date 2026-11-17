@@ -21,7 +21,7 @@ CAMPOS_EDITAVEIS = (
     "protocolo_equatorial", "data_protocolo_equatorial",
     "observacao", "municipio",
 )
-STATUS = {"operando", "parado", "em_manutencao", "inativo", "validar"}
+STATUS = {"operando", "parado", "em_manutencao", "em_observacao", "inativo", "validar"}
 MAX_MARCADORES = 450
 CONFIRMACAO_RESET_ATIVOS = "RESETAR FICHAS E HISTORICO"
 
