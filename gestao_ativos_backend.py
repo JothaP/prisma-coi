@@ -23,6 +23,7 @@ CAMPOS_EDITAVEIS = (
 )
 STATUS = {"operando", "parado", "em_manutencao", "inativo", "validar"}
 MAX_MARCADORES = 450
+CONFIRMACAO_RESET_ATIVOS = "RESETAR FICHAS E HISTORICO"
 
 
 def _autor(acao):
@@ -160,3 +161,35 @@ def editar_ativo(ativo_id, campos, versao):
             "Este ativo foi alterado por outro usuário. Reabra a ficha e tente novamente."
         )
     return registros[0]
+
+
+def resetar_fichas_e_historico(confirmacao):
+    """Limpa campos operacionais e histórico sem excluir/alterar identidade dos ativos.
+
+    Executa UMA transação no Supabase, com auditoria geral atômica. A chamada é
+    exclusiva do servidor Streamlit; a RPC só permite service_role e verifica
+    novamente se o autor é um administrador ativo na própria base.
+    """
+    from auth import verificar_autenticacao
+
+    if not verificar_autenticacao(forcar=True):
+        raise ErroPRISMA("Sessão inválida ou expirada. Entre novamente.")
+    if st.session_state.get("perfil") != "admin":
+        raise ErroPRISMA("O reset está disponível somente para administradores.")
+    if not pode_executar_acao(MODULO, "excluir"):
+        raise ErroPRISMA("Seu usuário não possui permissão para executar o reset.")
+    if confirmacao != CONFIRMACAO_RESET_ATIVOS:
+        raise ErroPRISMA("Digite a frase de confirmação exatamente como apresentada.")
+
+    autor = _autor("excluir")
+    resultado = _tabela(
+        "rpc/prisma_ativos_resetar_fichas_historico_tx",
+        method="POST",
+        payload={"p_autor": autor, "p_confirmacao": confirmacao},
+    )
+    if not isinstance(resultado, dict) or not all(
+        isinstance(resultado.get(chave), int) and resultado[chave] >= 0
+        for chave in ("ativos_preservados", "fichas_limpas", "historicos_excluidos")
+    ):
+        raise ErroPRISMA("O servidor não confirmou o resultado do reset.")
+    return resultado
