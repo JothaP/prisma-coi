@@ -139,10 +139,24 @@ def listar_fechamentos(municipio=None, bairro="", pesquisa="", status=None,
     }
     if municipio and municipio != "Todos":
         parametros["municipio"] = "ilike." + str(municipio).strip()[:100]
-    if status and status != "Todos":
-        if status not in STATUS_FECHAMENTO:
-            raise ErroPRISMA("Status de fechamento inválido.")
-        parametros["status"] = "eq." + status
+    # A seleção múltipla é aplicada no banco, antes da limitação de
+    # marcadores. Nenhuma seleção = todos os status.
+    selecionados = (
+        [status] if isinstance(status, str) and status != "Todos"
+        else list(status or []) if not isinstance(status, str) else []
+    )
+    if selecionados:
+        if any(codigo not in STATUS_FECHAMENTO for codigo in selecionados):
+            raise ErroPRISMA("Um dos status de fechamento selecionados é inválido.")
+        codigos = set(selecionados)
+        # Registros anteriores continuam consultáveis como Encerrado.
+        if "encerrado" in codigos:
+            codigos.add("concluido")
+        codigos = sorted(codigos)
+        if len(codigos) == 1:
+            parametros["status"] = "eq." + codigos[0]
+        else:
+            parametros["status"] = "in.(" + ",".join(codigos) + ")"
     if data_referencia is not None:
         try:
             dia = date.fromisoformat(
