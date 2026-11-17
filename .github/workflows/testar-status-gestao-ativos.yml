@@ -9,6 +9,8 @@ on:
       - 'tests/test_gestao_ativos_reset_admin.py'
       - 'tests/test_gestao_ativos_relatorio.py'
       - 'tests/test_gestao_ativos_fechamentos.py'
+      - 'tests/test_gestao_ativos_sidebar.py'
+      - 'app.py'
       - 'gestao_ativos_fechamentos.py'
       - 'gestao_ativos_relatorio.py'
       - 'gestao_ativos_backend.py'
