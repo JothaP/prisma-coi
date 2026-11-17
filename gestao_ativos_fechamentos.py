@@ -75,13 +75,20 @@ def _campos(dados: dict) -> dict:
 
 
 def _coordenadas(latitude, longitude):
+    """Aceita graus decimais com ponto ou vírgula, sem coordenadas fictícias."""
     try:
-        lat, lon = float(latitude), float(longitude)
+        lat = float(str(latitude).strip().replace(",", "."))
+        lon = float(str(longitude).strip().replace(",", "."))
     except (ValueError, TypeError) as exc:
-        raise ErroPRISMA("Selecione um ponto válido no mapa.") from exc
+        raise ErroPRISMA(
+            "Informe latitude e longitude em graus decimais para posicionar o 🚧."
+        ) from exc
     if not (math.isfinite(lat) and math.isfinite(lon)
             and -90 <= lat <= 90 and -180 <= lon <= 180):
-        raise ErroPRISMA("Coordenadas do fechamento inválidas.")
+        raise ErroPRISMA(
+            "Coordenadas do fechamento inválidas: latitude de -90 a 90 e "
+            "longitude de -180 a 180."
+        )
     return lat, lon
 
 
