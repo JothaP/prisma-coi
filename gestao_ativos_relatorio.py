@@ -52,7 +52,7 @@ def preparar_itens_relatorio(ativos: list[dict], incluir_operando=False) -> list
         if re.match(r"^THE[- ]", nome, re.IGNORECASE):
             nome = re.sub(r"^THE[- ]+", "THE ", nome, flags=re.IGNORECASE)
         fichas.append({
-            "Incluir": True,
+            "Incluir": ativo.get("status") != "operando",
             "Ordem": len(fichas) + 1,
             "Seção": "OBSERVAÇÕES POÇOS",
             "Situação": "Pendente",
