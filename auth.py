@@ -7,7 +7,7 @@ na próxima consulta de perfil (máx. 30 segundos).
 from datetime import datetime, timedelta, timezone
 import streamlit as st
 from prisma_backend import (ErroPRISMA, MODULOS, auditar, permissoes_efetivas,
-                           permissoes_usuario, perfil_de_usuario, bootstrap_admin,
+                           permissoes_usuario, permissoes_por_perfil, perfil_de_usuario, bootstrap_admin,
                            renovar, usuario_autenticado)
 
 _REVALIDAR_SEGUNDOS=25
@@ -65,7 +65,9 @@ def verificar_autenticacao(forcar=False):
         if not perfil or perfil.get("status")!="ativo":raise ErroPRISMA("Acesso pendente ou bloqueado")
         if str(perfil.get("email","")).lower()!=str(user.get("email","")).lower():
             raise ErroPRISMA("Conta divergente")
-        permissoes=permissoes_efetivas(perfil["perfil"],permissoes_usuario(user["id"]))
+        permissoes=permissoes_efetivas(
+            perfil["perfil"], permissoes_usuario(user["id"]), permissoes_por_perfil()
+        )
         st.session_state.update({"autenticado":True,"usuario_logado":perfil.get("nome") or user["email"],
             "prisma_usuario_id":user["id"],"perfil":perfil["perfil"],
             "modulos":[m for m in MODULOS if permissoes.get((m,"visualizar"),False)],
