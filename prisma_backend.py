@@ -160,24 +160,115 @@ def bootstrap_admin(user):
 def permissoes_usuario(user_id):
     return _tabela("prisma_permissoes",params={"usuario_id":"eq."+str(user_id),"select":"modulo,acao,permitido"})
 
-def permissoes_padrao(perfil):
-    if perfil=="admin":return {(m,a):True for m in MODULOS for a in ACOES}
-    permitidos={str(i) for i in range(1,9)} if perfil=="usuario" else {"1","3","8"}
-    return {(m,a): (m in permitidos and (perfil!="operador" or a in ("visualizar","exportar","relatorios")))
-            for m in MODULOS for a in ACOES}
 
-def permissoes_efetivas(perfil,linhas):
-    base=permissoes_padrao(perfil)
-    for r in linhas:
-        m,a=r.get("modulo"),r.get("acao")
-        if (m,a) in base and m!="gestao":base[(m,a)]=bool(r.get("permitido"))
-    # Gestão de Ativos: visualização universal para contas ativas.
-    # A autenticação já bloqueia cadastros pendentes ou bloqueados.
-    # Preserva todas as demais permissões individuais de criação/edição.
-    base[("9","visualizar")]=True
-    # Somente perfil admin pode acessar o gerenciamento de permissões.
-    for a in ACOES:base[("gestao",a)]=(perfil=="admin")
+def permissoes_por_perfil():
+    """Consulta as permissões padrão personalizadas (uso apenas no servidor).
+
+    A tabela é protegida por RLS e acessada exclusivamente pela chave de
+    serviço do backend. A ausência de linhas preserva os padrões legados.
+    Erros de acesso NÃO são interpretados como tabela vazia.
+    """
+    linhas = _tabela(
+        "prisma_permissoes_perfil",
+        params={"select":"perfil,modulo,acao,permitido","limit":"1000"},
+    )
+    if not isinstance(linhas, list):
+        raise ErroPRISMA("Resposta inválida das permissões padrão por perfil.")
+    return linhas
+
+
+def permissoes_padrao(perfil, regras_perfil=None):
+    """Padrões legados, seguidos das personalizações do perfil no Supabase."""
+    if perfil == "admin":
+        return {(m,a):True for m in MODULOS for a in ACOES}
+    permitidos = {str(i) for i in range(1,9)} if perfil == "usuario" else {"1","3","8"}
+    base = {(m,a): (
+        m in permitidos and (
+            perfil != "operador" or a in ("visualizar","exportar","relatorios")
+        )
+    ) for m in MODULOS for a in ACOES}
+    if perfil in {"usuario","operador"}:
+        for item in (regras_perfil or []):
+            modulo, acao = item.get("modulo"), item.get("acao")
+            if (item.get("perfil") == perfil
+                    and (modulo, acao) in base
+                    and modulo != "gestao"
+                    and (modulo, acao) != ("9","visualizar")):
+                base[(modulo,acao)] = item.get("permitido") is True
     return base
+
+
+def permissoes_efetivas(perfil, linhas, regras_perfil=None):
+    """Precedência: administrador > individual > padrão do perfil > legado.
+
+    Gestão de Acessos é exclusiva do administrador; visualização do
+    Módulo 9 permanece liberada para todas as contas ativas.
+    """
+    base = permissoes_padrao(perfil, regras_perfil)
+    if perfil != "admin":
+        for r in linhas:
+            modulo, acao = r.get("modulo"), r.get("acao")
+            if (modulo,acao) in base and modulo != "gestao":
+                base[(modulo,acao)] = r.get("permitido") is True
+    base[("9","visualizar")] = True
+    for acao in ACOES:
+        base[("gestao",acao)] = perfil == "admin"
+    return base
+
+def _exigir_admin_permissoes(ator):
+    administrador = perfil_de_usuario(ator)
+    if not administrador or administrador.get("perfil") != "admin" or administrador.get("status") != "ativo":
+        raise ErroPRISMA("A configuração de perfis exige um administrador ativo.")
+
+
+def salvar_permissoes_por_perfil(ator, perfil, matriz):
+    """Atualiza apenas as regras do tipo de usuário, sem alterar exceções individuais."""
+    _exigir_admin_permissoes(ator)
+    if perfil not in {"usuario","operador"}:
+        raise ErroPRISMA("Somente os perfis Usuário e Operador podem ser configurados.")
+    modulos_editaveis = [m for m in MODULOS if m != "gestao"]
+    esperadas = {(modulo,acao) for modulo in modulos_editaveis for acao in ACOES
+                 if (modulo,acao) != ("9","visualizar")}
+    if not isinstance(matriz, dict) or set(matriz) != esperadas:
+        raise ErroPRISMA("A matriz de permissões do perfil está incompleta ou inválida.")
+    if any(type(valor) is not bool for valor in matriz.values()):
+        raise ErroPRISMA("As permissões precisam ser valores booleanos.")
+    linhas = [
+        {"perfil":perfil, "modulo":modulo, "acao":acao, "permitido":matriz[(modulo,acao)]}
+        for modulo,acao in sorted(esperadas)
+    ]
+    _tabela(
+        "prisma_permissoes_perfil", method="POST",
+        params={"on_conflict":"perfil,modulo,acao"}, payload=linhas,
+        prefer="resolution=merge-duplicates,return=minimal",
+    )
+    auditar(
+        ator, "alterar_permissoes_perfil",
+        detalhes=f"Perfil {perfil}: {len(linhas)} regras padrão atualizadas",
+        modulo="gestao", tipo="ALTERACAO", registro_id=perfil,
+    )
+
+
+def restaurar_permissoes_do_perfil(ator, alvo):
+    """Remove exceções individuais para voltar à herança do perfil."""
+    _exigir_admin_permissoes(ator)
+    if str(ator) == str(alvo):
+        raise ErroPRISMA("Não é permitido restaurar as próprias permissões administrativas.")
+    usuario = perfil_de_usuario(alvo)
+    if not usuario:
+        raise ErroPRISMA("Usuário não encontrado.")
+    if usuario.get("perfil") == "admin":
+        raise ErroPRISMA("Administradores não podem ter suas permissões restauradas aqui.")
+    _tabela(
+        "prisma_permissoes", method="DELETE",
+        params={"usuario_id":"eq."+str(alvo)}, prefer="return=minimal",
+    )
+    auditar(
+        ator, "restaurar_permissoes_perfil", alvo,
+        f"Exceções individuais removidas; perfil={usuario['perfil']}",
+        modulo="gestao", tipo="EXCLUSAO",
+    )
+
 
 def listar_perfis():
     return _tabela("prisma_perfis",params={"select":"id,email,nome,perfil,status,criado_em","order":"criado_em.desc","limit":"500"})
@@ -361,6 +452,8 @@ def espelhar_permissoes(ator,origem_id,destino_id):
         raise ErroPRISMA("O usuário modelo precisa estar ativo.")
     if destino.get("perfil")=="admin":
         raise ErroPRISMA("Permissões de administradores são determinadas pelo perfil.")
-    matriz=permissoes_efetivas(origem["perfil"],permissoes_usuario(origem_id))
+    matriz=permissoes_efetivas(
+        origem["perfil"], permissoes_usuario(origem_id), permissoes_por_perfil()
+    )
     salvar_permissoes(ator,destino_id,matriz,origem_id=origem_id)
 
