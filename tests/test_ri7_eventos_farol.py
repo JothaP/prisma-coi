@@ -90,7 +90,7 @@ def evento_exemplo(**dados):
     base = {
         "Cidade": "TERESINA", "Áreas Impactadas": "Porto do Centro",
         "Serviço": "Manutenção Elétrica",
-        "Descrição do Serviço": "Manutenção Elétrica",
+        "Descrição do Serviço": "Reparo no quadro de comando do poço",
         "Código do Ativo": "PL-THE-PCO0356",
         "Protocolo": "E-123", "Status": "Finalizado",
         "Início": "10/11/2026 08:00h",
@@ -162,6 +162,7 @@ class TestRelatorio7EventosFarol(unittest.TestCase):
             relacionados.to_dict("records")
         )
         self.assertIn("Manutenção Elétrica / PL-THE-PCO0356", descricao)
+        self.assertNotIn("Reparo no quadro de comando", descricao)
 
     def test_relatorio7_utiliza_contexto_real_sem_falso_vinculo(self):
         grupo = pd.DataFrame([
