@@ -290,6 +290,70 @@ def concentracoes_farol(df, raio_m, minimo):
 
 
 
+def totais_territoriais_concentracoes(concentracoes, grupos, os_base):
+    """Contabiliza reclamações do entorno territorial, não só das O.S. agrupadas.
+
+    THE/TIM: soma todas as O.S. dos bairros existentes na concentração,
+    distinguindo bairros homônimos por município.
+    API: soma todas as O.S. dos municípios presentes na concentração.
+    A base recebida já respeita período, unidade e município selecionados.
+    O agrupamento por chave evita contar o mesmo bairro/município várias vezes.
+    O.S. concentradas sem bairro informado são preservadas no total THE/TIM.
+    """
+    resultado = concentracoes.copy()
+    resultado["Total territorial"] = pd.Series(dtype="int64")
+    if resultado.empty:
+        return resultado
+
+    contagem_cidades = (
+        os_base.groupby("_municipio").size().to_dict()
+        if not os_base.empty else {}
+    )
+    cidades_bairros = (
+        os_base[os_base["_bairro"] != ""]
+        .groupby(["_municipio", "_bairro"]).size().to_dict()
+        if not os_base.empty else {}
+    )
+    grupos_por_id = {
+        identificador: registros
+        for identificador, registros in grupos.groupby("_grupo")
+    } if not grupos.empty else {}
+    totais = []
+    for _, concentracao in resultado.iterrows():
+        grupo = grupos_por_id.get(concentracao["_grupo"])
+        if grupo is None or grupo.empty:
+            totais.append(0)
+            continue
+
+        if concentracao["_unidade"] == "API":
+            municipios = set(grupo["_municipio"]) - {""}
+            total = sum(int(contagem_cidades.get(municipio, 0))
+                        for municipio in municipios)
+            # Sem município não é possível atribuir O.S. à região geográfica.
+            total += int((grupo["_municipio"] == "").sum())
+        else:
+            pares = {
+                (municipio, bairro)
+                for municipio, bairro in
+                zip(grupo["_municipio"], grupo["_bairro"])
+                if municipio and bairro
+            }
+            total = sum(int(cidades_bairros.get(par, 0)) for par in pares)
+            # Não alarga a seleção a todos os registros de bairro vazio.
+            # Essas O.S. fazem parte da concentração e devem ser contabilizadas.
+            total += int(((grupo["_municipio"] == "") |
+                          (grupo["_bairro"] == "")).sum())
+        totais.append(total)
+
+    resultado["Total territorial"] = pd.Series(totais, index=resultado.index, dtype="int64")
+    return resultado
+
+
+def rotulo_total_territorial(unidade):
+    """Nome do KPI no relatório institucional e na tabela/CSV."""
+    return "Total do Município" if unidade == "API" else "Total da Região"
+
+
 def relacionar(concs, os_cluster, pressao, raio, inicio, fim):
     """Cruza pontos no MESMO município: proximidade com qualquer O.S. do grupo.
 
@@ -2497,8 +2561,9 @@ def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculada
     ri7_tarja(pdf, cabecalho, 25, 459, 792, 31, tamanho=12)
     ri7_quadro_imagem(pdf, imagem_mapa, 26, 197, 317, 252)
     ri7_painel_kpi(pdf, 357, 396, 130, 53, 'Reclamações', str(len(grupo)),tamanho=18)
-    ri7_painel_kpi(pdf, 494, 396, 130, 53, 'Matrículas distintas',
-                   str(int(conc.get('Matrículas',0))),tamanho=18)
+    ri7_painel_kpi(pdf, 494, 396, 130, 53,
+                   rotulo_total_territorial(conc.get('_unidade', '')),
+                   str(int(conc.get('Total territorial', 0))), tamanho=18)
     ri7_retangulo(pdf, 631, 396, 186, 53, '#EAF3FD', '#CBDFF2')
     ri7_escrever(pdf, 'Eventos relacionados:', 640, 428, 9.2, RI7_AZUL,negrito=True)
     nome_evento = ri7_resumo_eventos_relacionados(eventos)
@@ -2958,6 +3023,9 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
     resumo_bp = resumo_pressao_por_bairro(bp)
     concs, grupos = concentracoes_farol(os_df, int(RAIO_CONCENTRACOES_M),
                                          int(MINIMO_OS_CONCENTRACAO))
+    # Inclui O.S. fora das concentrações no território correspondente,
+    # sem alterar a identificação nem as O.S. de cada concentração.
+    concs = totais_territoriais_concentracoes(concs, grupos, os_df)
     if not concs.empty:
         resumo, associados, territoriais = relacionar(
             concs, grupos, bp, int(RAIO_MEDICOES_M), inicio, fim
@@ -2971,7 +3039,7 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
         pressao_sem_conc = bp.iloc[:0].copy()
 
     return {
-        "versao_esquema": 14,
+        "versao_esquema": 15,
         "consultado_em": datetime.now(FUSO_LOGGERS).strftime("%d/%m/%Y %H:%M:%S"),
         "municipio_filtro": municipio_filtro,
         "resumo": resumo, "associados": associados, "territoriais": territoriais,
@@ -3017,7 +3085,7 @@ _chaves_necessarias = {
 }
 if r is not None and (
     not isinstance(r, dict)
-    or r.get("versao_esquema") != 14
+    or r.get("versao_esquema") != 15
     or not _chaves_necessarias.issubset(r)
 ):
     st.session_state.pop("relatorio_coi_integrado", None)
@@ -3051,11 +3119,13 @@ if r:
         if mapa is not None:
             st_folium(mapa,height=500,width=None,returned_objects=[],key="mapa_integrado_relatorio")
         st.subheader("Concentrações operacionais")
-        visiveis=["Concentração","Município","Bairros","O.S.","Matrículas"]
+        rotulo_total = rotulo_total_territorial(r["unidade"])
+        resumo_exibicao = resumo.rename(columns={"Total territorial": rotulo_total})
+        visiveis=["Concentração","Município","Bairros","O.S.",rotulo_total]
         if not resumo.empty and ((resumo["Medições próximas"]>0)|(resumo["Medições mesmo bairro"]>0)).any():
             visiveis += ["Medições próximas","Medições mesmo bairro","Menor pressão (mca)","Classificação indicativa"]
         if not resumo.empty:
-            st.dataframe(resumo[visiveis],hide_index=True,use_container_width=True)
+            st.dataframe(resumo_exibicao[visiveis],hide_index=True,use_container_width=True)
         else:
             st.caption("Não há concentração nesta seleção. Os pontos medidos do Módulo 1 continuam visíveis no mapa.")
         # Um PDF gerado no dia anterior nunca deve continuar disponível após
@@ -3110,7 +3180,7 @@ if r:
                 data=st.session_state["pdf_relatorio_integrado_farol"],
                 file_name="relatorio_operacional_integrado_coi.pdf",mime="application/pdf")
         if not resumo.empty:
-            st.download_button("📋 Baixar diagnóstico (CSV)",data=resumo[visiveis].to_csv(index=False,sep=";").encode("utf-8-sig"),
+            st.download_button("📋 Baixar diagnóstico (CSV)",data=resumo_exibicao[visiveis].to_csv(index=False,sep=";").encode("utf-8-sig"),
                 file_name="diagnostico_integrado_coi.csv",mime="text/csv")
         if not r["associados"].empty:
             with st.expander("Medições associadas por proximidade geográfica"):
