@@ -1,0 +1,41 @@
+name: Validar Farol Histórico
+
+on:
+  push:
+    paths:
+      - 'pages/12_Farol_Historico.py'
+      - 'tests/test_farol_historico.py'
+      - 'app.py'
+      - 'prisma_backend.py'
+      - 'prisma_manutencao.py'
+      - 'sql/prisma_farol_historico_permissoes.sql'
+      - '.github/workflows/validar-farol-historico.yml'
+  pull_request:
+    paths:
+      - 'pages/12_Farol_Historico.py'
+      - 'tests/test_farol_historico.py'
+      - 'app.py'
+      - 'prisma_backend.py'
+      - 'prisma_manutencao.py'
+      - 'sql/prisma_farol_historico_permissoes.sql'
+      - '.github/workflows/validar-farol-historico.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar dependências dos testes isolados
+        run: python -m pip install 'pandas>=2.2,<3'
+      - name: Verificar sintaxe sem executar a interface
+        run: python -m py_compile pages/12_Farol_Historico.py app.py prisma_backend.py prisma_manutencao.py
+      - name: Executar regressões do histórico e do isolamento
+        run: python -m unittest discover -s tests -p 'test_farol_historico.py' -v
