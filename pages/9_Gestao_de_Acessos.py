@@ -298,7 +298,7 @@ with aba_tipos:
                 with colunas[indice]:
                     selecionado = st.checkbox(
                         acao.title(),
-                        value=bool(matriz_padrao.get((modulo, acao), False)),
+                        value=True if universal else bool(matriz_padrao.get((modulo, acao), False)),
                         key=f"ga_tipo_{perfil_padrao}_{modulo}_{acao}",
                         disabled=universal,
                         help="Visualização universal para contas ativas." if universal else None,
@@ -318,17 +318,22 @@ with aba_tipos:
             "Salvar permissões do tipo de usuário",
             type="primary", use_container_width=True,
         )
+    if st.session_state.pop("ga_perfil_salvo_mensagem", None) == perfil_padrao:
+        st.success(
+            f"Permissões padrão do perfil {perfil_padrao} salvas. "
+            "As regras passam a valer na revalidação da sessão."
+        )
     if salvar_tipo:
         if not confirmar_tipo:
             st.warning("Confirme a alteração dos acessos padrão antes de salvar.")
         else:
             try:
                 salvar_permissoes_por_perfil(ator, perfil_padrao, alteracoes_perfil)
-                st.success(
-                    f"Padrões do perfil {perfil_padrao} atualizados no Supabase. "
-                    "Usuários sem exceções individuais receberão as permissões "
-                    "na próxima revalidação de sessão."
-                )
+                st.session_state["ga_perfil_salvo_mensagem"] = perfil_padrao
+                # Atualiza a prévia individual, que usa widgets persistentes.
+                for chave in list(st.session_state):
+                    if chave.startswith("perm_"):
+                        st.session_state.pop(chave, None)
                 st.rerun()
             except ErroPRISMA as erro:
                 st.error(f"Não foi possível salvar os padrões do perfil: {erro}")
