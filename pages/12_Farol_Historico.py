@@ -2758,6 +2758,14 @@ def evento_pertinente_data_analise(evento):
         comeco = interpretar_data_operacional(evento.get("Data", ""))
     if pd.isna(comeco):
         comeco = interpretar_data_operacional(evento.get("Data de Criação", ""))
+    if pd.isna(comeco):
+        # Algumas exportações informam somente a data do evento, sem hora.
+        # Ela vale para exibição no período, mas não comprova vínculo horário.
+        for campo in ("Início", "Data", "Data de Criação"):
+            dia = data_os_historico(evento.get(campo, ""))
+            if dia is not None:
+                comeco = pd.Timestamp(dia)
+                break
     termino = interpretar_data_operacional(evento.get("Término Real", ""))
     if pd.isna(comeco) and pd.isna(termino):
         return False
