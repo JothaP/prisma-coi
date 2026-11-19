@@ -24,6 +24,7 @@ STATUS_FECHAMENTO = {
 # Status anterior mantido apenas para leitura de registros antigos.
 STATUS_LEGADO = {"concluido": STATUS_FECHAMENTO["encerrado"]}
 LIMITE_MARCADORES_FECHAMENTOS = 450
+CONFIRMACAO_EXCLUSAO_FECHAMENTOS = "EXCLUIR TODOS OS FECHAMENTOS"
 
 
 def _leitura():
@@ -281,3 +282,41 @@ def listar_fechamentos_relatorio(municipio: str, data_referencia=None):
         offset += 1000
         if offset >= 10000:
             raise ErroPRISMA("Há mais de 10.000 fechamentos no município.")
+
+
+
+def excluir_todos_fechamentos(confirmacao: str) -> dict:
+    """Exclui apenas registros de fechamentos, com auditoria atômica no banco.
+
+    Nunca altera `prisma_ativos` nem `prisma_ativos_historico`. Exige
+    autenticação revalidada, perfil admin, permissão excluir, frase exata;
+    a RPC confere novamente o administrador ativo antes do DELETE.
+    """
+    from auth import verificar_autenticacao
+
+    if not verificar_autenticacao(forcar=True):
+        raise ErroPRISMA("Sessão inválida ou expirada. Entre novamente.")
+    if st.session_state.get("perfil") != "admin":
+        raise ErroPRISMA(
+            "A exclusão dos fechamentos está disponível somente para administradores."
+        )
+    if not pode_executar_acao("9", "excluir"):
+        raise ErroPRISMA("Sem permissão para excluir os fechamentos de rede.")
+    if confirmacao != CONFIRMACAO_EXCLUSAO_FECHAMENTOS:
+        raise ErroPRISMA("Digite a frase de confirmação dos fechamentos exatamente.")
+
+    autor = _autor("excluir")
+    resposta = _tabela(
+        "rpc/prisma_fechamentos_resetar_registros_tx",
+        method="POST",
+        payload={"p_autor": autor, "p_confirmacao": confirmacao},
+    )
+    if (not isinstance(resposta, dict)
+            or isinstance(resposta.get("fechamentos_excluidos"), bool)
+            or not isinstance(resposta.get("fechamentos_excluidos"), int)
+            or resposta["fechamentos_excluidos"] < 0):
+        raise ErroPRISMA(
+            "O servidor não confirmou a exclusão dos fechamentos. "
+            "Consulte a auditoria antes de tentar novamente."
+        )
+    return resposta
