@@ -2458,29 +2458,31 @@ def ri7_rotular_status_os_grupo(grupo, indice):
 
 
 def ri7_resumo_eventos_relacionados(eventos):
-    """Descrição do serviço e código do ativo, sem exibir protocolo ou páginas extras.
+    """Exibe exclusivamente Serviço / Código do Ativo dos eventos associados.
 
-    O evento pode ter sido associado manualmente; nesses casos, o campo
-    Descrição do Serviço pode estar vazio, e Serviço é o fallback legítimo.
+    Descrição do Serviço é um detalhamento operacional independente e não
+    substitui o nome do Serviço no cartão Eventos relacionados do PDF.
     """
     if not eventos:
         return "Nenhum evento relacionado"
     descricoes = []
+    vazios = {
+        "", "nan", "none", "não informado", "nao informado",
+        "ativo não informado", "ativo nao informado",
+        "sem ativo", "n/a", "-"
+    }
     for evento in eventos:
-        descricao = str(evento.get("Descrição do Serviço", "") or "").strip()
-        if not descricao or descricao.casefold() in {"nan", "none"}:
-            descricao = str(evento.get("Serviço", "") or "").strip()
+        servico = str(evento.get("Serviço", "") or "").strip()
         ativo = str(evento.get("Código do Ativo", "") or "").strip()
-        if ativo.casefold() in {
-            "nan", "none", "não informado", "nao informado",
-            "ativo não informado", "ativo nao informado", "sem ativo", "n/a", "-"
-        }:
+        if servico.casefold() in vazios:
+            servico = ""
+        if ativo.casefold() in vazios:
             ativo = ""
-        texto = " / ".join(v for v in (descricao, ativo) if v)
+        texto = " / ".join(valor for valor in (servico, ativo) if valor)
         if texto and texto not in descricoes:
             descricoes.append(texto)
     if not descricoes:
-        return f"{len(eventos)} evento(s) sem descrição informada"
+        return f"{len(eventos)} evento(s) sem Serviço ou Código do Ativo informado"
     return f"{len(eventos)} — " + "; ".join(descricoes)
 
 
