@@ -46,6 +46,24 @@ class TesteFarolHistorico(unittest.TestCase):
         self.assertIn('validar_janela=False', self.codigo)
         self.assertNotIn('st.title("Farol Operacional")', self.codigo)
 
+    def test_mapa_historico_representa_eventos_concluidos(self):
+        """O módulo diário suprime encerrados; o histórico deve mostrá-los."""
+        funcs = {node.name: ast.get_source_segment(self.codigo, node)
+                 for node in cls_nodes(self.arvore)}
+        georreferenciar = funcs["eventos_georreferenciados"]
+        camada = funcs["adicionar_camada_eventos"]
+        self.assertNotIn('if categoria_status == "Finalizado":', georreferenciar)
+        self.assertNotIn('== "Finalizado":\n            continue', camada)
+        self.assertIn('classificar_status_evento(evento.get("Status", ""))', georreferenciar)
+        self.assertIn("def secao_pdf_acompanhamento(*args, **kwargs)", self.codigo)
+
+    def test_selecao_do_periodo_nao_depende_do_relogio_atual(self):
+        funcoes = {n.name: ast.get_source_segment(self.codigo, n)
+                   for n in cls_nodes(self.arvore)}
+        trecho = funcoes["classificar_os_por_evento"]
+        self.assertIn('st.session_state.get("fh_periodo_ativo")', trecho)
+        self.assertIn("datetime.combine(limite_estudo[1]", trecho)
+
     def test_hub_permissoes_manutencao_e_sql(self):
         self.assertIn('"numero": "historico"', APP.read_text(encoding="utf-8"))
         self.assertIn('historico":"Farol Histórico"', BACKEND.read_text(encoding="utf-8"))
