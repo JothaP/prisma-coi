@@ -667,11 +667,12 @@ st.markdown(
 # Autorização original: todas as permissões continuam sendo lidas de auth.py.
 acessos = {str(numero): tem_acesso_modulo(str(numero)) for numero in range(1, 10)}
 acesso_teste = tem_acesso_modulo("teste")
+acesso_historico = tem_acesso_modulo("historico")
 # Os cartões dos módulos em manutenção são desabilitados para usuários
 # comuns, sem retirar as permissões que já possuem no cadastro.
 bloqueios = {}
 if perfil_interno != "admin":
-    for modulo_codigo in [str(n) for n in range(1, 10)] + ["teste"]:
+    for modulo_codigo in [str(n) for n in range(1, 10)] + ["teste", "historico"]:
         bloqueios[modulo_codigo] = situacao(modulo_codigo)[0]
 
 # Um único centro de avisos para manutenções globais e específicas.
@@ -699,6 +700,13 @@ MODULOS = [
         "descricao": "Concentrações de O.S., eventos e evidências operacionais.",
         "botao": "Acessar Farol Operacional", "chave": "acessar_farol_operacional",
         "pagina": "pages/3_Farol_Operacional.py", "autorizado": acessos["3"],
+        "visivel": True,
+    },
+    {
+        "numero": "historico", "titulo": "Farol Histórico", "icone": "🕰️",
+        "descricao": "Análise retrospectiva de O.S., concentrações e eventos em períodos livres.",
+        "botao": "Acessar Farol Histórico", "chave": "acessar_farol_historico",
+        "pagina": "pages/12_Farol_Historico.py", "autorizado": acesso_historico,
         "visivel": True,
     },
     {
@@ -761,7 +769,7 @@ def exibir_cartao(modulo):
     indice = str(modulo["numero"])
     bloqueado_manutencao = bloqueios.get(indice)
     liberado = autorizado and not bloqueado_manutencao
-    rotulo = "AMBIENTE DE TESTE" if ambiente else f"MÓDULO {indice.zfill(2)}"
+    rotulo = "AMBIENTE DE TESTE" if ambiente else ("FAROL HISTÓRICO" if indice == "historico" else f"MÓDULO {indice.zfill(2)}")
     status = (
         "Em manutenção" if bloqueado_manutencao
         else ("Acesso restrito" if autorizado else "Sem permissão") if ambiente
