@@ -37,8 +37,10 @@ from gestao_ativos_relatorio import (
 )
 from gestao_ativos_fechamentos import (
     STATUS_FECHAMENTO, LIMITE_MARCADORES_FECHAMENTOS,
+    CONFIRMACAO_EXCLUSAO_FECHAMENTOS,
     listar_fechamentos, listar_fechamentos_relatorio, municipios_fechamentos,
     criar_fechamento, editar_fechamento, obter_fechamento,
+    excluir_todos_fechamentos,
 )
 from prisma_backend import ErroPRISMA
 
@@ -725,6 +727,7 @@ def _dialogo_administracao():
     if st.session_state.get("perfil") != "admin":
         st.error("Acesso exclusivo à administração.")
         return
+    st.subheader("🚰 Fichas dos ativos")
     st.warning(
         "Esta operação atua em TODOS os ativos do módulo. Remove o status, "
         "as últimas O.S. de Operação e Eletromecânica, suas datas, "
@@ -776,6 +779,65 @@ def _dialogo_administracao():
                 st.rerun()
             except ErroPRISMA as exc:
                 st.error(f"Reset não realizado: {exc}")
+
+    st.divider()
+    st.subheader("🚧 Registros de fechamentos / reparos de rede")
+    st.warning(
+        "Esta operação apaga permanentemente TODOS os fechamentos e reparos "
+        "de rede cadastrados, incluindo Pendentes, Em andamento, Encerrados "
+        "e Cancelados, de todas as datas e municípios. Não remove fichas "
+        "ou histórico dos poços, nem altera o cadastro de ativos. "
+        "O registro de auditoria administrativa será preservado. "
+        "A exclusão não pode ser desfeita pela interface."
+    )
+    with st.form("ga_confirmacao_exclusao_fechamentos"):
+        st.caption("Para excluir somente os registros de fechamentos, digite exatamente:")
+        st.code(CONFIRMACAO_EXCLUSAO_FECHAMENTOS)
+        frase_fechamentos = st.text_input(
+            "Frase de confirmação — Fechamentos",
+            value="",
+            key="ga_frase_excluir_fechamentos",
+            placeholder=CONFIRMACAO_EXCLUSAO_FECHAMENTOS,
+        )
+        aceite_fechamentos = st.checkbox(
+            "Estou ciente de que todos os registros de fechamentos "
+            "e reparos serão excluídos permanentemente."
+        )
+        enviar_fechamentos = st.form_submit_button(
+            "Excluir todos os fechamentos",
+            type="secondary",
+            disabled=not pode_executar_acao("9", "excluir"),
+        )
+    if enviar_fechamentos:
+        if (not aceite_fechamentos
+                or frase_fechamentos != CONFIRMACAO_EXCLUSAO_FECHAMENTOS):
+            st.error(
+                "Marque a confirmação de fechamentos e digite a frase "
+                "exatamente como apresentada."
+            )
+        else:
+            try:
+                with st.spinner("Excluindo somente os fechamentos, com auditoria..."):
+                    resultado_fechamentos = excluir_todos_fechamentos(
+                        frase_fechamentos
+                    )
+                _limpar_cache()
+                if (st.session_state.get("ga_painel") or {}).get("tipo") in (
+                    "fechamento", "novo_fechamento"
+                ):
+                    st.session_state.pop("ga_painel", None)
+                st.session_state.pop("ga_relatorio_fichas", None)
+                st.session_state.pop("ga_relatorio_texto", None)
+                st.session_state.pop("ga_evento_marcador_processado", None)
+                st.session_state["ga_mensagem"] = (
+                    f"Exclusão concluída: "
+                    f"{resultado_fechamentos['fechamentos_excluidos']} "
+                    "fechamento(s) removido(s). As fichas dos ativos foram "
+                    "preservadas. Auditoria administrativa registrada."
+                )
+                st.rerun()
+            except ErroPRISMA as exc:
+                st.error(f"Exclusão dos fechamentos não realizada: {exc}")
 
 
 @st.dialog("📋 Gerar Relatório — Pontos de Atenção", width="large")
