@@ -1,0 +1,43 @@
+name: Validar Farol 3B e Permissões por Perfil
+
+on:
+  push:
+    paths:
+      - 'app.py'
+      - 'auth.py'
+      - 'prisma_backend.py'
+      - 'prisma_manutencao.py'
+      - 'pages/9_Gestao_de_Acessos.py'
+      - 'pages/12_Farol_Historico.py'
+      - 'sql/prisma_permissoes_perfil.sql'
+      - 'tests/test_prisma_permissoes_perfil.py'
+      - '.github/workflows/validar-permissoes-perfil.yml'
+  pull_request:
+    paths:
+      - 'app.py'
+      - 'auth.py'
+      - 'prisma_backend.py'
+      - 'prisma_manutencao.py'
+      - 'pages/9_Gestao_de_Acessos.py'
+      - 'pages/12_Farol_Historico.py'
+      - 'sql/prisma_permissoes_perfil.sql'
+      - 'tests/test_prisma_permissoes_perfil.py'
+      - '.github/workflows/validar-permissoes-perfil.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compilar módulos alterados
+        run: python -m py_compile app.py auth.py prisma_backend.py prisma_manutencao.py pages/9_Gestao_de_Acessos.py pages/12_Farol_Historico.py
+      - name: Testes de autorização, regressão dos módulos e isolamento
+        run: python -m unittest discover -s tests -p 'test_prisma_permissoes_perfil.py' -v
