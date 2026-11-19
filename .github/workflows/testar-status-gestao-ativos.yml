@@ -7,6 +7,8 @@ on:
       - 'tests/test_gestao_ativos_status_mapa.py'
       - 'tests/test_gestao_ativos_protocolo_equatorial.py'
       - 'tests/test_gestao_ativos_reset_admin.py'
+      - 'tests/test_gestao_ativos_reset_fechamentos.py'
+      - 'sql/prisma_fechamentos_reset_admin.sql'
       - 'tests/test_gestao_ativos_relatorio.py'
       - 'tests/test_gestao_ativos_fechamentos.py'
       - 'tests/test_gestao_ativos_sidebar.py'
