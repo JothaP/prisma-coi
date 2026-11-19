@@ -769,7 +769,7 @@ def exibir_cartao(modulo):
     indice = str(modulo["numero"])
     bloqueado_manutencao = bloqueios.get(indice)
     liberado = autorizado and not bloqueado_manutencao
-    rotulo = "AMBIENTE DE TESTE" if ambiente else ("FAROL HISTÓRICO" if indice == "historico" else f"MÓDULO {indice.zfill(2)}")
+    rotulo = "AMBIENTE DE TESTE" if ambiente else ("MÓDULO 3B" if indice == "historico" else f"MÓDULO {indice.zfill(2)}")
     status = (
         "Em manutenção" if bloqueado_manutencao
         else ("Acesso restrito" if autorizado else "Sem permissão") if ambiente

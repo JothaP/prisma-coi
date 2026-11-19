@@ -23,7 +23,7 @@ MODULOS = {
     "3": "Farol Operacional", "4": "Ferramentas Operacionais",
     "5": "Cadastros e Consultas", "6": "Ferramentas Adicionais",
     "7": "Relatórios Integrados", "8": "Consulta Operacional",
-    "9": "Gestão de Ativos", "historico": "Farol Histórico", "teste": "Ambiente de Teste",
+    "9": "Gestão de Ativos", "historico": "Módulo 3B — Farol Histórico", "teste": "Ambiente de Teste",
 }
 
 

@@ -76,7 +76,7 @@ from acompanhamento_operacional_farol import popup_acompanhamento_farol
 
 # Farol Histórico: reprodução do motor analítico do Módulo 3, sem escrita.
 st.set_page_config(
-    page_title="Farol Histórico | PRISMA",
+    page_title="Módulo 3B | Farol Histórico | PRISMA",
     page_icon="🕰️", layout="wide", initial_sidebar_state="expanded",
 )
 from auth import exigir_acesso_modulo as _exigir_acesso_historico
@@ -5207,14 +5207,14 @@ def importar_historico():
 # ============================================================
 # FAROL HISTÓRICO — INTERFACE
 # ============================================================
-st.title("🕰️ Farol Histórico")
+st.title("🕰️ Módulo 3B — Farol Histórico")
 st.caption(
     "Análise retrospectiva do mesmo motor geográfico e de eventos do Farol Operacional. "
     "Ao contrário do Módulo 3, não há limite móvel de oito dias nem gravações em produção."
 )
 
 with st.sidebar:
-    st.markdown("### 🕰️ Farol Histórico")
+    st.markdown("### 🕰️ Módulo 3B — Farol Histórico")
     if st.button("📥 Importar bases", width="stretch", type="primary"):
         importar_historico()
     st.caption("Dados apenas em memória nesta sessão.")

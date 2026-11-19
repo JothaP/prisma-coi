@@ -66,8 +66,8 @@ class TesteFarolHistorico(unittest.TestCase):
 
     def test_hub_permissoes_manutencao_e_sql(self):
         self.assertIn('"numero": "historico"', APP.read_text(encoding="utf-8"))
-        self.assertIn('historico":"Farol Histórico"', BACKEND.read_text(encoding="utf-8"))
-        self.assertIn('"historico": "Farol Histórico"', MANUTENCAO.read_text(encoding="utf-8"))
+        self.assertIn('historico":"Módulo 3B — Farol Histórico"', BACKEND.read_text(encoding="utf-8"))
+        self.assertIn('"historico": "Módulo 3B — Farol Histórico"', MANUTENCAO.read_text(encoding="utf-8"))
         self.assertIn("prisma_permissoes_modulo_check", SQL.read_text(encoding="utf-8"))
         self.assertIn("manutencao_escopo_modulo", SQL.read_text(encoding="utf-8"))
 

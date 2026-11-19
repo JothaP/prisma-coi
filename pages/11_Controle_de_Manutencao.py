@@ -48,7 +48,7 @@ abrangencia = st.radio(
 )
 modulo = st.selectbox(
     "Módulo a suspender", list(MODULOS),
-    format_func=lambda codigo: f"{codigo.upper()} — {MODULOS[codigo]}",
+    format_func=lambda codigo: f"{'3B' if codigo == 'historico' else codigo.upper()} — {MODULOS[codigo]}",
     key="prisma_man_modulo",
     disabled=abrangencia != "Apenas um módulo",
 )
@@ -201,7 +201,7 @@ else:
         dados.append({
             "ID": r["id"],
             "Modalidade": "Global" if r["escopo"] == "global" else
-                         f"Módulo {r['modulo']} — {MODULOS.get(str(r['modulo']), '')}",
+                         f"Módulo {'3B' if str(r['modulo']) == 'historico' else r['modulo']} — {MODULOS.get(str(r['modulo']), '')}",
             "Início (Teresina)": ini.astimezone(FUSO).strftime("%d/%m/%Y %H:%M"),
             "Término (Teresina)": fim.astimezone(FUSO).strftime("%d/%m/%Y %H:%M") if fim else "Manual",
             "Situação": status_historico(r),
