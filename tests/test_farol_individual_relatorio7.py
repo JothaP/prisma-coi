@@ -64,29 +64,55 @@ class TesteConcentracoesIndividuais(unittest.TestCase):
         self.assertIn("sb_separar(", codigo)
         self.assertIn("seu historico permanecem", codigo.lower().replace("histórico", "historico"))
 
-    def test_resumo_evento_prioriza_descricao_e_ativo(self):
+    def test_resumo_evento_usa_servico_e_ativo_sem_descricao(self):
         resumo = _resumo_eventos()
         valor = resumo([
             {
-                "Protocolo": "", "Serviço": "Manutenção de Rede",
-                "Descrição do Serviço": "Reparo de adutora",
-                "Código do Ativo": "PL-THE-123",
+                "Protocolo": "10001",
+                "Serviço": "Manutenção Elétrica",
+                "Descrição do Serviço": "Reparo no painel e substituição de disjuntor",
+                "Código do Ativo": "PL-THE-PCO0356",
             }
         ])
-        self.assertEqual(valor, "1 — Reparo de adutora / PL-THE-123")
+        self.assertEqual(valor, "1 — Manutenção Elétrica / PL-THE-PCO0356")
+        self.assertNotIn("Reparo no painel", valor)
         self.assertNotIn("Protocolo", valor)
 
-    def test_resumo_sem_ativo_usa_descricao(self):
+    def test_resumo_sem_servico_ou_ativo_nao_usa_descricao(self):
         resumo = _resumo_eventos()
         self.assertEqual(
-            resumo([{"Descrição do Serviço": "Correção elétrica", "Código do Ativo": ""}]),
-            "1 — Correção elétrica",
+            resumo([{
+                "Descrição do Serviço": "Correção elétrica",
+                "Código do Ativo": "PL-THE-123",
+            }]),
+            "1 — PL-THE-123",
+        )
+        self.assertEqual(
+            resumo([{
+                "Descrição do Serviço": "Correção elétrica",
+                "Código do Ativo": "",
+            }]),
+            "1 evento(s) sem Serviço ou Código do Ativo informado",
         )
         self.assertEqual(
             resumo([{"Serviço": "Manutenção", "Código do Ativo": "Não informado"}]),
             "1 — Manutenção",
         )
         self.assertEqual(resumo([]), "Nenhum evento relacionado")
+
+    def test_resumo_eventos_distintos_sem_duplicar_texto(self):
+        resumo = _resumo_eventos()
+        eventos = [
+            {"Serviço": "Manutenção Elétrica", "Código do Ativo": "PL-THE-PCO0356",
+             "Descrição do Serviço": "Primeira observação"},
+            {"Serviço": "Manutenção Elétrica", "Código do Ativo": "PL-THE-PCO0356",
+             "Descrição do Serviço": "Outra observação"},
+            {"Serviço": "Manutenção de Rede", "Código do Ativo": "PL-THE-123"},
+        ]
+        self.assertEqual(
+            resumo(eventos),
+            "3 — Manutenção Elétrica / PL-THE-PCO0356; Manutenção de Rede / PL-THE-123",
+        )
 
     def test_pdf_integrado_sem_paginas_de_eventos_ou_mesclagem(self):
         codigo = MODULO7.read_text(encoding="utf-8")
