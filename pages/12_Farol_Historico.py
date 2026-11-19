@@ -2196,10 +2196,8 @@ def eventos_georreferenciados(eventos, bairros_kmz):
         for nome in nomes_reconhecidos_feicao(bairro):
             indice.setdefault((cidade_bairro, nome), []).append(bairro)
     for _, evento in eventos.iterrows():
-        # Eventos encerrados permanecem na base, mas não geram feições no mapa.
-        categoria_status, _ = classificar_status_evento(evento.get("Status", ""))
-        if categoria_status == "Finalizado":
-            continue
+        # No histórico, eventos já encerrados devem aparecer como registros
+        # do período selecionado, usando a legenda do status finalizado.
         cidade = normalizar_municipio(evento.get("Cidade", ""))
         areas = extrair_bairros_evento(evento.get("Áreas Impactadas", ""), evento.get("Cidade", ""), bairros_kmz)
         if not cidade or not areas:
@@ -2243,9 +2241,8 @@ def adicionar_camada_eventos(mapa, eventos_mapeados):
     fg = folium.FeatureGroup(name="Eventos de desabastecimento", show=True)
     for item in eventos_mapeados:
         evento = item["evento"]
-        # Proteção adicional contra feições finalizadas vindas de outra origem.
-        if classificar_status_evento(evento.get("Status", ""))[0] == "Finalizado":
-            continue
+        # Diferentemente do panorama do dia, a análise histórica também
+        # representa eventos finalizados dentro do intervalo selecionado.
         bairro = item["bairro"]
         categoria = item["categoria"]
         parcial = item["parcial"]
@@ -2950,7 +2947,13 @@ def classificar_os_por_evento(os_grupo, eventos_relacionados):
     no momento de montar os dados da concentração.
     """
     vinculadas, nao_vinculadas = [], []
-    agora = pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+    # O limite da análise é a data final escolhida, nunca o relógio atual.
+    # Isso preserva a reprodutibilidade de estudos de períodos antigos.
+    limite_estudo = st.session_state.get("fh_periodo_ativo")
+    agora = (
+        pd.Timestamp(datetime.combine(limite_estudo[1], horario(23, 59, 59)))
+        if limite_estudo else pd.Timestamp.now(tz=FUSO_FAROL).tz_localize(None)
+    )
     for indice_os, os_reg in os_grupo.iterrows():
         data_os = interpretar_data_operacional(os_reg.get("Dt. Emissão", ""))
         cidade_os = normalizar_municipio(os_reg.get("Cidade", ""))
@@ -5097,6 +5100,14 @@ def eventos_manuais_do_grupo(*args, **kwargs):
 
 def fonte_supabase(*args, **kwargs):
     return False
+
+def secao_pdf_acompanhamento(*args, **kwargs):
+    # As fichas e os históricos de acompanhamento do M3 são exclusivos
+    # da operação diária e não devem ser incluídos no relatório retrospectivo.
+    return []
+
+def texto_acompanhamento_relatorio(*args, **kwargs):
+    return ""
 
 def indice_do_dia(*args, **kwargs):
     return st.session_state.get("fh_imagens_logger", {})
