@@ -179,12 +179,15 @@ class TestCentralAtualizacoes(unittest.TestCase):
             {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
             {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"TIM"},
         ]
-        resultado=ns["_comparar_registros_csv"](
-            registros,list(reversed(registros)),colunas
+        novo=[{"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"}]
+        original=ns["_comparar_registros_csv"](registros,novo,colunas)
+        invertida=ns["_comparar_registros_csv"](
+            list(reversed(registros)),novo,colunas
         )
-        self.assertEqual(resultado["duplicados_antigos"],1)
-        self.assertEqual(resultado["modificados"],0)
-        self.assertEqual(resultado["inalterados"],1)
+        self.assertEqual(original["duplicados_antigos"],1)
+        self.assertEqual(original["modificados"],1)
+        self.assertEqual(original["modificados"],invertida["modificados"])
+        self.assertEqual(original["inalterados"],invertida["inalterados"])
 
     def test_duplicidade_nova_e_bloqueada_na_comparacao(self):
         ns=funcoes("_comparar_registros_csv")
@@ -215,11 +218,16 @@ class TestCentralAtualizacoes(unittest.TestCase):
             self.assertEqual(comparacao["novos"],len(distintos))
             self.assertEqual(comparacao["adicionados"],0)
             self.assertEqual(comparacao["removidos"],0)
-            self.assertEqual(comparacao["duplicados_antigos"],
-                             len(anteriores)-len(distintos)
-                             if all(sum(1 for r in anteriores
-                                 if str(r.get("IDENTIFICACAO_ATIVO") or "").strip().casefold()==key)==2
-                                 for key in distintos) else comparacao["duplicados_antigos"])
+            from collections import Counter
+            frequencias=Counter(
+                str(reg.get("IDENTIFICACAO_ATIVO") or "").strip().casefold()
+                for reg in anteriores
+                if str(reg.get("IDENTIFICACAO_ATIVO") or "").strip()
+            )
+            self.assertEqual(
+                comparacao["duplicados_antigos"],
+                sum(quantidade>1 for quantidade in frequencias.values()),
+            )
             self.assertEqual(
                 comparacao["ocorrencias_excedentes_antigas"],
                 len(anteriores)-len(distintos)-comparacao["sem_identificacao_antigos"]
