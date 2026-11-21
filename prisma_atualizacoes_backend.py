@@ -329,6 +329,54 @@ def arquivos_github():
     return sorted(resultado, key=lambda v: v["caminho"].casefold())
 
 
+def comparar_csv_github(caminho, payload_novo, sha_atual):
+    """Compara cadastros por identificação sem depender do raio/concentrações.
+
+    A análise é disponibilizada para loggers e poços; não lê bases sensíveis
+    de código e limita o blob antigo a 4 MB para preservar desempenho.
+    """
+    administrador_atual()
+    if caminho not in ("dados/loggers.csv","dados/pocos.csv"):
+        return None
+    repo, branch, token = github_config()
+    if not token or not re.fullmatch(r"[a-f0-9]{40}",str(sha_atual)):
+        raise ErroAtualizacao("Não é possível consultar a versão anterior do CSV.")
+    metadados = _github("GET",f"/repos/{repo}/git/blobs/{sha_atual}",token=token)
+    if metadados.get("encoding") != "base64" or int(metadados.get("size",0)) > 4*1024*1024:
+        raise ErroAtualizacao("Não foi possível comparar o cadastro anterior.")
+    try:
+        payload_antigo=base64.b64decode(metadados["content"],validate=False)
+    except (ValueError,KeyError) as exc:
+        raise ErroAtualizacao("Blob anterior inválido.") from exc
+    colunas_antigas, linhas_antigas = _csv_ler(payload_antigo)
+    colunas_novas, linhas_novas = _csv_ler(payload_novo)
+    if colunas_antigas != colunas_novas:
+        raise ErroAtualizacao("As colunas da base antiga e nova não correspondem.")
+    identificador="IDENTIFICACAO_ATIVO"
+    def indexar(registros):
+        indice={}
+        for reg in registros:
+            chave=str(reg.get(identificador) or "").strip().casefold()
+            if not chave or chave in indice:
+                raise ErroAtualizacao("Cadastro anterior ou novo possui identificações duplicadas.")
+            indice[chave]=tuple(str(reg.get(c) or "").strip() for c in colunas_antigas)
+        return indice
+    antigo=indexar(linhas_antigas)
+    novo=indexar(linhas_novas)
+    adicionados=set(novo)-set(antigo)
+    removidos=set(antigo)-set(novo)
+    comuns=set(antigo)&set(novo)
+    alterados={c for c in comuns if antigo[c]!=novo[c]}
+    return {
+        "anteriores":len(antigo),"novos":len(novo),
+        "adicionados":len(adicionados),"removidos":len(removidos),
+        "modificados":len(alterados),"inalterados":len(comuns)-len(alterados),
+        "amostra_adicionados":sorted(adicionados)[:8],
+        "amostra_removidos":sorted(removidos)[:8],
+        "amostra_modificados":sorted(alterados)[:8],
+    }
+
+
 def substituir_github(caminho, nome_upload, payload, sha_esperado):
     autor = administrador_atual()
     validar_arquivo(caminho,nome_upload,payload)
