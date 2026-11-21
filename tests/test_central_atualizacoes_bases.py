@@ -108,7 +108,7 @@ class TestCentralAtualizacoes(unittest.TestCase):
             val("dados/topografia/a.tif","a.tif",b"not a tif")
 
     def test_comparacao_loggers_identifica_entradas_saidas_e_alteracoes(self):
-        ns=funcoes("comparar_csv_github","_csv_ler")
+        ns=funcoes("comparar_csv_github","_comparar_registros_csv","_csv_ler")
         import base64
         import re
         colunas="ID_LOGGER,IDENTIFICACAO_ATIVO,ENDERECO,MUNICIPIO,LATITUDE,LONGITUDE\n"
@@ -130,6 +130,100 @@ class TestCentralAtualizacoes(unittest.TestCase):
         self.assertEqual(res["removidos"],1)
         self.assertEqual(res["modificados"],1)
         self.assertEqual(res["inalterados"],0)
+
+    def test_base_antiga_com_duplicatas_nao_impede_comparacao(self):
+        ns=funcoes("_comparar_registros_csv")
+        colunas=("IDENTIFICACAO_ATIVO","MUNICIPIO","LATITUDE","LONGITUDE")
+        antigos=[
+            {"IDENTIFICACAO_ATIVO":"PL-A","MUNICIPIO":"THE","LATITUDE":"-5","LONGITUDE":"-42"},
+            {"IDENTIFICACAO_ATIVO":"PL-A","MUNICIPIO":"TIM","LATITUDE":"-6","LONGITUDE":"-43"},
+            {"IDENTIFICACAO_ATIVO":"PL-B","MUNICIPIO":"THE","LATITUDE":"-5","LONGITUDE":"-42"},
+        ]
+        novos=[
+            {"IDENTIFICACAO_ATIVO":"PL-A","MUNICIPIO":"TIM","LATITUDE":"-6","LONGITUDE":"-43"},
+            {"IDENTIFICACAO_ATIVO":"PL-B","MUNICIPIO":"THE","LATITUDE":"-5","LONGITUDE":"-42"},
+        ]
+        resultado=ns["_comparar_registros_csv"](antigos,novos,colunas)
+        self.assertEqual(resultado["anteriores"],3)
+        self.assertEqual(resultado["novos"],2)
+        self.assertEqual(resultado["duplicados_antigos"],1)
+        self.assertEqual(resultado["ocorrencias_excedentes_antigas"],1)
+        self.assertEqual(resultado["amostra_duplicados_antigos"][0]["Ocorrências"],2)
+        self.assertEqual(resultado["modificados"],1)
+        self.assertEqual(resultado["removidos"],0)
+        self.assertEqual(resultado["inalterados"],1)
+
+    def test_base_antiga_com_duplicatas_iguais_e_sem_identificacao(self):
+        ns=funcoes("_comparar_registros_csv")
+        colunas=("IDENTIFICACAO_ATIVO","MUNICIPIO")
+        antigo=[
+            {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
+            {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
+            {"IDENTIFICACAO_ATIVO":"","MUNICIPIO":"THE"},
+            {"IDENTIFICACAO_ATIVO":"B","MUNICIPIO":"THE"},
+        ]
+        novo=[
+            {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
+            {"IDENTIFICACAO_ATIVO":"B","MUNICIPIO":"THE"},
+        ]
+        resultado=ns["_comparar_registros_csv"](antigo,novo,colunas)
+        self.assertEqual(resultado["sem_identificacao_antigos"],1)
+        self.assertEqual(resultado["duplicados_antigos"],1)
+        self.assertEqual(resultado["modificados"],1)
+        self.assertEqual(resultado["removidos"],0)
+
+    def test_ordem_das_linhas_antigas_duplicadas_nao_altera_resultado(self):
+        ns=funcoes("_comparar_registros_csv")
+        colunas=("IDENTIFICACAO_ATIVO","MUNICIPIO")
+        registros=[
+            {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
+            {"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"TIM"},
+        ]
+        resultado=ns["_comparar_registros_csv"](
+            registros,list(reversed(registros)),colunas
+        )
+        self.assertEqual(resultado["duplicados_antigos"],1)
+        self.assertEqual(resultado["modificados"],0)
+        self.assertEqual(resultado["inalterados"],1)
+
+    def test_duplicidade_nova_e_bloqueada_na_comparacao(self):
+        ns=funcoes("_comparar_registros_csv")
+        colunas=("IDENTIFICACAO_ATIVO","MUNICIPIO")
+        antigo=[{"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"}]
+        novo=[{"IDENTIFICACAO_ATIVO":"A","MUNICIPIO":"THE"},
+              {"IDENTIFICACAO_ATIVO":"a","MUNICIPIO":"TIM"}]
+        with self.assertRaisesRegex(ns["ErroAtualizacao"],"NOVA base"):
+            ns["_comparar_registros_csv"](antigo,novo,colunas)
+
+    def test_comparacao_das_bases_reais_com_duplicidades_existentes(self):
+        ns=funcoes("_comparar_registros_csv","_csv_ler")
+        for caminho in ("dados/loggers.csv","dados/pocos.csv"):
+            bruto=(ROOT/caminho).read_bytes()
+            colunas, registros=ns["_csv_ler"](bruto)
+            anteriores=list(registros)
+            distintos={}
+            for reg in anteriores:
+                chave=str(reg.get("IDENTIFICACAO_ATIVO") or "").strip().casefold()
+                if chave:
+                    distintos.setdefault(chave,reg)
+            # Simula candidato válido construído em memória: não grava no GitHub.
+            comparacao=ns["_comparar_registros_csv"](
+                anteriores,list(distintos.values()),colunas
+            )
+            self.assertEqual(comparacao["anteriores"],len(anteriores))
+            self.assertEqual(comparacao["identificadores_anteriores"],len(distintos))
+            self.assertEqual(comparacao["novos"],len(distintos))
+            self.assertEqual(comparacao["adicionados"],0)
+            self.assertEqual(comparacao["removidos"],0)
+            self.assertEqual(comparacao["duplicados_antigos"],
+                             len(anteriores)-len(distintos)
+                             if all(sum(1 for r in anteriores
+                                 if str(r.get("IDENTIFICACAO_ATIVO") or "").strip().casefold()==key)==2
+                                 for key in distintos) else comparacao["duplicados_antigos"])
+            self.assertEqual(
+                comparacao["ocorrencias_excedentes_antigas"],
+                len(anteriores)-len(distintos)-comparacao["sem_identificacao_antigos"]
+            )
 
     def test_upload_github_revalida_sha_e_audita(self):
         e=self.ns["ErroAtualizacao"]
