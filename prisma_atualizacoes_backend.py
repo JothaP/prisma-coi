@@ -212,6 +212,13 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
                 if not codigo or codigo in ids:
                     raise ErroAtualizacao("Identificador do equipamento ausente ou duplicado no CSV.")
                 ids.add(codigo)
+                for campo, minimo, maximo in (("LATITUDE",-90,90),("LONGITUDE",-180,180)):
+                    try:
+                        coord = float(str(item.get(campo) or "").strip().replace(",", "."))
+                    except (TypeError, ValueError) as exc:
+                        raise ErroAtualizacao("Coordenada inválida em " + campo) from exc
+                    if not minimo <= coord <= maximo or coord == 0:
+                        raise ErroAtualizacao("Coordenada fora do intervalo em " + campo)
         if total == 0:
             raise ErroAtualizacao("O CSV não contém dados.")
         if obrigatorias:
