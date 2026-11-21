@@ -111,13 +111,13 @@ class TestCentralAtualizacoes(unittest.TestCase):
         ns=funcoes("comparar_csv_github","_csv_ler")
         import base64
         import re
-        colunas="ID_LOGGER,IDENTIFICACAO_ATIVO,ENDERECO,MUNICIPIO,LATITUDE,LONGITUDE\\n"
+        colunas="ID_LOGGER,IDENTIFICACAO_ATIVO,ENDERECO,MUNICIPIO,LATITUDE,LONGITUDE\n"
         antigo=(colunas+
-            ",AAA,A,TERESINA,-5,-42\\n"
-            ",BBB,B,TERESINA,-5,-42\\n").encode()
+            ",AAA,A,TERESINA,-5,-42\n"
+            ",BBB,B,TERESINA,-5,-42\n").encode()
         novo=(colunas+
-            ",AAA,Alterado,TERESINA,-5,-42\\n"
-            ",CCC,C,TERESINA,-5,-42\\n").encode()
+            ",AAA,Alterado,TERESINA,-5,-42\n"
+            ",CCC,C,TERESINA,-5,-42\n").encode()
         ns.update({"administrador_atual":lambda:"autor",
                    "github_config":lambda:("JothaP/prisma-coi","main","token"),
                    "re":re,"base64":base64,
