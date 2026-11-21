@@ -238,7 +238,7 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
         except (ValueError, OSError, zipfile.BadZipFile) as exc:
             raise ErroAtualizacao("XLSX inválido ou corrompido.") from exc
     elif extensao == ".gpkg":
-        if not payload.startswith(b"SQLite format 3\\x00"):
+        if not payload.startswith(b"SQLite format 3\x00"):
             raise ErroAtualizacao("GeoPackage inválido: assinatura SQLite não encontrada.")
     elif extensao in {".kmz", ".zip"}:
         try:
@@ -264,7 +264,7 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
         except (ValueError, UnicodeDecodeError) as exc:
             raise ErroAtualizacao("GeoJSON inválido.") from exc
     elif extensao in {".tif",".tiff"}:
-        if payload[:4] not in (b"II*\\x00", b"MM\\x00*", b"II+\\x00", b"MM\\x00+"):
+        if payload[:4] not in (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"):
             raise ErroAtualizacao("Arquivo TIFF inválido.")
     elif extensao == ".xls":
         if payload[:8] != bytes.fromhex("D0CF11E0A1B11AE1"):
@@ -306,6 +306,7 @@ def _github(method, endpoint, *, token=None, payload=None):
 
 
 def arquivos_github():
+    administrador_atual()
     nome, branch, token = github_config()
     arvore = _github("GET",f"/repos/{nome}/git/trees/{quote(branch,safe='')}?recursive=1",
                      token=token)
@@ -420,6 +421,7 @@ def objetos_storage(bucket, limite=3000):
 
 
 def baixar_storage(bucket, caminho):
+    administrador_atual()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", bucket):
         raise ErroAtualizacao("Bucket inválido.")
     if (not caminho or caminho.startswith("/") or
