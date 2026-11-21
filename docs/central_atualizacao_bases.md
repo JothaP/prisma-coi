@@ -14,6 +14,18 @@ a sessão, o perfil no Supabase e a autorização antes de cada gravação.
 - O novo arquivo deve ter a mesma extensão que o selecionado.
 - Verifica estrutura do arquivo, e para `loggers.csv` e `pocos.csv`, os
   cabeçalhos, identificadores e coordenadas dos registros importados.
+- A comparação de CSV de loggers/poços agrupa **todas as ocorrências** por
+  `IDENTIFICACAO_ATIVO` na base antiga; duplicidades e identificações vazias
+  preexistentes são mostradas no painel, **sem bloquear** a comparação.
+  Grupos repetidos não são reduzidos silenciosamente a uma linha.
+- A nova base CSV continua exigindo identificações preenchidas e únicas;
+  se houver duplicidade no novo upload, o erro indica identificação e
+  números dos registros. As métricas de adicionados, removidos e modificados
+  contam **identificações distintas**; quando a quantidade/conteúdo das linhas
+  associadas a uma identificação muda, ela é considerada modificada.
+- O sistema não apaga registros do cadastro antigo durante a análise.
+  **Publicar uma nova versão é uma substituição integral do arquivo**:
+  registros ausentes da nova base não estarão presentes após a publicação.
 - Ao confirmar a substituição, confere o SHA da versão atual para impedir
   sobrescrever edição concorrente e publica um commit na branch configurada.
 - **Recuperação:** o histórico de commits do GitHub preserva a versão anterior.
