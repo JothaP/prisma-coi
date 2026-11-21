@@ -820,13 +820,6 @@ if tem_acesso_modulo("gestao") or perfil_interno == "admin":
             st.switch_page("pages/9_Gestao_de_Acessos.py")
     if perfil_interno == "admin":
         if st.button(
-            "🗂️ Atualização de Bases — GitHub e Supabase",
-            key="abrir_central_atualizacoes",
-            use_container_width=True,
-        ):
-            st.switch_page("pages/13_Atualizacao_de_Bases.py")
-    if perfil_interno == "admin":
-        if st.button(
             "🛠️ Controle de Manutenção — Geral e por Módulo",
             key="abrir_controle_manutencao_prisma",
             use_container_width=True,
