@@ -15,7 +15,7 @@ from auth import verificar_autenticacao
 from prisma_atualizacoes_backend import (
     ErroAtualizacao, REPO_PADRAO, TABELAS_CONSULTA, COLUNAS_POCOS,
     administrador_atual, arquivos_github, github_config, validar_arquivo,
-    substituir_github, buckets_storage, objetos_storage, substituir_storage,
+    comparar_csv_github, substituir_github, buckets_storage, objetos_storage, substituir_storage,
     backups_storage, restaurar_storage, preparar_linhas_pocos,
     exportar_tabela, substituir_tabela_pocos, listar_backups_tabela,
     restaurar_tabela_pocos,
@@ -139,6 +139,26 @@ if origem.startswith("GitHub"):
             arquivo = upload.getvalue()
             resumo = validar_arquivo(caminho, upload.name, arquivo)
             detalhes_validacao(resumo)
+            if caminho in ("dados/loggers.csv","dados/pocos.csv"):
+                comparacao = comparar_csv_github(caminho, arquivo, item["sha"])
+                st.markdown("#### Comparação com a versão atual")
+                a,b,d,e = st.columns(4)
+                a.metric("Adicionados", comparacao["adicionados"])
+                b.metric("Modificados", comparacao["modificados"])
+                d.metric("Removidos", comparacao["removidos"])
+                e.metric("Mantidos", comparacao["inalterados"])
+                if comparacao["removidos"]:
+                    st.warning(
+                        "O novo cadastro remove identificadores presentes no arquivo atual. "
+                        "Revise a exclusão antes de publicar."
+                    )
+                for titulo,chave in (
+                    ("Adicionados","amostra_adicionados"),
+                    ("Modificados","amostra_modificados"),
+                    ("Removidos","amostra_removidos"),
+                ):
+                    if comparacao[chave]:
+                        st.caption(titulo+": "+", ".join(comparacao[chave]))
             st.info(
                 "O GitHub preserva a versão anterior no histórico de commits. "
                 "A nova versão depende do deploy da aplicação para ser lida "
