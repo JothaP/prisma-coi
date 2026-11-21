@@ -179,7 +179,7 @@ class TestCentralAtualizacoes(unittest.TestCase):
         self.assertEqual(chamadas[0][1]["payload"]["p_autor"],"ator")
         ns["restaurar_tabela_pocos"](1)
         self.assertEqual(chamadas[1][0],("rpc/prisma_atualizacoes_restaurar_pocos_tx",))
-        with self.assertRaises(self.ns["ErroAtualizacao"]):
+        with self.assertRaises(ns["ErroAtualizacao"]):
             ns["exportar_tabela"]("prisma_perfis")
 
     def test_sql_transacional_e_protegido(self):
