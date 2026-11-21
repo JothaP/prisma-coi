@@ -142,15 +142,52 @@ if origem.startswith("GitHub"):
             if caminho in ("dados/loggers.csv","dados/pocos.csv"):
                 comparacao = comparar_csv_github(caminho, arquivo, item["sha"])
                 st.markdown("#### Comparação com a versão atual")
+                st.caption(
+                    "Comparação por identificação distinta, considerando todas as "
+                    "ocorrências de cada equipamento na base atual."
+                )
                 a,b,d,e = st.columns(4)
                 a.metric("Adicionados", comparacao["adicionados"])
                 b.metric("Modificados", comparacao["modificados"])
                 d.metric("Removidos", comparacao["removidos"])
                 e.metric("Mantidos", comparacao["inalterados"])
+                st.caption(
+                    f"Versão atual: {comparacao['anteriores']} registros "
+                    f"({comparacao['identificadores_anteriores']} identificações distintas). "
+                    f"Nova versão: {comparacao['novos']} registros "
+                    f"({comparacao['identificadores_novos']} identificações distintas)."
+                )
+                if (comparacao["duplicados_antigos"]
+                        or comparacao["sem_identificacao_antigos"]):
+                    st.warning(
+                        f"**Duplicidades preexistentes:** "
+                        f"{comparacao['duplicados_antigos']} identificações repetidas "
+                        f"({comparacao['ocorrencias_excedentes_antigas']} ocorrências "
+                        f"além da primeira) e "
+                        f"{comparacao['sem_identificacao_antigos']} registros "
+                        "sem identificação no arquivo atual. "
+                        "Esses registros foram considerados no diagnóstico e "
+                        "**não impedem** a substituição por uma base nova válida."
+                    )
+                    if comparacao["amostra_duplicados_antigos"]:
+                        with st.expander(
+                            "Visualizar identificações repetidas na base atual",
+                            expanded=True,
+                        ):
+                            st.dataframe(
+                                pd.DataFrame(comparacao["amostra_duplicados_antigos"]),
+                                hide_index=True, use_container_width=True,
+                            )
+                    st.caption(
+                        "A central não exclui nem altera registros automaticamente. "
+                        "Ao publicar, porém, o novo arquivo substitui integralmente "
+                        "o anterior: ocorrências ausentes do upload deixarão de "
+                        "constar na versão publicada."
+                    )
                 if comparacao["removidos"]:
                     st.warning(
-                        "O novo cadastro remove identificadores presentes no arquivo atual. "
-                        "Revise a exclusão antes de publicar."
+                        "O novo cadastro não contém algumas identificações presentes "
+                        "no arquivo atual. Revise as diferenças antes de publicar."
                     )
                 for titulo,chave in (
                     ("Adicionados","amostra_adicionados"),

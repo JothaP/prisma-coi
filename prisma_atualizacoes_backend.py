@@ -198,7 +198,7 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
         if obrigatorias and tuple(colunas) != obrigatorias:
             raise ErroAtualizacao("Cabeçalhos incompatíveis com a base operacional selecionada.")
         amostra, total = [], 0
-        ids = set()
+        ids = {}
         for item in leitor:
             if None in item:
                 raise ErroAtualizacao("Linha CSV com quantidade inválida de colunas.")
@@ -208,10 +208,19 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
             if len(amostra) < 5:
                 amostra.append(item)
             if obrigatorias:
-                codigo = str(item.get("IDENTIFICACAO_ATIVO") or "").strip().casefold()
-                if not codigo or codigo in ids:
-                    raise ErroAtualizacao("Identificador do equipamento ausente ou duplicado no CSV.")
-                ids.add(codigo)
+                identificacao = str(item.get("IDENTIFICACAO_ATIVO") or "").strip()
+                codigo = identificacao.casefold()
+                if not codigo:
+                    raise ErroAtualizacao(
+                        f"Identificação do equipamento vazia na NOVA base (registro {total})."
+                    )
+                if codigo in ids:
+                    raise ErroAtualizacao(
+                        f"Identificador duplicado na NOVA base: {identificacao[:100]} "
+                        f"(registros {ids[codigo]} e {total}). "
+                        "Revise o arquivo enviado antes de publicar."
+                    )
+                ids[codigo] = total
                 for campo, minimo, maximo in (("LATITUDE",-90,90),("LONGITUDE",-180,180)):
                     try:
                         coord = float(str(item.get(campo) or "").strip().replace(",", "."))
@@ -329,6 +338,86 @@ def arquivos_github():
     return sorted(resultado, key=lambda v: v["caminho"].casefold())
 
 
+def _comparar_registros_csv(linhas_antigas, linhas_novas, colunas):
+    """Compara grupos por identificação, sem perder ocorrências da base antiga.
+
+    Métricas de adicionados/removidos/modificados são POR IDENTIFICAÇÃO distinta,
+    não por linha. Duplicidades ou IDs vazios no arquivo anterior são relatados,
+    mas não impedem a comparação. O novo arquivo continua exigindo IDs únicos.
+    """
+    def indexar(registros, *, anterior):
+        grupos = {}
+        nomes = {}
+        sem_identificacao = 0
+        total = 0
+        for registro in registros:
+            if None in registro:
+                raise ErroAtualizacao(
+                    "Há registros com mais campos que o cabeçalho na base "
+                    + ("anterior." if anterior else "nova.")
+                )
+            total += 1
+            identificacao = str(registro.get("IDENTIFICACAO_ATIVO") or "").strip()
+            chave = identificacao.casefold()
+            if not chave:
+                if anterior:
+                    sem_identificacao += 1
+                    continue
+                raise ErroAtualizacao(
+                    f"Identificação vazia na NOVA base (registro {total})."
+                )
+            if not anterior and chave in grupos:
+                raise ErroAtualizacao(
+                    f"Identificação duplicada na NOVA base: {identificacao[:100]}."
+                )
+            nomes.setdefault(chave, identificacao)
+            grupos.setdefault(chave, []).append(
+                tuple(str(registro.get(col) or "").strip() for col in colunas)
+            )
+        return grupos, nomes, total, sem_identificacao
+
+    antigos, nomes_antigos, total_antigo, vazios_antigos = indexar(
+        linhas_antigas, anterior=True
+    )
+    novos, _, total_novo, _ = indexar(linhas_novas, anterior=False)
+
+    # Compara TODOS os registros ligados ao mesmo ID (sem colapsar linhas).
+    # A ordem das linhas no CSV não deve contar como alteração de dados.
+    adicionados = set(novos) - set(antigos)
+    removidos = set(antigos) - set(novos)
+    comuns = set(antigos) & set(novos)
+    modificados = {
+        chave for chave in comuns
+        if sorted(antigos[chave]) != sorted(novos[chave])
+    }
+
+    duplicados = sorted(
+        ((chave, len(linhas)) for chave, linhas in antigos.items()
+         if len(linhas) > 1),
+        key=lambda registro: (-registro[1], registro[0]),
+    )
+    return {
+        "anteriores": total_antigo,
+        "novos": total_novo,
+        "identificadores_anteriores": len(antigos),
+        "identificadores_novos": len(novos),
+        "adicionados": len(adicionados),
+        "removidos": len(removidos),
+        "modificados": len(modificados),
+        "inalterados": len(comuns) - len(modificados),
+        "amostra_adicionados": sorted(adicionados)[:8],
+        "amostra_removidos": sorted(removidos)[:8],
+        "amostra_modificados": sorted(modificados)[:8],
+        "duplicados_antigos": len(duplicados),
+        "ocorrencias_excedentes_antigas": sum(n - 1 for _, n in duplicados),
+        "sem_identificacao_antigos": vazios_antigos,
+        "amostra_duplicados_antigos": [
+            {"Identificação": nomes_antigos[chave], "Ocorrências": quantidade}
+            for chave, quantidade in duplicados[:15]
+        ],
+    }
+
+
 def comparar_csv_github(caminho, payload_novo, sha_atual):
     """Compara cadastros por identificação sem depender do raio/concentrações.
 
@@ -352,29 +441,7 @@ def comparar_csv_github(caminho, payload_novo, sha_atual):
     colunas_novas, linhas_novas = _csv_ler(payload_novo)
     if colunas_antigas != colunas_novas:
         raise ErroAtualizacao("As colunas da base antiga e nova não correspondem.")
-    identificador="IDENTIFICACAO_ATIVO"
-    def indexar(registros):
-        indice={}
-        for reg in registros:
-            chave=str(reg.get(identificador) or "").strip().casefold()
-            if not chave or chave in indice:
-                raise ErroAtualizacao("Cadastro anterior ou novo possui identificações duplicadas.")
-            indice[chave]=tuple(str(reg.get(c) or "").strip() for c in colunas_antigas)
-        return indice
-    antigo=indexar(linhas_antigas)
-    novo=indexar(linhas_novas)
-    adicionados=set(novo)-set(antigo)
-    removidos=set(antigo)-set(novo)
-    comuns=set(antigo)&set(novo)
-    alterados={c for c in comuns if antigo[c]!=novo[c]}
-    return {
-        "anteriores":len(antigo),"novos":len(novo),
-        "adicionados":len(adicionados),"removidos":len(removidos),
-        "modificados":len(alterados),"inalterados":len(comuns)-len(alterados),
-        "amostra_adicionados":sorted(adicionados)[:8],
-        "amostra_removidos":sorted(removidos)[:8],
-        "amostra_modificados":sorted(alterados)[:8],
-    }
+    return _comparar_registros_csv(linhas_antigas, linhas_novas, colunas_antigas)
 
 
 def substituir_github(caminho, nome_upload, payload, sha_esperado):
