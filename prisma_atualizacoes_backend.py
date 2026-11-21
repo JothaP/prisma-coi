@@ -216,7 +216,7 @@ def validar_arquivo(caminho: str, nome_upload: str, payload: bytes, *, storage=F
                     )
                 if codigo in ids:
                     raise ErroAtualizacao(
-                        f"Identificador repetido na NOVA base: {identificacao[:100]} "
+                        f"Identificador duplicado na NOVA base: {identificacao[:100]} "
                         f"(registros {ids[codigo]} e {total}). "
                         "Revise o arquivo enviado antes de publicar."
                     )
