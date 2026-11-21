@@ -1,0 +1,35 @@
+name: Validar limpeza admin de fichas do Farol
+
+on:
+  push:
+    paths:
+      - 'pages/3_Farol_Operacional.py'
+      - 'farol_limpeza_acompanhamentos.py'
+      - 'sql/farol_acomp_limpeza_admin_tx.sql'
+      - 'tests/test_farol_limpeza_fichas_admin.py'
+      - '.github/workflows/testar-farol-limpeza-fichas-admin.yml'
+  pull_request:
+    paths:
+      - 'pages/3_Farol_Operacional.py'
+      - 'farol_limpeza_acompanhamentos.py'
+      - 'sql/farol_acomp_limpeza_admin_tx.sql'
+      - 'tests/test_farol_limpeza_fichas_admin.py'
+      - '.github/workflows/testar-farol-limpeza-fichas-admin.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Validar sintaxe sem executar a interface nem banco
+        run: python -m py_compile pages/3_Farol_Operacional.py farol_limpeza_acompanhamentos.py tests/test_farol_limpeza_fichas_admin.py
+      - name: Verificar autorização, limpeza opcional, fontes e SQL
+        run: python -m unittest discover -s tests -p 'test_farol_limpeza_fichas_admin.py' -v
