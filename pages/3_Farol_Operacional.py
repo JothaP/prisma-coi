@@ -58,6 +58,7 @@ from integracao_acompanhamento_producao import (
     dados_acompanhamento, historico_evento, texto_pdf,
 )
 from farol_acomp_supabase_backend import fonte_supabase
+from farol_limpeza_acompanhamentos import excluir_fichas_acompanhamento_admin
 from farol_ocorrencias_persistentes import resumir_eventos_concentracoes
 from farol_vinculos_os_manuais import (
     listar_vinculos_os_manuais, limpar_cache_vinculos_manuais,
@@ -814,24 +815,77 @@ def modal_limpar_dados_operacionais():
         "Não é possível desfazer pela ferramenta."
     )
     st.caption("Poços, loggers, observações das concentrações e demais abas serão preservados.")
+    incluir_fichas = st.checkbox(
+        "Excluir também todas as fichas de acompanhamento",
+        value=False,
+        key="farol_limpeza_incluir_fichas",
+        help="Inclui fichas, histórico de movimentações, vínculos, âncoras de "
+             "eventos e registros de incorporações da fonte ativa.",
+    )
+    if incluir_fichas:
+        st.error(
+            "ATENÇÃO: a exclusão das fichas é permanente na fonte ativa. "
+            "O Supabase removerá também movimentações, vínculos, eventos "
+            "persistentes e incorporações. Cópias de backup e réplicas históricas "
+            "externas não são eliminadas nesta opção."
+        )
+        confirmacao_fichas = st.checkbox(
+            "Confirmo a exclusão de todas as fichas e de seus históricos e vínculos.",
+            key="farol_limpeza_confirmar_fichas",
+        )
+        frase_fichas = st.text_input(
+            "Digite EXCLUIR FICHAS para confirmar",
+            key="farol_limpeza_frase_fichas",
+        )
+    else:
+        confirmacao_fichas = False
+        frase_fichas = ""
     confirmado = st.checkbox(
         "Confirmo que desejo apagar os registros de PONTOS, EVENTOS e FAROL_AREAS_EDITADAS.",
         key="confirmar_limpeza_farol",
+    )
+    habilitado = confirmado and (
+        not incluir_fichas or (
+            confirmacao_fichas and frase_fichas.strip() == "EXCLUIR FICHAS"
+        )
     )
     c1, c2 = st.columns(2)
     with c1:
         if st.button("Cancelar", width="stretch", key="cancelar_limpeza_farol"):
             st.rerun()
     with c2:
-        if st.button("🗑️ Limpar agora", type="primary", disabled=not confirmado,
+        if st.button("🗑️ Limpar agora", type="primary", disabled=not habilitado,
                      width="stretch", key="executar_limpeza_farol"):
+            fichas_removidas = None
             try:
+                # A autorização é validada novamente dentro das duas rotinas.
+                # Não limpar o Farol quando a exclusão opcional de fichas falhar.
+                if incluir_fichas:
+                    fichas_removidas = excluir_fichas_acompanhamento_admin()
                 abas = limpar_dados_operacionais_admin()
-                st.session_state["farol_mensagem_limpeza"] = "Dados removidos das abas: " + ", ".join(abas) + "."
+                mensagem = "Dados removidos das abas: " + ", ".join(abas) + "."
+                if fichas_removidas is not None:
+                    mensagem += (
+                        f" Fichas excluídas da fonte {fichas_removidas['fonte']}: "
+                        f"{int(fichas_removidas['fichas'])}; movimentações: "
+                        f"{int(fichas_removidas['movimentacoes'])}; vínculos: "
+                        f"{int(fichas_removidas['vinculos'])}."
+                    )
+                st.session_state["farol_mensagem_limpeza"] = mensagem
                 st.rerun()
             except Exception as erro:
                 invalidar_cache()
-                st.error(f"Falha durante a limpeza: {erro}. Confira o conteúdo das abas antes de repetir.")
+                if fichas_removidas is not None:
+                    st.error(
+                        "As fichas de acompanhamento já foram excluídas, mas a "
+                        "limpeza das abas do Farol não foi concluída. "
+                        "Confira o conteúdo das abas antes de repetir."
+                    )
+                else:
+                    st.error(
+                        f"Falha durante a limpeza: {erro}. "
+                        "Confira os registros antes de repetir."
+                    )
 
 
 def garantir_cabecalho_exato(nome, cabecalho):
@@ -5238,11 +5292,12 @@ with st.sidebar:
     if sincronizar_mapa_pdf:
         st.caption("Modo PDF ativo: centro e zoom serão registrados. Para navegar sem recarregamentos, desmarque esta opção.")
 
-    if st.session_state.pop("farol_mensagem_limpeza", None):
-        st.success("Dados operacionais limpos com sucesso.")
+    mensagem_limpeza = st.session_state.pop("farol_mensagem_limpeza", None)
+    if mensagem_limpeza:
+        st.success(mensagem_limpeza)
     espaco_relatorio_operacional = st.empty()
     if PERFIL_FAROL == "admin":
-        if st.button("🗑️ Limpar dados (PONTOS e EVENTOS)",
+        if st.button("🗑️ Limpar dados (opção de incluir fichas)",
                      width="stretch", key="abrir_limpeza_farol"):
             modal_limpar_dados_operacionais()
     if PERFIL_FAROL == "admin":
