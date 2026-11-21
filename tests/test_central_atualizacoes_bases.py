@@ -107,6 +107,30 @@ class TestCentralAtualizacoes(unittest.TestCase):
         with self.assertRaisesRegex(self.ns["ErroAtualizacao"],"TIFF"):
             val("dados/topografia/a.tif","a.tif",b"not a tif")
 
+    def test_comparacao_loggers_identifica_entradas_saidas_e_alteracoes(self):
+        ns=funcoes("comparar_csv_github","_csv_ler")
+        import base64
+        import re
+        colunas="ID_LOGGER,IDENTIFICACAO_ATIVO,ENDERECO,MUNICIPIO,LATITUDE,LONGITUDE\\n"
+        antigo=(colunas+
+            ",AAA,A,TERESINA,-5,-42\\n"
+            ",BBB,B,TERESINA,-5,-42\\n").encode()
+        novo=(colunas+
+            ",AAA,Alterado,TERESINA,-5,-42\\n"
+            ",CCC,C,TERESINA,-5,-42\\n").encode()
+        ns.update({"administrador_atual":lambda:"autor",
+                   "github_config":lambda:("JothaP/prisma-coi","main","token"),
+                   "re":re,"base64":base64,
+                   "_github":lambda *a,**kw:{
+                       "encoding":"base64","size":len(antigo),
+                       "content":base64.b64encode(antigo).decode(),
+                   }})
+        res=ns["comparar_csv_github"]("dados/loggers.csv",novo,"a"*40)
+        self.assertEqual(res["adicionados"],1)
+        self.assertEqual(res["removidos"],1)
+        self.assertEqual(res["modificados"],1)
+        self.assertEqual(res["inalterados"],0)
+
     def test_upload_github_revalida_sha_e_audita(self):
         e=self.ns["ErroAtualizacao"]
         ns=funcoes("substituir_github")
