@@ -70,6 +70,14 @@ from farol_regionais_api import (
     PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
     mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
 )
+from farol_coordenadas_os import (
+    NOME_ABA as NOME_ABA_CORRECOES_OS,
+    ErroCoordenadasOS,
+    aplicar_correcoes,
+    interpretar_historico,
+    numero_coordenada,
+    registrar_correcao,
+)
 from acompanhamento_operacional_farol import popup_acompanhamento_farol
 # ============================================================
 # CONFIGURAÇÃO
@@ -1282,6 +1290,23 @@ def chave_ponto(row):
     return "HASH:" + slug_hash(*[row.get(c, "") for c in CABECALHO_PONTOS])
 
 
+@st.cache_data(ttl=45, show_spinner=False, max_entries=2)
+def carregar_correcoes_coordenadas_os():
+    """Correções manuais em aba independente: leitura, sem criar aba na consulta."""
+    try:
+        aba = obter_planilha(SPREADSHEET_ID).worksheet(NOME_ABA_CORRECOES_OS)
+    except gspread.WorksheetNotFound:
+        return {}
+    return interpretar_historico(aba.get_all_values())
+
+
+def preparar_visualizacao_pontos(df):
+    """Aplica correções somente em memória, preservando a aba PONTOS."""
+    return aplicar_correcoes(
+        df, carregar_correcoes_coordenadas_os(), chave_ponto
+    )
+
+
 def preparar_eventos(df):
     out = mapear_colunas(df, CABECALHO_EVENTOS)
     out = out.loc[~out.apply(lambda r: all(not str(x).strip() for x in r), axis=1)].copy()
@@ -2091,6 +2116,211 @@ def localizar_os_por_chave(df_pontos, chave):
         if chave_ponto(registro) == chave:
             return registro
     return None
+
+
+@st.dialog("✏️ Corrigir localização da O.S.", width="large")
+def modal_corrigir_localizacao_os(ponto, ponto_original, registro_correcao=None):
+    """Corrige apenas latitude/longitude, sem regravar a importação do Field/BI."""
+    exigir_edicao_farol()
+    chave = chave_ponto(ponto_original)
+    if not chave.startswith("OS:"):
+        st.error("Para editar coordenadas, a O.S. precisa ter número válido.")
+        return
+    numero = str(ponto.get("Nº da O.S", "") or "").strip()
+    lat_importada = normalizar_coordenada(ponto_original.get("Latitude"), "lat")
+    lon_importada = normalizar_coordenada(ponto_original.get("Longitude"), "lon")
+    lat_atual = normalizar_coordenada(ponto.get("Latitude"), "lat")
+    lon_atual = normalizar_coordenada(ponto.get("Longitude"), "lon")
+    revisao = (registro_correcao or {}).get("revisao")
+    ativa = (registro_correcao or {}).get("ACAO") == "CORRIGIR"
+
+    if st.session_state.get("farol_coord_dialog_chave") != chave:
+        st.session_state["farol_coord_dialog_chave"] = chave
+        st.session_state["farol_coord_lat_input"] = (
+            f"{lat_atual:.7f}" if lat_atual is not None else ""
+        )
+        st.session_state["farol_coord_lon_input"] = (
+            f"{lon_atual:.7f}" if lon_atual is not None else ""
+        )
+        st.session_state["farol_coord_ultimo_clique"] = None
+
+    st.write(f"**O.S. {numero}** · {ponto.get('Cidade','')} · {ponto.get('Bairro','')}")
+    if lat_importada is not None and lon_importada is not None:
+        st.caption(
+            f"Localização importada (preservada): "
+            f"{lat_importada:.7f}, {lon_importada:.7f}"
+        )
+    else:
+        st.warning("O registro importado não possui coordenadas válidas.")
+    if ativa:
+        st.info(
+            f"Correção vigente: {registro_correcao['LATITUDE']}, "
+            f"{registro_correcao['LONGITUDE']} · "
+            f"{registro_correcao.get('AUTOR','')} · "
+            f"{registro_correcao.get('ALTERADO_EM','')}"
+        )
+
+    # O mapa aceita clique para escolher o local; os campos também são editáveis.
+    # Sem localização original, começa na região de Teresina apenas para orientar
+    # a navegação: essa posição NÃO é salva sem ação do operador.
+    lat_centro = lat_atual if lat_atual is not None else -5.093
+    lon_centro = lon_atual if lon_atual is not None else -42.803
+    mapa_edicao = folium.Map(
+        location=[lat_centro, lon_centro], zoom_start=15 if lat_atual is not None else 10,
+        control_scale=True,
+    )
+    if lat_importada is not None and lon_importada is not None:
+        folium.Marker(
+            [lat_importada, lon_importada],
+            tooltip="Localização importada (original)",
+            icon=folium.Icon(color="blue", icon="info-sign"),
+        ).add_to(mapa_edicao)
+    try:
+        lat_candidata = numero_coordenada(
+            st.session_state.get("farol_coord_lat_input", ""), "lat"
+        )
+        lon_candidata = numero_coordenada(
+            st.session_state.get("farol_coord_lon_input", ""), "lon"
+        )
+        folium.CircleMarker(
+            [lat_candidata, lon_candidata], radius=8,
+            color="#E05D2A", fill=True, fill_opacity=0.95,
+            tooltip="Nova posição escolhida",
+        ).add_to(mapa_edicao)
+    except ErroCoordenadasOS:
+        pass
+    clique_mapa = st_folium(
+        mapa_edicao, height=330, width=None,
+        returned_objects=["last_clicked"],
+        key=f"farol_coord_seletor_{chave}",
+    )
+    clique = (clique_mapa or {}).get("last_clicked")
+    if isinstance(clique, dict):
+        try:
+            coord_clique = (
+                numero_coordenada(clique.get("lat"), "lat"),
+                numero_coordenada(clique.get("lng"), "lon"),
+            )
+        except ErroCoordenadasOS:
+            coord_clique = None
+        if coord_clique is not None and (
+            coord_clique != st.session_state.get("farol_coord_ultimo_clique")
+        ):
+            st.session_state["farol_coord_ultimo_clique"] = coord_clique
+            st.session_state["farol_coord_lat_input"] = f"{coord_clique[0]:.7f}"
+            st.session_state["farol_coord_lon_input"] = f"{coord_clique[1]:.7f}"
+    st.caption("Clique no mapa para escolher a nova posição ou informe as coordenadas.")
+    coluna_lat, coluna_lon = st.columns(2)
+    with coluna_lat:
+        latitude_texto = st.text_input(
+            "Nova latitude", key="farol_coord_lat_input"
+        )
+    with coluna_lon:
+        longitude_texto = st.text_input(
+            "Nova longitude", key="farol_coord_lon_input"
+        )
+    try:
+        latitude = numero_coordenada(latitude_texto, "lat")
+        longitude = numero_coordenada(longitude_texto, "lon")
+        valida = True
+    except ErroCoordenadasOS:
+        latitude = longitude = None
+        valida = False
+        st.caption("Informe latitude e longitude válidas para habilitar a gravação.")
+
+    distancia = None
+    if valida and lat_importada is not None and lon_importada is not None:
+        distancia = distancia_metros(
+            lat_importada, lon_importada, latitude, longitude
+        )
+    confirma_deslocamento = True
+    if distancia is not None and distancia > 5000:
+        st.warning(
+            f"O novo ponto está a {distancia/1000:.1f} km da posição importada. "
+            "Confira se está corrigindo a O.S. correta."
+        )
+        confirma_deslocamento = st.checkbox(
+            "Conferi o deslocamento e confirmo a localização.",
+            key="farol_coord_confirmar_distancia",
+        )
+    col_salvar, col_restaurar = st.columns(2)
+    with col_salvar:
+        if st.button(
+            "💾 Salvar coordenadas", type="primary",
+            disabled=not valida or not confirma_deslocamento,
+            key="farol_coord_salvar",
+        ):
+            try:
+                exigir_edicao_farol()
+                registrar_correcao(
+                    obter_planilha(SPREADSHEET_ID),
+                    chave_os=chave, acao="CORRIGIR",
+                    latitude=latitude, longitude=longitude,
+                    latitude_original=lat_importada,
+                    longitude_original=lon_importada,
+                    autor_id=st.session_state.get("prisma_usuario_id", ""),
+                    autor=responsavel_importacao_farol(),
+                    momento=datetime.now(FUSO_FAROL).isoformat(),
+                    revisao_esperada=revisao,
+                    worksheet_not_found=gspread.WorksheetNotFound,
+                )
+                carregar_correcoes_coordenadas_os.clear()
+                invalidar_cache()
+                st.session_state.pop("farol_coord_dialog_chave", None)
+                st.session_state["farol_v2_panorama_versao"] = (
+                    st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                )
+                st.session_state["farol_coord_sucesso"] = (
+                    f"Coordenadas da O.S. {numero} corrigidas. "
+                    "A importação original foi preservada."
+                )
+                # Força recomputação das concentrações, raios e relatórios.
+                st.session_state["farol_v2_concentracao"] = ""
+                st.session_state["farol_v2_detalhe_aberto"] = ""
+                st.session_state.pop("farol_v2_os_raio_aberto", None)
+                st.rerun()
+            except (ErroCoordenadasOS, PermissionError, gspread.exceptions.APIError) as exc:
+                st.error(f"Não foi possível salvar a correção: {exc}")
+    with col_restaurar:
+        if ativa:
+            confirmar_reversao = st.checkbox(
+                "Confirmar restauração da posição importada",
+                key="farol_coord_confirmar_reversao",
+            )
+            if st.button(
+                "↩️ Restaurar coordenadas importadas",
+                disabled=not confirmar_reversao,
+                key="farol_coord_restaurar",
+            ):
+                try:
+                    exigir_edicao_farol()
+                    registrar_correcao(
+                        obter_planilha(SPREADSHEET_ID),
+                        chave_os=chave, acao="RESTAURAR",
+                        latitude=None, longitude=None,
+                        latitude_original=lat_importada,
+                        longitude_original=lon_importada,
+                        autor_id=st.session_state.get("prisma_usuario_id", ""),
+                        autor=responsavel_importacao_farol(),
+                        momento=datetime.now(FUSO_FAROL).isoformat(),
+                        revisao_esperada=revisao,
+                        worksheet_not_found=gspread.WorksheetNotFound,
+                    )
+                    carregar_correcoes_coordenadas_os.clear()
+                    invalidar_cache()
+                    st.session_state.pop("farol_coord_dialog_chave", None)
+                    st.session_state["farol_v2_panorama_versao"] = (
+                        st.session_state.get("farol_v2_panorama_versao", 0) + 1
+                    )
+                    st.session_state["farol_coord_sucesso"] = (
+                        f"O.S. {numero}: posição da importação restaurada."
+                    )
+                    st.session_state["farol_v2_concentracao"] = ""
+                    st.session_state["farol_v2_detalhe_aberto"] = ""
+                    st.session_state.pop("farol_v2_os_raio_aberto", None)
+                    st.rerun()
+                except (ErroCoordenadasOS, PermissionError, gspread.exceptions.APIError) as exc:
+                    st.error(f"Não foi possível restaurar a localização: {exc}")
 
 
 def localizar_os_clicada_panorama(estado, df_pontos, tolerancia_m=8):
@@ -5194,6 +5424,21 @@ if not df_pontos.empty:
     df_pontos["Latitude"] = df_pontos["Latitude"].map(lambda v: normalizar_coordenada(v, "lat"))
     df_pontos["Longitude"] = df_pontos["Longitude"].map(lambda v: normalizar_coordenada(v, "lon"))
 
+# A planilha PONTOS guarda a versão importada; correções aplicam-se somente
+# ao DataFrame utilizado pelo mapa, análises e relatórios.
+df_pontos_importados = df_pontos.copy()
+try:
+    correcoes_coordenadas_os = carregar_correcoes_coordenadas_os()
+    df_pontos = aplicar_correcoes(
+        df_pontos, correcoes_coordenadas_os, chave_ponto
+    )
+except (ErroCoordenadasOS, gspread.exceptions.APIError) as exc:
+    st.error(f"Não foi possível aplicar as correções manuais de coordenadas: {exc}")
+    st.stop()
+mensagem_corrigida = st.session_state.pop("farol_coord_sucesso", None)
+if mensagem_corrigida:
+    st.success(mensagem_corrigida)
+
 if not df_pocos.empty:
     df_pocos = df_pocos.reindex(columns=CABECALHO_POCOS).fillna("")
 if not df_loggers.empty:
@@ -5204,6 +5449,9 @@ df_pontos_armazenados_v2 = df_pontos
 inicio_historico_v2, hoje_historico_v2 = janela_historico_v2()
 if historico_v2_ativo:
     df_pontos = filtrar_pontos_historico_v2(df_pontos, inicio_historico_v2, hoje_historico_v2)
+    df_pontos_importados = filtrar_pontos_historico_v2(
+        df_pontos_importados, inicio_historico_v2, hoje_historico_v2
+    )
 
 # ============================================================
 # ABAS
@@ -5249,6 +5497,9 @@ with st.sidebar:
             format="DD/MM/YYYY",
         )
         df_pontos = filtrar_pontos_historico_v2(df_pontos, data_consulta_v2, data_consulta_v2)
+        df_pontos_importados = filtrar_pontos_historico_v2(
+            df_pontos_importados, data_consulta_v2, data_consulta_v2
+        )
     else:
         st.caption("O calendário estará disponível após a ativação do histórico.")
         if PODE_EDITAR_FAROL:
@@ -5418,6 +5669,36 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
         k3.metric("Concentrações", len(concentracoes))
         k4.metric("Pontos operacionais próximos", len(proximidades))
 
+        if PODE_EDITAR_FAROL:
+            with st.expander("✏️ Corrigir coordenadas pelo número da O.S."):
+                numero_busca = st.text_input(
+                    "Nº da O.S.", key="farol_coord_busca_os",
+                    help="Permite corrigir inclusive O.S. sem coordenadas e invisíveis no mapa.",
+                ).strip()
+                if numero_busca:
+                    filtro_os = df_pontos["Nº da O.S"].map(
+                        normalizar_texto
+                    ) == normalizar_texto(numero_busca)
+                    encontradas = df_pontos.loc[filtro_os]
+                    if len(encontradas) == 1:
+                        ponto_busca = encontradas.iloc[0].to_dict()
+                        if st.button(
+                            "✏️ Abrir correção da O.S. localizada",
+                            key="farol_coord_abrir_busca",
+                        ):
+                            chave_busca = chave_ponto(ponto_busca)
+                            origem_busca = localizar_os_por_chave(
+                                df_pontos_importados, chave_busca
+                            )
+                            modal_corrigir_localizacao_os(
+                                ponto_busca, origem_busca or ponto_busca,
+                                correcoes_coordenadas_os.get(chave_busca),
+                            )
+                    elif encontradas.empty:
+                        st.caption("O.S. não encontrada na data consultada.")
+                    else:
+                        st.warning("Mais de uma O.S. com este número. Confira o período.")
+
         # As O.S. são exibidas no panorama independentemente de agrupamentos.
         st.caption("Panorama: O.S. individuais (azul = reclamação; laranja = informação 146005), "
                    "concentrações e áreas de eventos. Clique em uma O.S. para analisar o raio operacional; "
@@ -5447,6 +5728,18 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 lon_os = normalizar_coordenada(os_aberta.get("Longitude"), "lon")
                 numero_os = str(os_aberta.get("Nº da O.S", "") or "—")
                 st.markdown(f"### 📍 O.S. {numero_os} — Análise operacional individual")
+                if PODE_EDITAR_FAROL and st.button(
+                    "✏️ Corrigir localização desta O.S.",
+                    key="farol_v2_editar_os_raio",
+                ):
+                    chave_os = chave_ponto(os_aberta)
+                    ponto_original = localizar_os_por_chave(
+                        df_pontos_importados, chave_os
+                    )
+                    modal_corrigir_localizacao_os(
+                        os_aberta, ponto_original or os_aberta,
+                        correcoes_coordenadas_os.get(chave_os),
+                    )
                 if st.button("⬅️ Voltar ao panorama", key="farol_v2_voltar_os"):
                     st.session_state.pop("farol_v2_os_raio_aberto", None)
                     st.session_state.pop("farol_v2_os_selecionada", None)
@@ -5674,6 +5967,18 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     bairro_selecionado = str(os_selecionada.get("Bairro", "") or "—")
                     st.info(f"**O.S. selecionada:** {numero_selecionado} · "
                             f"{cidade_selecionada} · {bairro_selecionado}")
+                    if PODE_EDITAR_FAROL and st.button(
+                        "✏️ Corrigir localização desta O.S.",
+                        key="farol_v2_editar_coordenada_os",
+                    ):
+                        chave_os = chave_ponto(os_selecionada)
+                        ponto_original = localizar_os_por_chave(
+                            df_pontos_importados, chave_os
+                        )
+                        modal_corrigir_localizacao_os(
+                            os_selecionada, ponto_original or os_selecionada,
+                            correcoes_coordenadas_os.get(chave_os),
+                        )
                     if st.button(
                         f"📍 Abrir raio operacional de {int(raio_operacional)} m desta O.S.",
                         key="farol_v2_abrir_raio_os", type="primary",
