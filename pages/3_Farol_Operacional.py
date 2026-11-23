@@ -2192,7 +2192,7 @@ def modal_corrigir_localizacao_os(ponto, ponto_original, registro_correcao=None)
     clique_mapa = st_folium(
         mapa_edicao, height=330, width=None,
         returned_objects=["last_clicked"],
-        key=f"farol_coord_seletor_{chave}",
+        key=f"farol_coord_seletor_{chave}_{revisao or 0}",
     )
     clique = (clique_mapa or {}).get("last_clicked")
     if isinstance(clique, dict):
@@ -5671,14 +5671,24 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
 
         if PODE_EDITAR_FAROL:
             with st.expander("✏️ Corrigir coordenadas pelo número da O.S."):
-                numero_busca = st.text_input(
-                    "Nº da O.S.", key="farol_coord_busca_os",
-                    help="Permite corrigir inclusive O.S. sem coordenadas e invisíveis no mapa.",
-                ).strip()
-                if numero_busca:
+                # Formulário evita recalcular o mapa a cada tecla digitada.
+                with st.form("farol_coord_busca_form"):
+                    numero_busca = st.text_input(
+                        "Nº da O.S.", key="farol_coord_busca_os",
+                        help="Permite corrigir inclusive O.S. sem coordenadas e invisíveis no mapa.",
+                    ).strip()
+                    buscar_os = st.form_submit_button("🔎 Localizar O.S.")
+                if buscar_os:
+                    st.session_state["farol_coord_pesquisa_ativa"] = normalizar_texto(
+                        numero_busca
+                    )
+                pesquisa_ativa = st.session_state.get(
+                    "farol_coord_pesquisa_ativa", ""
+                )
+                if pesquisa_ativa:
                     filtro_os = df_pontos["Nº da O.S"].map(
                         normalizar_texto
-                    ) == normalizar_texto(numero_busca)
+                    ) == pesquisa_ativa
                     encontradas = df_pontos.loc[filtro_os]
                     if len(encontradas) == 1:
                         ponto_busca = encontradas.iloc[0].to_dict()
