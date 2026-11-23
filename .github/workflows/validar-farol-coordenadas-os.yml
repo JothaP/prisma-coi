@@ -1,0 +1,31 @@
+name: Validar correcao de coordenadas OS Farol
+
+on:
+  push:
+    paths:
+      - "farol_coordenadas_os.py"
+      - "pages/3_Farol_Operacional.py"
+      - "tests/test_farol_coordenadas_os.py"
+      - ".github/workflows/validar-farol-coordenadas-os.yml"
+  pull_request:
+    paths:
+      - "farol_coordenadas_os.py"
+      - "pages/3_Farol_Operacional.py"
+      - "tests/test_farol_coordenadas_os.py"
+      - ".github/workflows/validar-farol-coordenadas-os.yml"
+
+jobs:
+  coordenadas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Instalar bibliotecas de teste
+        run: python -m pip install "pandas>=2.2,<3.1"
+      - name: Verificar sintaxe
+        run: python -m py_compile farol_coordenadas_os.py pages/3_Farol_Operacional.py
+      - name: Testar correcoes, reversao, importacoes e permissoes
+        run: python -m unittest discover -s tests -p "test_farol_coordenadas_os.py" -v
