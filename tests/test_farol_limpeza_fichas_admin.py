@@ -207,16 +207,36 @@ class TesteLimpezaAcompanhamentos(unittest.TestCase):
         self.assertIn("TO service_role", sql)
         self.assertIn("INSERT INTO public.prisma_auditoria", sql)
         tabelas = (
-            "farol_acomp_eventos_persistentes",
-            "farol_acomp_incorporacoes",
-            "farol_acomp_vinculos",
-            "farol_acomp_movimentacoes",
-            "farol_acomp_fichas",
+            ("farol_acomp_eventos_persistentes", "evento_chave"),
+            ("farol_acomp_incorporacoes", "ficha_incorporada"),
+            ("farol_acomp_vinculos", "chave"),
+            ("farol_acomp_movimentacoes", "id"),
+            ("farol_acomp_fichas", "id"),
         )
-        indices = [sql.index("DELETE FROM public." + nome + ";") for nome in tabelas]
+        indices = []
+        for nome, chave in tabelas:
+            with self.subTest(tabela=nome):
+                esperado = "DELETE FROM public." + nome + "\\n  WHERE " + chave + " IS NOT NULL;"
+                self.assertIn(esperado.replace("\\n", "\n"), sql)
+                self.assertNotIn("DELETE FROM public." + nome + ";", sql)
+                indices.append(sql.index(esperado.replace("\\n", "\n")))
         self.assertEqual(indices, sorted(indices))
+        self.assertIn("WHERE processado_em IS NULL", sql)
         self.assertNotIn("TRUNCATE TABLE", sql)
         self.assertNotIn("DROP TABLE", sql)
+
+    def test_correcao_where_mantem_funcao_sem_executar_limpeza(self):
+        original = MIGRACAO.read_text(encoding="utf-8")
+        migracao_nova = (
+            RAIZ / "sql" / "farol_acomp_limpeza_admin_where_20261123.sql"
+        ).read_text(encoding="utf-8")
+        self.assertIn(original, migracao_nova)
+        self.assertIn("CREATE OR REPLACE FUNCTION", migracao_nova)
+        self.assertIn("SECURITY INVOKER", migracao_nova)
+        self.assertIn("REVOKE ALL", migracao_nova)
+        self.assertIn("GRANT EXECUTE", migracao_nova)
+        self.assertIn("O projeto aplica a proteção SQL", migracao_nova)
+        self.assertNotIn("SELECT public.farol_acomp_limpar_tudo_admin_tx(", migracao_nova)
 
     def test_interface_padrao_nao_exclui_fichas_e_exige_confirmacoes(self):
         fonte = M3.read_text(encoding="utf-8")
