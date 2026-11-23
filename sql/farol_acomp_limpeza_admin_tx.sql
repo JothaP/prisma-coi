@@ -30,20 +30,28 @@ BEGIN
     AND tabela IN ('farol_acomp_fichas','farol_acomp_vinculos',
                    'farol_acomp_movimentacoes');
 
+  -- O projeto aplica a proteção SQL 'DELETE requires a WHERE clause' (21000).
+  -- Os filtros abaixo usam chaves NOT NULL verificadas no schema: removem
+  -- todos os registros somente dentro desta operação administrativa.
   -- FKs RESTRICT exigem remoção dos registros vinculados primeiro.
-  DELETE FROM public.farol_acomp_eventos_persistentes;
+  DELETE FROM public.farol_acomp_eventos_persistentes
+  WHERE evento_chave IS NOT NULL;
   GET DIAGNOSTICS n_eventos = ROW_COUNT;
 
-  DELETE FROM public.farol_acomp_incorporacoes;
+  DELETE FROM public.farol_acomp_incorporacoes
+  WHERE ficha_incorporada IS NOT NULL;
   GET DIAGNOSTICS n_incorporacoes = ROW_COUNT;
 
-  DELETE FROM public.farol_acomp_vinculos;
+  DELETE FROM public.farol_acomp_vinculos
+  WHERE chave IS NOT NULL;
   GET DIAGNOSTICS n_vinculos = ROW_COUNT;
 
-  DELETE FROM public.farol_acomp_movimentacoes;
+  DELETE FROM public.farol_acomp_movimentacoes
+  WHERE id IS NOT NULL;
   GET DIAGNOSTICS n_movimentacoes = ROW_COUNT;
 
-  DELETE FROM public.farol_acomp_fichas;
+  DELETE FROM public.farol_acomp_fichas
+  WHERE id IS NOT NULL;
   GET DIAGNOSTICS n_fichas = ROW_COUNT;
 
   -- Registro persistente da remoção com identificador administrativo.
