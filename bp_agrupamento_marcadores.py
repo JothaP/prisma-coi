@@ -13,9 +13,9 @@ import math
 CORES_FAIXAS = {
     1: "#22C55E",  # alta, > 15
     2: "#2563EB",  # normal, 10 a 15
-    3: "#D946EF",  # atenção, >5 e <10
-    4: "#F59E0B",  # baixa, >0 e <=5
-    5: "#EF4444",  # sem pressão, zero
+    3: "#FF8FE1",  # atenção, >5 e <10
+    4: "#F8DC00",  # baixa, >0 e <=5
+    5: "#FF5C60",  # sem pressão, zero
 }
 ZOOM_ROTULOS_INDIVIDUAIS = 15
 RAIO_CLUSTER_PX = 65
@@ -54,8 +54,8 @@ function (cluster) {
         else if (valor === 4) baixaPressao++;
     }
     var cores = {
-        1: "#22C55E", 2: "#2563EB", 3: "#D946EF",
-        4: "#F59E0B", 5: "#EF4444"
+        1: "#22C55E", 2: "#2563EB", 3: "#FF8FE1",
+        4: "#F8DC00", 5: "#FF5C60"
     };
     var nomes = {
         1: "Alta pressão", 2: "Normal", 3: "Em atenção",
