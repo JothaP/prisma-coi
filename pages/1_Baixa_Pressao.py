@@ -4795,11 +4795,22 @@ class ReorganizarRotulosIndividuais(MacroElement):
     }
 
     function reorganizar() {
-        // A escala de pressão urbana permanece visível; o panorama extremo
-        // não exige cálculo de colisão de rótulos que estão ocultos.
-        if (mapa.getZoom() < 15) return;
         var container = mapa.getContainer();
         if (!container) return;
+        // Ao afastar o zoom após reorganizar cartões no detalhe, restaurar
+        // as posições originais. Isso é importante para "Sem agrupamento":
+        // nesse modo os cartões ficam visíveis em TODOS os níveis de zoom.
+        if (mapa.getZoom() < 15) {
+            container.querySelectorAll(
+                ".pressao-individual-marker .bp-label-card-individual"
+            ).forEach(function(rotulo) {
+                rotulo.style.removeProperty("left");
+                rotulo.style.removeProperty("top");
+                rotulo.style.removeProperty("transform");
+                rotulo.style.removeProperty("visibility");
+            });
+            return;
+        }
         var limites = container.getBoundingClientRect();
         var wrappers = container.querySelectorAll(
             ".pressao-individual-marker .bp-individual-marker-wrapper"
