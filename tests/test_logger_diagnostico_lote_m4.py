@@ -53,7 +53,7 @@ class TesteInterpretacaoOperacional(unittest.TestCase):
 
     def test_abaixo_do_padrao_continuo_sem_queda_brusca_recente(self):
         dados = serie_base(valor=17, ultimo=4)
-        for minuto in (0, 10, 20):
+        for minuto in (0, 10, 20, 30, 40, 50):
             dados.loc[len(dados)] = {
                 "data": pd.Timestamp("2026-11-25 09:30") + pd.Timedelta(minutes=minuto),
                 "pressao": 4.0,
@@ -76,7 +76,7 @@ class TesteInterpretacaoOperacional(unittest.TestCase):
         resp = diagnosticar(dados.sort_values("data").reset_index(drop=True))
         self.assertEqual(resp["prioridade"], "Alta prioridade")
         self.assertGreaterEqual(resp["persistencia_zero_min"], 15)
-        self.assertIn("perto", "perto")  # Não presume falha de rede.
+        self.assertIn("sem lacunas superiores", resp["diagnostico"].lower())
 
     def test_recuperacao_observada_apos_valores_proximos_zero(self):
         dados = serie_base(valor=12, ultimo=13)
