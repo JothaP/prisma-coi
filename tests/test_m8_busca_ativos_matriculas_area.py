@@ -26,6 +26,7 @@ ARVORE = ast.parse(CODIGO, filename=str(FONTE))
 NOMES = {
     "_popup_cliente", "_popup_ativo", "_m8_formatar_cota",
     "_m8_rótulo_html", "_m8_adicionar_rotulo", "_m8_mapa_unificado",
+    "_m8_normalizar_pontos",
 }
 ACHADAS = [
     no for no in ARVORE.body
