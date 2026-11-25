@@ -65,7 +65,7 @@ class TesteClustersBaixaPressao(unittest.TestCase):
         self.assertIn("somaPressao / medicoesValidas", html)
         self.assertIn('media.toFixed(1).replace(".", ",")', html)
         self.assertIn('mediaTexto + \'</span>\'', html)
-        self.assertIn("filhos[i].options.bpPressureRank", html)
+        self.assertIn("var valor = Number(opcoes.bpPressureRank || 1)", html)
         self.assertIn('"zoomToBoundsOnClick": true', html)
         self.assertIn('"spiderfyOnMaxZoom": true', html)
         self.assertIn('"maxClusterRadius": ' + str(RAIO_CLUSTER_PX), html)
