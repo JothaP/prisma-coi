@@ -24,7 +24,7 @@ RAIO_CLUSTER_PX = 65
 def prioridade_pressao_mca(valor: float) -> int:
     """Classifica valor já normalizado conforme as faixas existentes no M1."""
     pressao = float(valor)
-    if not math.isfinite(pressao) or pressao < 0:
+    if not math.isfinite(pressao):
         raise ValueError("Pressão inválida para o agrupamento.")
     if pressao == 0:
         return 5
