@@ -16,6 +16,35 @@ agrupamentos que se dividem ao aproximar o zoom, mantendo cada medição.
   rótulo de pressão (e cota, quando disponível) se a caixa
   **Exibir rótulos** estiver marcada. Antes disso, somente os pins e
   médias em MCA dos agrupamentos aparecem.
+
+### Alternativa: Sem agrupamento (visualização anterior)
+
+Na linha de filtros do mapa, à direita de **Exibir rótulos**, há a caixa
+**Sem agrupamento**, inicialmente **desmarcada**.
+
+- **Desmarcada (padrão):** usa o agrupamento dinâmico por zoom. Os
+  círculos apresentam a **média de pressão em MCA**, com a cor da
+  faixa mais crítica. Os rótulos de cada medição aparecem apenas no
+  zoom 15 ou superior, se **Exibir rótulos** estiver ativo.
+- **Marcada:** no modo **Medições individuais**, remove inteiramente
+  a camada de clusters: **cada medição é renderizada no local original
+  como marcador individual**, com seu popup, cor e pressão. Com
+  **Exibir rótulos** marcado, os cartões de pressão (e cota de terreno,
+  quando disponível) ficam **visíveis em qualquer nível de zoom**,
+  como antes da implantação dos agrupamentos.
+- **Exibir rótulos** desmarcado: mantém apenas os pins individuais
+  e os popups, sem cartões, em ambos os modos.
+- **Visualização > Por bairro:** não tem agrupamento por proximidade;
+  a opção **Sem agrupamento** fica desabilitada e o comportamento
+  consolidado por bairro permanece inalterado.
+
+O mapa é remontado ao alternar o modo para impedir que clusters
+e marcadores avulsos de uma visualização anterior permaneçam sobrepostos.
+Quando muitos pontos estiverem presentes, o modo sem agrupamento poderá
+apresentar sobreposição visual e consumir mais recursos do navegador.
+Os filtros, dados cadastrais, classificação, tabelas e PDF não são
+afetados.
+
 - **Coordenadas coincidentes:** no zoom máximo, clique no agrupamento
   para espalhar os marcadores (`spiderfy`) e acessar cada popup.
 - **Visualização > Por bairro:** permanece com a apresentação consolidada
@@ -63,7 +92,8 @@ Valores negativos seguem a classificação histórica de baixa pressão.
 Workflow `.github/workflows/testar-clusters-baixa-pressao.yml`,
 com regressões para limites das cinco faixas, paleta existente, render
 de MarkerCluster, opções de expansão/spiderfy, modo por bairro, filtros,
-chave do `st_folium` e rótulos somente em zoom próximo. O teste
+alternância entre clusters e pins diretos, rótulos em qualquer zoom
+no modo sem agrupamento e chave distinta do `st_folium`. O teste
 `tests/test_bp_cluster_media.js` executa a função real de média em JS
 com grupos contendo 0 MCA, pressão normal, valores decimais, negativos
 e dados ausentes.
