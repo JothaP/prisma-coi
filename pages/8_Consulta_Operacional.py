@@ -417,6 +417,70 @@ def _buscar_matriculas(codigos: list[str]) -> tuple[pd.DataFrame, dict[str, str]
     return base, meta
 
 
+@st.cache_data(show_spinner=False, max_entries=12)
+def _m8_matriculas_mais_proximas(
+    assinatura_indice: tuple[str, int, int],
+    pontos: tuple[tuple[float, float], ...],
+) -> tuple[tuple[str, float | None], ...]:
+    """Encontra a matrícula realmente mais próxima de cada ponto, sem raio máximo.
+
+    Lê o SQLite existente uma única vez, em lotes de tamanho fixo.
+    O índice permanece em modo somente leitura; não carrega todo o cadastro na RAM.
+    """
+    import numpy as np
+
+    if not pontos:
+        return ()
+    # Guardar a métrica haversine (monotônica com a distância) evita
+    # operações trigonométricas adicionais para cada candidato.
+    latitudes_p = np.radians([lat for lat, _ in pontos])
+    longitudes_p = np.radians([lon for _, lon in pontos])
+    cos_p = np.cos(latitudes_p)
+    melhores = [""] * len(pontos)
+    menores_h = [math.inf] * len(pontos)
+
+    with _conexao_leitura(Path(assinatura_indice[0])) as conexao:
+        cursor = conexao.execute(
+            "SELECT NUM_LIGACAO, COD_LATITUDE, COD_LONGITUDE "
+            "FROM matriculas WHERE NUM_LIGACAO IS NOT NULL AND NUM_LIGACAO != ''"
+        )
+        while True:
+            lote = cursor.fetchmany(6000)
+            if not lote:
+                break
+            candidatas = []
+            for matricula, lat_texto, lon_texto in lote:
+                lat = _coordenada(lat_texto, "lat")
+                lon = _coordenada(lon_texto, "lon")
+                if lat is not None and lon is not None:
+                    candidatas.append((str(matricula), lat, lon))
+            if not candidatas:
+                continue
+            latitudes = np.radians([lat for _, lat, _ in candidatas])
+            longitudes = np.radians([lon for _, _, lon in candidatas])
+            cos_latitudes = np.cos(latitudes)
+            for indice in range(len(pontos)):
+                diferenca_lat = latitudes - latitudes_p[indice]
+                diferenca_lon = longitudes - longitudes_p[indice]
+                h = (np.sin(diferenca_lat / 2) ** 2
+                     + cos_p[indice] * cos_latitudes * np.sin(diferenca_lon / 2) ** 2)
+                candidato = int(np.argmin(h))
+                menor_lote = float(h[candidato])
+                if menor_lote < menores_h[indice]:
+                    menores_h[indice] = menor_lote
+                    melhores[indice] = candidatas[candidato][0]
+
+    raio_terra = 6371000.0
+    return tuple(
+        (
+            matricula,
+            round(2 * raio_terra * math.asin(math.sqrt(min(1.0, h))), 1)
+            if matricula else None,
+        )
+        for matricula, h in zip(melhores, menores_h)
+    )
+
+
 def _validar_colunas(df: pd.DataFrame, esperadas: tuple[str, ...], origem: str) -> pd.DataFrame:
     mapa = {_normalizar_cabecalho(c): c for c in df.columns}
     faltantes = [c for c in esperadas if _normalizar_cabecalho(c) not in mapa]
@@ -2146,6 +2210,16 @@ def exibir_consulta_operacional() -> None:
             )
 
     if pontos_pesquisados:
+        matriculas_proximas = (("", None),) * len(pontos_pesquisados)
+        if base_matriculas_disponivel:
+            try:
+                with st.spinner("Localizando a matrícula mais próxima de cada ponto..."):
+                    indice_matriculas, _ = _indice_matriculas()
+                    matriculas_proximas = _m8_matriculas_mais_proximas(
+                        _assinatura(indice_matriculas), tuple(pontos_pesquisados)
+                    )
+            except (OSError, ValueError, RuntimeError, ImportError, sqlite3.Error) as erro:
+                st.warning(f"Não foi possível consultar as matrículas mais próximas: {erro}")
         pontos_tabela = [
             {
                 "Ponto": f"P{indice}",
@@ -2153,6 +2227,9 @@ def exibir_consulta_operacional() -> None:
                 "Longitude": f"{lon:.8f}",
                 "Cota da superfície": (
                     _m8_formatar_cota(mapa_cotas.get((lat, lon))) or "Indisponível"
+                ),
+                "Matrícula mais próxima": (
+                    matriculas_proximas[indice - 1][0] or "Não localizada"
                 ),
             }
             for indice, (lat, lon) in enumerate(pontos_pesquisados, start=1)
