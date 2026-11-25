@@ -14,6 +14,7 @@ on:
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
       - "tests/test_logger_diagnostico_lote_m4.py"
+      - "tests/test_logger_seletor_historicos_m4.py"
       - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
@@ -30,6 +31,7 @@ on:
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
       - "tests/test_logger_diagnostico_lote_m4.py"
+      - "tests/test_logger_seletor_historicos_m4.py"
       - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
@@ -57,5 +59,7 @@ jobs:
         run: python -m unittest discover -s tests -p "test_monitor_logger_incremental_m4.py" -v
       - name: Testar comportamento operacional e processamento multi-logger
         run: python -m unittest discover -s tests -p "test_logger_diagnostico_lote_m4.py" -v
+      - name: Testar seletor de loggers com multiplos historicos
+        run: python -m unittest discover -s tests -p "test_logger_seletor_historicos_m4.py" -v
       - name: Testar botao e integridade do PDF institucional quando presente
         run: python -m unittest discover -s tests -p "test_manual_analise_logger_m4.py" -v
