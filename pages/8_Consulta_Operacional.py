@@ -169,6 +169,36 @@ def _m8_interpretar_par_coordenadas(entrada: str) -> tuple[float, float]:
     )
 
 
+def _m8_interpretar_lista_coordenadas(texto: str) -> tuple[tuple[float, float], ...]:
+    """Uma coordenada por linha, numerada pela ordem; rejeita lote incompleto."""
+    linhas = [
+        (numero, linha.strip())
+        for numero, linha in enumerate(str(texto or "").splitlines(), start=1)
+        if linha.strip()
+    ]
+    if not linhas:
+        raise ValueError("Informe ao menos uma coordenada (latitude e longitude).")
+    if len(linhas) > 100:
+        raise ValueError("Consulte no máximo 100 coordenadas por pesquisa.")
+    pontos = []
+    for numero, linha in linhas:
+        try:
+            pontos.append(_m8_interpretar_par_coordenadas(linha))
+        except ValueError as erro:
+            raise ValueError(f"Linha {numero}: {erro}") from erro
+    return tuple(pontos)
+
+
+def _m8_normalizar_pontos(ponto_pesquisado) -> tuple[tuple[float, float], ...]:
+    """Compatibilidade com pesquisas antigas que guardavam um único par."""
+    if ponto_pesquisado is None:
+        return ()
+    if (len(ponto_pesquisado) == 2
+            and isinstance(ponto_pesquisado[0], (int, float))):
+        return ((float(ponto_pesquisado[0]), float(ponto_pesquisado[1])),)
+    return tuple((float(lat), float(lon)) for lat, lon in ponto_pesquisado)
+
+
 def _assinatura(caminho: Path) -> tuple[str, int, int]:
     info = caminho.stat()
     return str(caminho), info.st_size, info.st_mtime_ns
@@ -1235,7 +1265,8 @@ def _m8_unir_ativos(ativos_proximos, ativos_area):
 
 
 def _m8_rótulo_html(texto, tipo="matricula"):
-    classe = "m8-label-equip" if tipo == "ativo" else "m8-label-mat"
+    classe = ("m8-label-ponto" if tipo == "ponto" else
+              "m8-label-equip" if tipo == "ativo" else "m8-label-mat")
     return f'<div class="{classe}">{html_escape(str(texto))}</div>'
 
 
@@ -1261,10 +1292,14 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
 
     lats = clientes["_lat"].astype(float).tolist()
     lons = clientes["_lon"].astype(float).tolist()
-    # Pesquisa por coordenadas tem prioridade de enquadramento no mapa.
-    if ponto_pesquisado is not None:
-        centro = [float(ponto_pesquisado[0]), float(ponto_pesquisado[1])]
-        zoom_inicial = 17
+    pontos = _m8_normalizar_pontos(ponto_pesquisado)
+    # A pesquisa por coordenadas tem prioridade sobre os demais enquadramentos.
+    if pontos:
+        centro = [
+            sum(lat for lat, _ in pontos) / len(pontos),
+            sum(lon for _, lon in pontos) / len(pontos),
+        ]
+        zoom_inicial = 17 if len(pontos) == 1 else 12
     elif lats:
         centro = [sum(lats) / len(lats), sum(lons) / len(lons)]
         zoom_inicial = 16 if len(clientes) == 1 else 13
@@ -1294,7 +1329,7 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     mapa.get_root().header.add_child(Element("""
     <style>
     .m8-label-anchor {background:transparent!important; border:0!important;}
-    .m8-label-mat,.m8-label-equip {
+    .m8-label-mat,.m8-label-equip,.m8-label-ponto {
       white-space:nowrap; display:inline-block; pointer-events:none;
       padding:3px 6px; border-radius:5px;
       background:rgba(255,255,255,.96); color:#18354a;
@@ -1304,6 +1339,7 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     }
     .m8-label-mat{border-left:3px solid #16934b;}
     .m8-label-equip{border-left:3px solid #e68e23;font-size:10px;}
+    .m8-label-ponto{border-left:3px solid #b91c1c;color:#991b1b;font-size:12px;}
     .leaflet-control-layers-expanded {max-height:260px;overflow-y:auto;
        font:11px/1.25 Arial,sans-serif;}
     </style>
@@ -1370,11 +1406,12 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
             ),
         ).add_to(mapa)
 
-    if ponto_pesquisado is not None:
-        lat, lon = (float(coordenada) for coordenada in ponto_pesquisado)
+    # Rótulos P1, P2... sempre visíveis, mesmo com rótulos de ativos desativados.
+    for indice, (lat, lon) in enumerate(pontos, start=1):
+        identificacao = f"P{indice}"
         elevacao = _m8_formatar_cota(cotas.get((lat, lon)))
         popup_ponto = (
-            "<div style='min-width:180px'><b>Ponto pesquisado</b>"
+            f"<div style='min-width:180px'><b>Ponto {identificacao}</b>"
             f"<div><b>Latitude:</b> {lat:.8f}</div>"
             f"<div><b>Longitude:</b> {lon:.8f}</div>"
             + (f"<div><b>Cota da superfície:</b> {elevacao}</div>"
@@ -1383,15 +1420,17 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
         )
         folium.Marker(
             [lat, lon],
-            tooltip="Ponto pesquisado por coordenadas",
+            tooltip=f"{identificacao} — coordenada pesquisada",
             popup=folium.Popup(popup_ponto, max_width=300),
             icon=folium.Icon(color="red", icon="crosshairs", prefix="fa"),
         ).add_to(mapa)
         folium.CircleMarker(
             location=[lat, lon], radius=5, color="#B91C1C",
             weight=2, fill=True, fill_color="#FFFFFF", fill_opacity=1,
-            tooltip="Localização pesquisada",
+            tooltip=identificacao,
         ).add_to(mapa)
+        _m8_adicionar_rotulo(mapa, lat, lon, identificacao,
+                             tipo="ponto", deslocamento=18)
 
     # Matrículas no polígono: camada independente e agrupada, sem rótulos
     # permanentes. Em zoom próximo, ao passar o mouse, cada ponto informa
@@ -1509,9 +1548,16 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
                        "rectangle": True, "polyline": False, "circle": False,
                        "circlemarker": False, "marker": False},
          edit_options={"edit": False, "remove": True}).add_to(mapa)
-    if ponto_pesquisado is not None:
-        # Não deixar fit_bounds de matrículas ou desenhos antigos desviar o foco.
-        pass
+    if pontos:
+        # Enquadra todos os pontos da lista; para ponto único mantém zoom 17.
+        if len(pontos) > 1:
+            latitudes = [lat for lat, _ in pontos]
+            longitudes = [lon for _, lon in pontos]
+            mapa.fit_bounds(
+                [[min(latitudes), min(longitudes)],
+                 [max(latitudes), max(longitudes)]],
+                padding=(55, 55), max_zoom=17,
+            )
     elif area is not None:
         oeste, sul, leste, norte = area.bounds
         mapa.fit_bounds([[sul, oeste], [norte, leste]], padding=(35, 35), max_zoom=17)
@@ -1600,11 +1646,13 @@ def exibir_consulta_operacional() -> None:
 
     with st.form("m8_busca_coordenadas"):
         st.markdown("**📍 Localizar ponto por coordenadas**")
-        coordenadas_digitadas = st.text_input(
-            "Coordenadas (latitude, longitude)",
+        coordenadas_digitadas = st.text_area(
+            "Coordenadas (latitude, longitude) — uma por linha",
             key="m8_coordenadas_pesquisa",
-            placeholder="Ex.: -5.14474000, -42.78857000",
-            help="Também aceita espaço como separador: -5.14474000 -42.78857000.",
+            height=120,
+            placeholder="-5.14474000, -42.78857000\n-5.14485000 -42.78868000",
+            help="Uma coordenada por linha, separando latitude e longitude por "
+                 "vírgula ou espaço. Os pontos serão identificados como P1, P2...",
         )
         localizar_ponto = st.form_submit_button(
             "📍 Localizar coordenadas", use_container_width=True,
@@ -1612,27 +1660,33 @@ def exibir_consulta_operacional() -> None:
 
     if localizar_ponto:
         try:
-            ponto_encontrado = _m8_interpretar_par_coordenadas(
+            pontos_encontrados = _m8_interpretar_lista_coordenadas(
                 coordenadas_digitadas
             )
         except ValueError as erro:
             st.error(str(erro))
         else:
-            st.session_state["m8_ponto_pesquisado"] = ponto_encontrado
+            st.session_state["m8_ponto_pesquisado"] = pontos_encontrados
             st.session_state["m8_integrado_versao_mapa"] = (
                 st.session_state.get("m8_integrado_versao_mapa", 0) + 1
             )
             st.rerun()
 
-    if (ponto_atual := st.session_state.get("m8_ponto_pesquisado")) is not None:
+    pontos_atuais = _m8_normalizar_pontos(
+        st.session_state.get("m8_ponto_pesquisado")
+    )
+    if pontos_atuais:
         col_ponto, col_apagar = st.columns([4, 1], vertical_alignment="center")
         with col_ponto:
-            st.caption(
-                f"📍 Ponto localizado: {ponto_atual[0]:.8f}, {ponto_atual[1]:.8f} "
-                "(latitude, longitude)."
-            )
+            if len(pontos_atuais) == 1:
+                lat, lon = pontos_atuais[0]
+                st.caption(f"📍 P1: {lat:.8f}, {lon:.8f} (latitude, longitude).")
+            else:
+                st.caption(
+                    f"📍 {len(pontos_atuais)} pontos localizados (P1 a P{len(pontos_atuais)})."
+                )
         with col_apagar:
-            if st.button("Limpar ponto", key="m8_limpar_ponto"):
+            if st.button("Limpar pontos", key="m8_limpar_ponto"):
                 st.session_state.pop("m8_ponto_pesquisado", None)
                 st.session_state["m8_integrado_versao_mapa"] = (
                     st.session_state.get("m8_integrado_versao_mapa", 0) + 1
@@ -1690,7 +1744,9 @@ def exibir_consulta_operacional() -> None:
                 )
                 st.rerun()
 
-    ponto_pesquisado = st.session_state.get("m8_ponto_pesquisado")
+    pontos_pesquisados = _m8_normalizar_pontos(
+        st.session_state.get("m8_ponto_pesquisado")
+    )
     atual = st.session_state.get("m8_integrado_consulta")
     codigos, raio, mostrar_bairros = (
         atual if atual is not None else ([], int(raio), bool(mostrar_bairros))
@@ -1741,7 +1797,7 @@ def exibir_consulta_operacional() -> None:
     # deles, incluindo a nova pesquisa por planta e logger sem matrícula.
     busca_equipamento = st.session_state.get("m8_consulta_equipamento")
     bases = {}
-    if (area is not None or not validos.empty or ponto_pesquisado is not None
+    if (area is not None or not validos.empty or pontos_pesquisados
             or busca_equipamento):
         for tipo, caminho in (("Poço / Ativo", ARQUIVO_POCOS),
                               ("Logger", ARQUIVO_LOGGERS)):
@@ -1784,7 +1840,7 @@ def exibir_consulta_operacional() -> None:
     influencias = []
     arquivo_influencias = _caminho_influencias()
     if arquivo_influencias and (area is not None or not validos.empty
-                               or ponto_pesquisado is not None
+                               or pontos_pesquisados
                                or bool(ativos_pesquisados)):
         try:
             todas_influencias = _ler_influencias(_assinatura(arquivo_influencias))
@@ -1794,9 +1850,12 @@ def exibir_consulta_operacional() -> None:
                     or "Área de influência não identificada", axis=1)
             # No mapa, apenas feições próximas; o catálogo completo não é enviado.
             from shapely.geometry import box
-            if ponto_pesquisado is not None:
-                lat_p, lon_p = ponto_pesquisado
-                contexto = box(lon_p-.008, lat_p-.008, lon_p+.008, lat_p+.008)
+            if pontos_pesquisados:
+                from shapely.ops import unary_union
+                contexto = unary_union([
+                    box(lon-.008, lat-.008, lon+.008, lat+.008)
+                    for lat, lon in pontos_pesquisados
+                ])
             elif area is not None:
                 contexto = box(*area.bounds).buffer(.008)
             elif ativos_pesquisados:
@@ -1843,10 +1902,12 @@ def exibir_consulta_operacional() -> None:
             f"Base geográfica: {len(assinaturas_bairros)} arquivo(s) "
             f"e {len(todas)} feição(ões) poligonais reconhecidas."
         )
-        if ponto_pesquisado is not None:
-            lat_p, lon_p = ponto_pesquisado
-            oeste, sul = lon_p-.008, lat_p-.008
-            leste, norte = lon_p+.008, lat_p+.008
+        janelas_pontos = []
+        if pontos_pesquisados:
+            janelas_pontos = [
+                (lon-.008, lat-.008, lon+.008, lat+.008)
+                for lat, lon in pontos_pesquisados
+            ]
         elif area is not None:
             oeste, sul, leste, norte = (
                 area.bounds[0]-.008, area.bounds[1]-.008,
@@ -1865,15 +1926,16 @@ def exibir_consulta_operacional() -> None:
             # sem escolher apenas a primeira camada/um único GeoPackage.
             bairros = todas
         if (area is not None or not validos.empty or
-                ponto_pesquisado is not None or ativos_pesquisados):
-            # Só enviar ao navegador as feições que cruzem o contexto da
-            # análise, mantendo o conjunto completo no cache do servidor.
+                pontos_pesquisados or ativos_pesquisados):
+            # Só enviar ao navegador as feições próximas de algum ponto.
+            # Evita carregar bairros intermediários de pontos muito distantes.
+            janelas = janelas_pontos or [(oeste, sul, leste, norte)]
             bairros = [
                 b for b in todas
-                if not (
-                    b["limites"][2] < oeste or b["limites"][0] > leste
-                    or b["limites"][3] < sul or b["limites"][1] > norte
-                )
+                if any(not (
+                    b["limites"][2] < o or b["limites"][0] > l
+                    or b["limites"][3] < s or b["limites"][1] > n
+                ) for o, s, l, n in janelas)
             ]
 
     cadastro_area = pd.DataFrame(columns=list(COLUNAS_MATRICULAS))
@@ -1895,14 +1957,22 @@ def exibir_consulta_operacional() -> None:
         proximidade, ativos_perto = _consultar_proximidade(validos, bases, raio)
     ativos_ponto = []
     proximidade_ponto = pd.DataFrame()
-    if ponto_pesquisado is not None:
-        lat_p, lon_p = ponto_pesquisado
-        referencia_ponto = pd.DataFrame([{
-            "NUM_LIGACAO": "Ponto pesquisado", "_lat": lat_p, "_lon": lon_p,
-        }])
+    if pontos_pesquisados:
+        referencias_pontos = pd.DataFrame([
+            {"NUM_LIGACAO": f"P{indice}", "_lat": lat, "_lon": lon}
+            for indice, (lat, lon) in enumerate(pontos_pesquisados, start=1)
+        ])
         proximidade_ponto, ativos_ponto = _consultar_proximidade(
-            referencia_ponto, bases, raio
+            referencias_pontos, bases, raio
         )
+        if not proximidade_ponto.empty:
+            proximidade_ponto["_ordem"] = (
+                proximidade_ponto["Matrícula"].str[1:].astype(int)
+            )
+            proximidade_ponto = (
+                proximidade_ponto.sort_values(["_ordem", "Distância (m)"])
+                .drop(columns="_ordem")
+            )
     ativos_area = _m8_ativos_na_area(area, bases)
     ativos = _m8_unir_ativos(
         [*ativos_perto, *ativos_ponto, *ativos_pesquisados], ativos_area
@@ -1912,8 +1982,7 @@ def exibir_consulta_operacional() -> None:
     # pois poderiam sobrecarregar DSM/MDE. O popup exibe apenas matrícula/bairro.
     # Cotas continuam sendo calculadas para equipamentos e matrículas pesquisadas.
     coords_selecionadas = [(float(r["_lat"]), float(r["_lon"])) for _, r in validos.iterrows()]
-    if ponto_pesquisado is not None:
-        coords_selecionadas.append(tuple(ponto_pesquisado))
+    coords_selecionadas.extend(pontos_pesquisados)
     coords_equipamentos = []
     for tipo in ("Poço / Ativo", "Logger"):
         equipamento_tipo = [a for a in ativos if a.get("_tipo") == tipo]
@@ -1988,7 +2057,7 @@ def exibir_consulta_operacional() -> None:
     mapa = _m8_mapa_unificado(
         validos, ativos, raio, bairros, influencias, area,
         rede, mapa_cotas, rotulos,
-        ponto_pesquisado=ponto_pesquisado,
+        ponto_pesquisado=pontos_pesquisados,
         matriculas_area=pontos_area,
         foco_equipamentos=ativos_pesquisados,
     )
@@ -2076,21 +2145,37 @@ def exibir_consulta_operacional() -> None:
                 "a tabela e a exportação abrangem o cadastro completo."
             )
 
-    if ponto_pesquisado is not None:
-        elevacao_pesquisada = _m8_formatar_cota(
-            mapa_cotas.get(tuple(ponto_pesquisado))
-        )
-        if elevacao_pesquisada:
-            st.caption(f"Cota da superfície no ponto pesquisado: {elevacao_pesquisada}.")
+    if pontos_pesquisados:
+        pontos_tabela = [
+            {
+                "Ponto": f"P{indice}",
+                "Latitude": f"{lat:.8f}",
+                "Longitude": f"{lon:.8f}",
+                "Cota da superfície": (
+                    _m8_formatar_cota(mapa_cotas.get((lat, lon))) or "Indisponível"
+                ),
+            }
+            for indice, (lat, lon) in enumerate(pontos_pesquisados, start=1)
+        ]
+        if len(pontos_pesquisados) == 1:
+            elevacao_pesquisada = pontos_tabela[0]["Cota da superfície"]
+            if elevacao_pesquisada != "Indisponível":
+                st.caption(f"Cota da superfície em P1: {elevacao_pesquisada}.")
+        else:
+            with st.expander("Lista de pontos pesquisados (P1, P2...)", expanded=False):
+                st.dataframe(
+                    pd.DataFrame(pontos_tabela),
+                    hide_index=True, use_container_width=True,
+                )
         if not proximidade_ponto.empty:
             with st.expander("Equipamentos próximos às coordenadas", expanded=False):
                 st.dataframe(
-                    proximidade_ponto.rename(columns={"Matrícula": "Referência"}),
-                    hide_index=True, use_container_width=True
+                    proximidade_ponto.rename(columns={"Matrícula": "Ponto"}),
+                    hide_index=True, use_container_width=True,
                 )
         else:
             st.caption(
-                f"Nenhum poço ou logger cadastrado a até {raio} m do ponto pesquisado."
+                f"Nenhum poço ou logger cadastrado a até {raio} m dos pontos pesquisados."
             )
 
     st.markdown("#### Equipamentos próximos")
