@@ -52,14 +52,19 @@ class TesteClustersBaixaPressao(unittest.TestCase):
             icon_create_function=FUNCAO_ICONE_CLUSTER, **opcoes_cluster()
         ).add_to(mapa)
         folium.Marker(
-            [-5.1, -42.8], bp_pressure_rank=5
+            [-5.1, -42.8], bp_pressure_rank=5, bp_pressure_mca=0.0
         ).add_to(grupo)
         folium.Marker(
-            [-5.1001, -42.8001], bp_pressure_rank=2
+            [-5.1001, -42.8001], bp_pressure_rank=2, bp_pressure_mca=12.0
         ).add_to(grupo)
         html = mapa.get_root().render()
         self.assertIn('"bpPressureRank": 5', html)
         self.assertIn('"bpPressureRank": 2', html)
+        self.assertIn('"bpPressureMca": 0.0', html)
+        self.assertIn('"bpPressureMca": 12.0', html)
+        self.assertIn("somaPressao / medicoesValidas", html)
+        self.assertIn('media.toFixed(1).replace(".", ",")', html)
+        self.assertIn('mediaTexto + \'</span>\'', html)
         self.assertIn("filhos[i].options.bpPressureRank", html)
         self.assertIn('"zoomToBoundsOnClick": true', html)
         self.assertIn('"spiderfyOnMaxZoom": true', html)
@@ -78,6 +83,9 @@ class TesteClustersBaixaPressao(unittest.TestCase):
         self.assertIn(").add_to(bp_agrupador_individual)", texto)
         self.assertIn("key=\"mapa_principal_pressao\"", texto)
         self.assertIn("bp_pressure_rank=prioridade_pressao_mca(pressao)", texto)
+        self.assertIn("bp_pressure_mca=pressao", texto)
+        self.assertIn('"os agrupamentos mostram a pressão média em MCA."', texto)
+        self.assertIn("bp-cluster-unidade", texto)
         self.assertIn("if modo_visualizacao == \"Medições individuais\" and mostrar_rotulos:",texto)
 
     def test_cartoes_somente_com_zoom_proximo_e_cluster_permanente(self):
