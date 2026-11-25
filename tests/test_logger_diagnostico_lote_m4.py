@@ -18,7 +18,7 @@ def serie_base(valor=12.0, ultimo=12.0, tipo="constante"):
     """6 dias x 5 pontos no mesmo horário, suficientes para referência."""
     pontos = []
     for dia in range(1, 7):
-        for deslocamento in (-10, -5, 0, 5, 10):
+        for deslocamento in (0, 5, 10, 15, 20):
             dt = pd.Timestamp(2026, 11, dia, 10) + pd.Timedelta(minutes=deslocamento)
             if tipo == "bimodal":
                 v = 10.0 if dia <= 3 else 20.0
