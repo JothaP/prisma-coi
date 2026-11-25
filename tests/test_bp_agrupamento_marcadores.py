@@ -179,7 +179,7 @@ class TesteClustersBaixaPressao(unittest.TestCase):
         texto = MAPA.read_text(encoding="utf-8")
         self.assertEqual(ZOOM_ROTULOS_INDIVIDUAIS, 15)
         self.assertIn('zoom >= 15', texto)
-        self.assertIn('if (mapa.getZoom() < 15) return;', texto)
+        self.assertIn('if (mapa.getZoom() < 15) {', texto)
         self.assertIn(
             ".leaflet-container:not(.bp-sem-agrupamento):not(.bp-zoom-detalhe-individual)",
             texto
