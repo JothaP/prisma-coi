@@ -6,11 +6,14 @@ on:
       - "logger_regionais.py"
       - "logger_monitor_core.py"
       - "logger_comportamento_core.py"
+      - "logger_diagnostico_operacional.py"
+      - "logger_lote_core.py"
       - "pages/4_4_Analise_de_Logger.py"
       - "pages/4_Ferramentas_Operacionais.py"
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
+      - "tests/test_logger_diagnostico_lote_m4.py"
       - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
@@ -19,11 +22,14 @@ on:
       - "logger_regionais.py"
       - "logger_monitor_core.py"
       - "logger_comportamento_core.py"
+      - "logger_diagnostico_operacional.py"
+      - "logger_lote_core.py"
       - "pages/4_4_Analise_de_Logger.py"
       - "pages/4_Ferramentas_Operacionais.py"
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
+      - "tests/test_logger_diagnostico_lote_m4.py"
       - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
@@ -44,10 +50,12 @@ jobs:
         run: python -m pip install "pandas>=2.2,<3" numpy openpyxl xlrd
       - name: Verificar sintaxe de todos os arquivos
         run: |
-          python -m py_compile logger_regionais.py logger_monitor_core.py logger_xlsx_fallback.py logger_comportamento_core.py pages/4_4_Analise_de_Logger.py pages/4_Ferramentas_Operacionais.py
+          python -m py_compile logger_regionais.py logger_monitor_core.py logger_xlsx_fallback.py logger_comportamento_core.py logger_diagnostico_operacional.py logger_lote_core.py pages/4_4_Analise_de_Logger.py pages/4_Ferramentas_Operacionais.py
       - name: Testar monitor e analisador sem acessar bases reais
         run: python -m unittest discover -s tests -p "test_analise_logger_m4.py" -v
       - name: Testar uploads acumulativos e falha de Excel Infinity
         run: python -m unittest discover -s tests -p "test_monitor_logger_incremental_m4.py" -v
+      - name: Testar comportamento operacional e processamento multi-logger
+        run: python -m unittest discover -s tests -p "test_logger_diagnostico_lote_m4.py" -v
       - name: Testar botao e integridade do PDF institucional quando presente
         run: python -m unittest discover -s tests -p "test_manual_analise_logger_m4.py" -v
