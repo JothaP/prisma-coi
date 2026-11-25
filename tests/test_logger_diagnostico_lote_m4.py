@@ -79,7 +79,7 @@ class TesteInterpretacaoOperacional(unittest.TestCase):
         self.assertIn("sem lacunas superiores", resp["diagnostico"].lower())
 
     def test_recuperacao_observada_apos_valores_proximos_zero(self):
-        dados = serie_base(valor=12, ultimo=13)
+        dados = serie_base(valor=12, ultimo=12)
         dados.loc[len(dados)] = {
             "data": pd.Timestamp("2026-11-25 08:00"), "pressao": 0
         }
