@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from logger_monitor_core import ErroBaseLogger, datas_medicao, numeros
+from logger_diagnostico_operacional import avaliar_operacao
 
 
 JANELA_HISTORICA_MIN = 30
@@ -232,18 +233,19 @@ def variacao_recente(dados, unidade="mca"):
     return "Não houve queda ou elevação significativa no período recente."
 
 
-def diagnosticar(dados, unidade="mca"):
-    """Diagnóstico textual e métricas baseadas somente na série importada."""
+def diagnosticar(dados, unidade="mca", limiar_min_mca=None):
+    """Diagnóstico histórico + interpretação operacional não conclusiva de FA."""
+
     if dados.empty or len(dados) < 3:
         raise ErroBaseLogger("São necessárias três medições válidas para analisar.")
     ultimo = dados.iloc[-1]
     padrao = padrao_horario(dados)
-    texto = (
-        f"Na última medição ({ultimo.data:%d/%m/%Y às %Hh%M}), "
-        f"a pressão foi de {_pt(ultimo.pressao)} {unidade} e "
-        f"{padrao.descricao}. {variacao_recente(dados, unidade)}"
+    leitura = avaliar_operacao(
+        dados, padrao, limiar_min_mca=limiar_min_mca
     )
+    texto = leitura["diagnostico_operacional"]
     return {
+        **leitura,
         "classificacao": padrao.classificacao,
         "diagnostico": texto,
         "data_ultima": ultimo.data,
