@@ -1,0 +1,35 @@
+name: Validar historico de medicoes nas areas Sanear (Modulo 1)
+
+on:
+  push:
+    paths:
+      - "pages/1_Baixa_Pressao.py"
+      - "bp_sanear_historico.py"
+      - "tests/test_bp_sanear_historico.py"
+      - ".github/workflows/testar-historico-sanear-m1.yml"
+  pull_request:
+    paths:
+      - "pages/1_Baixa_Pressao.py"
+      - "bp_sanear_historico.py"
+      - "tests/test_bp_sanear_historico.py"
+      - ".github/workflows/testar-historico-sanear-m1.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias geograficas isoladas
+        run: python -m pip install "pandas>=2.2,<3" "shapely>=2,<3"
+      - name: Verificar sintaxe do Modulo 1 e cruzamento Sanear
+        run: python -m py_compile pages/1_Baixa_Pressao.py bp_sanear_historico.py
+      - name: Validar historico, periodo, limites e sobreposicoes
+        run: python -m unittest discover -s tests -p "test_bp_sanear_historico.py" -v

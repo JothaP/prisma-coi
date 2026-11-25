@@ -38,6 +38,7 @@ from bp_agrupamento_marcadores import (
     FUNCAO_ICONE_CLUSTER, ZOOM_ROTULOS_INDIVIDUAIS,
     opcoes_cluster, prioridade_pressao_mca,
 )
+from bp_sanear_historico import opcoes_areas_sanear, filtrar_historico_sanear
 import xml.etree.ElementTree as ET
 
 
@@ -5047,6 +5048,157 @@ st_folium(
     key="mapa_principal_pressao" if not sem_agrupamento else "mapa_principal_pressao_sem_agrupamento",
 )
 
+
+st.divider()
+
+
+# ============================================================
+# HISTÓRICO SANEAR — CRUZAMENTO GEOGRÁFICO DE MEDIÇÕES (SEM O.S.)
+# ============================================================
+with st.expander("🛠️ Histórico de medições nas áreas Sanear", expanded=False):
+    st.caption(
+        "Consulta independente do mapa: utiliza medições atuais e históricas "
+        "do Módulo 1 e somente os polígonos do Sanear. Não inclui O.S."
+    )
+    arquivo_sanear_hist = bp_encontrar_kml_sanear()
+    if not arquivo_sanear_hist.is_file():
+        st.warning("Arquivo geográfico geodados/areas_influencia/sanear.kml indisponível.")
+    elif df.empty:
+        st.info("Nenhuma medição disponível para consulta.")
+    else:
+        try:
+            geo_sanear_hist = bp_carregar_poligonos_sanear(
+                str(arquivo_sanear_hist), arquivo_sanear_hist.stat().st_mtime_ns,
+            )
+            areas_sanear_hist = opcoes_areas_sanear(geo_sanear_hist)
+            datas_sanear_hist = pd.to_datetime(
+                df["Data"], format="%d/%m/%Y", errors="coerce"
+            ).dropna()
+            if not geo_sanear_hist.get("features"):
+                st.warning("Não há polígonos válidos na camada Sanear.")
+            elif datas_sanear_hist.empty:
+                st.info("Não há medições com datas válidas.")
+            else:
+                menor_data = datas_sanear_hist.min().date()
+                maior_data = datas_sanear_hist.max().date()
+                with st.form("bp_sanear_historico_form"):
+                    area_sanear_hist = st.selectbox(
+                        "Área Sanear",
+                        options=list(areas_sanear_hist),
+                        key="bp_sanear_hist_area",
+                        help="Todas as áreas combina os polígonos e não duplica medições.",
+                    )
+                    dt1, dt2 = st.columns(2)
+                    with dt1:
+                        inicio_sanear_hist = st.date_input(
+                            "Data inicial", value=menor_data,
+                            min_value=menor_data, max_value=maior_data,
+                            format="DD/MM/YYYY", key="bp_sanear_hist_ini",
+                        )
+                    with dt2:
+                        fim_sanear_hist = st.date_input(
+                            "Data final", value=maior_data,
+                            min_value=menor_data, max_value=maior_data,
+                            format="DD/MM/YYYY", key="bp_sanear_hist_fim",
+                        )
+                    faixas_sanear_hist = st.multiselect(
+                        "Faixas de pressão", BP_FAIXAS_PRESSAO,
+                        default=[], placeholder="Todas as faixas",
+                        key="bp_sanear_hist_faixas",
+                    )
+                    consultar_sanear_hist = st.form_submit_button(
+                        "Consultar histórico Sanear", type="primary",
+                        use_container_width=True,
+                    )
+
+                if consultar_sanear_hist:
+                    if inicio_sanear_hist > fim_sanear_hist:
+                        st.error("A data inicial não pode ser posterior à final.")
+                    else:
+                        with st.spinner("Localizando medições históricas nos polígonos..."):
+                            historico_sanear = filtrar_historico_sanear(
+                                df, geo_sanear_hist,
+                                areas_sanear_hist[area_sanear_hist],
+                                inicio_sanear_hist, fim_sanear_hist,
+                            )
+                            historico_sanear = bp_filtrar_por_faixas(
+                                historico_sanear, faixas_sanear_hist,
+                            )
+                        st.session_state["bp_sanear_hist_resultado"] = (
+                            historico_sanear, area_sanear_hist,
+                            inicio_sanear_hist, fim_sanear_hist,
+                        )
+
+                ultima_sanear = st.session_state.get("bp_sanear_hist_resultado")
+                if ultima_sanear is not None:
+                    historico_sanear, area_ultima, inicio_ultimo, fim_ultimo = ultima_sanear
+                    st.markdown("#### Resultado da última consulta")
+                    st.caption(
+                        f"{area_ultima} | {inicio_ultimo:%d/%m/%Y} "
+                        f"a {fim_ultimo:%d/%m/%Y}. "
+                        "Clique em Consultar novamente para atualizar os dados."
+                    )
+                    if historico_sanear.empty:
+                        st.info("Nenhuma medição nos polígonos e filtros selecionados.")
+                    else:
+                        pressao_sanear = pd.to_numeric(
+                            historico_sanear["Pressao_MCA"], errors="coerce"
+                        )
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("Medições", len(historico_sanear))
+                        c2.metric("Sem pressão (0 mca)", int(pressao_sanear.eq(0).sum()))
+                        c3.metric("Até 5 mca", int(pressao_sanear.le(5).sum()))
+                        c4.metric("Pressão média", f"{pressao_sanear.mean():.1f} mca")
+                        matriculas_unicas = historico_sanear["Matricula"].fillna("").astype(str).str.strip()
+                        matriculas_unicas = matriculas_unicas[
+                            matriculas_unicas.ne("") &
+                            ~matriculas_unicas.str.lower().isin(("nan", "none"))
+                        ]
+                        st.caption(
+                            f"Matrículas distintas: {matriculas_unicas.nunique()}. "
+                            "A associação considera coordenadas dentro ou na borda da área."
+                        )
+
+                        resumo_mensal_sanear = (
+                            historico_sanear.assign(
+                                Mes=historico_sanear["DataObjSanear"].dt.to_period("M").dt.to_timestamp()
+                            ).groupby("Mes", as_index=False).agg(
+                                Medicoes=("Pressao_MCA", "size"),
+                                Media=("Pressao_MCA", "mean"),
+                            )
+                        ).set_index("Mes")
+                        graf1, graf2 = st.columns(2)
+                        with graf1:
+                            st.markdown("**Pressão média mensal (mca)**")
+                            st.line_chart(resumo_mensal_sanear["Media"])
+                        with graf2:
+                            st.markdown("**Quantidade mensal de medições**")
+                            st.bar_chart(resumo_mensal_sanear["Medicoes"])
+
+                        colunas_sanear_hist = [
+                            "Data", "Área Sanear", "Municipio", "Bairro", "Matricula",
+                            "Pressao_MCA", "Latitude", "Longitude",
+                            "Observacao", BP_COLUNA_PROTOCOLO,
+                        ]
+                        tabela_sanear_hist = historico_sanear[colunas_sanear_hist].rename(columns={
+                            "Municipio": "Município", "Matricula": "Matrícula",
+                            "Pressao_MCA": "Pressão (mca)",
+                            "Observacao": "Observação",
+                            BP_COLUNA_PROTOCOLO: "Cód. protocolo",
+                        })
+                        st.markdown("**Histórico de medições nas áreas selecionadas**")
+                        st.dataframe(tabela_sanear_hist, hide_index=True, use_container_width=True)
+                        if not eh_operador:
+                            st.download_button(
+                                "⬇️ Exportar histórico Sanear (CSV)",
+                                data=tabela_sanear_hist.to_csv(index=False, sep=";").encode("utf-8-sig"),
+                                file_name="historico_medicoes_sanear.csv",
+                                mime="text/csv", key="bp_sanear_hist_exportar",
+                            )
+                        else:
+                            st.caption("Exportação indisponível para o perfil operador.")
+        except (ET.ParseError, OSError, ValueError, TypeError, KeyError, ImportError) as exc:
+            st.warning(f"Não foi possível consultar o histórico Sanear: {exc}")
 
 st.divider()
 
