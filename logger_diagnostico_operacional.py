@@ -273,7 +273,8 @@ def avaliar_operacao(dados, padrao, limiar_min_mca=None):
         f" ({padrao.medicoes_referencia} medições em "
         f"{padrao.dias_referencia} dias anteriores)."
         if valido else
-        f"Histórico insuficiente: {padrao.medicoes_referencia} medições "
+        f"Histórico insuficiente para confirmar o padrão: "
+        f"{padrao.medicoes_referencia} medições "
         f"em {padrao.dias_referencia} dias anteriores próximos desse horário "
         "(mínimo necessário: 25 medições e 5 dias)."
     )
