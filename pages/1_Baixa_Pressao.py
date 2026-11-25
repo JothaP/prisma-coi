@@ -3308,8 +3308,8 @@ st.subheader(
     "🗺️ Mapa de Baixa Pressão"
 )
 
-c_map1, c_map2, c_map_faixas, c_map3, c_map4 = st.columns(
-    [2, 2.2, 2.3, 1.55, 1.15]
+c_map1, c_map2, c_map_faixas, c_map3, c_map_agrupamento, c_map4 = st.columns(
+    [2, 2.2, 2.3, 1.4, 1.6, 1.15]
 )
 
 
@@ -3367,12 +3367,32 @@ with c_map3:
         help=(
             "Mostra informações junto aos pins. "
             "No modo por bairro mostra pressão média e quantidade. "
-            "No modo individual, os valores aparecem a partir do zoom 15; "
-            "os agrupamentos mostram a pressão média em MCA."
+            "Na visualização agrupada, os cartões individuais aparecem "
+            "a partir do zoom 15. Com 'Sem agrupamento', os rótulos "
+            "individuais aparecem em qualquer nível de zoom."
         )
     )
 
     mostrar_rotulos = st.session_state.mostrar_rotulos_bp
+
+
+with c_map_agrupamento:
+    st.checkbox(
+        "Sem agrupamento",
+        value=False,
+        key="bp_sem_agrupamento",
+        disabled=modo_visualizacao != "Medições individuais",
+        help=(
+            "Mostra todas as medições como marcadores independentes, "
+            "sem círculos de média. Se 'Exibir rótulos' estiver ativo, "
+            "mostra os cartões de pressão em qualquer nível de zoom, "
+            "como na visualização anterior."
+        ),
+    )
+    sem_agrupamento = (
+        modo_visualizacao == "Medições individuais"
+        and bool(st.session_state.bp_sem_agrupamento)
+    )
 
 
 with c_map4:
@@ -3388,12 +3408,19 @@ with c_map4:
 
 
 if modo_visualizacao == "Medições individuais":
-    st.caption(
-        "Aproxime para dividir os grupos; clique em um agrupamento para ampliar. "
-        "O **número** do grupo é a média das medições em MCA; a **cor** indica "
-        "a faixa mais crítica do grupo, mesmo quando a média é normal. "
-        "Rótulos individuais aparecem no zoom detalhado."
-    )
+    if sem_agrupamento:
+        st.caption(
+            "Modo sem agrupamento: todas as medições aparecem em pontos "
+            "individuais. Com **Exibir rótulos** ativo, os cartões de pressão "
+            "ficam visíveis em qualquer zoom, como antes."
+        )
+    else:
+        st.caption(
+            "Aproxime para dividir os grupos; clique em um agrupamento para ampliar. "
+            "O **número** do grupo é a média das medições em MCA; a **cor** indica "
+            "a faixa mais crítica do grupo, mesmo quando a média é normal. "
+            "Rótulos individuais aparecem no zoom detalhado."
+        )
 
 # Este segundo filtro é EXCLUSIVO do mapa. O filtro geral da sidebar
 # permanece aplicado ao restante da interface.
@@ -3634,15 +3661,19 @@ if not df_mapa.empty:
         # ====================================================
         if modo_visualizacao == "Medições individuais":
 
-            # O Leaflet agrupa por distância em pixels na tela e desmembra
-            # automaticamente os grupos conforme o zoom. Marcadores de
-            # coordenadas idênticas podem ser abertos em leque (spiderfy).
-            bp_agrupador_individual = MarkerCluster(
-                name="Medições de pressão",
-                control=False,
-                icon_create_function=FUNCAO_ICONE_CLUSTER,
-                **opcoes_cluster(),
-            ).add_to(m)
+            # O agrupamento por zoom é a visualização padrão. Quando
+            # "Sem agrupamento" estiver marcado, adicionar os pins diretamente
+            # ao mapa (sem MarkerCluster), com seus rótulos individuais.
+            if sem_agrupamento:
+                bp_destino_marcadores = m
+            else:
+                bp_agrupador_individual = MarkerCluster(
+                    name="Medições de pressão",
+                    control=False,
+                    icon_create_function=FUNCAO_ICONE_CLUSTER,
+                    **opcoes_cluster(),
+                ).add_to(m)
+                bp_destino_marcadores = bp_agrupador_individual
 
             # A cota é obtida pelo ponto medido, não por interpolação entre
             # medições ou pela média de um bairro. Sem DEM/cobertura, deixa
@@ -3892,7 +3923,7 @@ if not df_mapa.empty:
                     # O valor da pressão já foi convertido para float acima.
                     bp_pressure_mca=pressao,
                     bp_pressure_rank=prioridade_pressao_mca(pressao),
-                ).add_to(bp_agrupador_individual)
+                ).add_to(bp_destino_marcadores)
 
         # ====================================================
         # POR BAIRRO
@@ -4319,7 +4350,7 @@ map_style_html = """
     }
     /* Os marcadores individuais continuam selecionáveis; apenas os
        cartões de MCA aparecem quando as ruas já são visíveis no detalhe. */
-    .leaflet-container:not(.bp-zoom-detalhe-individual)
+    .leaflet-container:not(.bp-sem-agrupamento):not(.bp-zoom-detalhe-individual)
     .pressao-individual-marker .bp-label-card-individual {
         display: none !important;
     }
@@ -4570,7 +4601,7 @@ map_style_html = """
     .leaflet-container.bp-zoom-urbano .bp-label-elevation {
         display: none !important;
     }
-    .leaflet-container.bp-zoom-regional .bp-label-card {
+    .leaflet-container.bp-zoom-regional:not(.bp-sem-agrupamento) .bp-label-card {
         display: none !important;
     }
 
@@ -4583,10 +4614,11 @@ m.get_root().html.add_child(
 
 
 class EscalaMarcadoresRotulosPorZoom(MacroElement):
-    """Redimensiona pinos e cartões na escala urbana; regional oculta só cartões."""
-    def __init__(self):
+    """Redimensiona pinos; no modo sem agrupamento preserva os cartões em todo zoom."""
+    def __init__(self, sem_agrupamento=False):
         super().__init__()
         self._name = "EscalaMarcadoresRotulosPorZoom"
+        self.sem_agrupamento = "true" if sem_agrupamento else "false"
         self._template = Template(r"""
 {% macro script(this, kwargs) %}
 (function() {
@@ -4595,6 +4627,8 @@ class EscalaMarcadoresRotulosPorZoom(MacroElement):
     function atualizarEscala() {
         var container = mapa.getContainer();
         if (!container) return;
+        // Sem agrupamento restaura a exibição dos cartões em qualquer zoom.
+        container.classList.toggle("bp-sem-agrupamento", {{this.sem_agrupamento}});
         var zoom = mapa.getZoom();
         // Zoom 10: pinos ~55%; cartões ~75%. Zoom 13+: tamanho normal.
         var pino = Math.max(0.40, Math.min(1, 0.55 + (zoom - 10) * 0.15));
@@ -4631,7 +4665,7 @@ class EscalaMarcadoresRotulosPorZoom(MacroElement):
 
 
 # Mesmo sem etiquetas, os pinos diminuem ao afastar o zoom.
-m.add_child(EscalaMarcadoresRotulosPorZoom())
+m.add_child(EscalaMarcadoresRotulosPorZoom(sem_agrupamento=sem_agrupamento))
 
 
 # ============================================================
@@ -4761,11 +4795,22 @@ class ReorganizarRotulosIndividuais(MacroElement):
     }
 
     function reorganizar() {
-        // A escala de pressão urbana permanece visível; o panorama extremo
-        // não exige cálculo de colisão de rótulos que estão ocultos.
-        if (mapa.getZoom() < 15) return;
         var container = mapa.getContainer();
         if (!container) return;
+        // Ao afastar o zoom após reorganizar cartões no detalhe, restaurar
+        // as posições originais. Isso é importante para "Sem agrupamento":
+        // nesse modo os cartões ficam visíveis em TODOS os níveis de zoom.
+        if (mapa.getZoom() < 15) {
+            container.querySelectorAll(
+                ".pressao-individual-marker .bp-label-card-individual"
+            ).forEach(function(rotulo) {
+                rotulo.style.removeProperty("left");
+                rotulo.style.removeProperty("top");
+                rotulo.style.removeProperty("transform");
+                rotulo.style.removeProperty("visibility");
+            });
+            return;
+        }
         var limites = container.getBoundingClientRect();
         var wrappers = container.querySelectorAll(
             ".pressao-individual-marker .bp-individual-marker-wrapper"
@@ -4997,7 +5042,9 @@ st_folium(
     width="100%",
     height=520,
     returned_objects=[],
-    key="mapa_principal_pressao",
+    # Uma nova chave força a montagem correta do Leaflet ao trocar entre
+    # clusters e pins diretos, sem manter marcadores da visualização anterior.
+    key="mapa_principal_pressao" if not sem_agrupamento else "mapa_principal_pressao_sem_agrupamento",
 )
 
 
