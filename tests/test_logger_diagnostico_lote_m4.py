@@ -204,11 +204,13 @@ class TesteLote(unittest.TestCase):
         fonte = (ROOT / "pages" / "4_4_Analise_de_Logger.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn('"Individual", "Em lote"', fonte)
+        self.assertNotIn('["Individual", "Em lote"]', fonte)
         self.assertIn('accept_multiple_files=True', fonte)
-        self.assertIn("analisar_lote", fonte)
+        self.assertIn("catalogar_historicos", fonte)
+        self.assertIn("analisar_selecionado", fonte)
+        self.assertIn("m4_logger_seletor_comportamento", fonte)
         self.assertIn("referencia_horario_mediana", fonte)
-        self.assertIn("m4_logger_download_lote", fonte)
+        self.assertNotIn("m4_logger_download_lote", fonte)
         self.assertIn('key="btn_download_manual_analise_logger"', fonte)
         self.assertIn('exigir_acesso_modulo("4")', fonte)
 

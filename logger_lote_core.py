@@ -146,3 +146,91 @@ def analisar_lote(arquivos, limiar_min_mca=None):
         ["_ordem", "Galaxia ID"], kind="stable"
     ).drop(columns=["_ordem"]).reset_index(drop=True)
     return df, detalhes
+
+
+def catalogar_historicos(arquivos):
+    """Importa vários históricos para consulta por seletor, SEM analisá-los todos.
+
+    Retorna (catalogo, origens, falhas). Cada chave corresponde a um único
+    Galaxia ID ou, quando ausente, a um arquivo identificado explicitamente
+    como tal. A interpretação é executada apenas depois que o operador escolhe
+    um equipamento, na interface Streamlit.
+    """
+    if not arquivos:
+        raise ErroBaseLogger("Envie pelo menos um histórico.")
+    if len(arquivos) > MAX_ARQUIVOS:
+        raise ErroBaseLogger(
+            f"Limite de {MAX_ARQUIVOS} arquivos por importação."
+        )
+    partes = defaultdict(list)
+    origens = defaultdict(set)
+    falhas = []
+    arquivos_sem_id = 0
+    for nome, conteudo in arquivos:
+        try:
+            base = ler_arquivo(nome, conteudo)
+            if base.empty:
+                raise ErroBaseLogger("A planilha está vazia.")
+            campo = coluna_id(base)
+            if campo is None:
+                # Sem Galaxia ID não há como garantir identidade entre arquivos.
+                # Cada histórico fica isolado, inclusive com nomes repetidos.
+                arquivos_sem_id += 1
+                titulo = "Arquivo: " + Path(nome).stem
+                identificador = titulo
+                n = 2
+                while identificador in partes:
+                    identificador = f"{titulo} ({n})"
+                    n += 1
+                partes[identificador].append(base)
+                origens[identificador].add(nome)
+            else:
+                ids = ids_disponiveis(base)
+                if not ids:
+                    raise ErroBaseLogger(
+                        "A coluna Galaxia ID está presente, mas não contém IDs válidos."
+                    )
+                for identificador in ids:
+                    mascara = (
+                        base[campo].astype(str).str.strip()
+                        .str.replace(r"\.0$", "", regex=True)
+                        .eq(identificador)
+                    )
+                    fatia = base.loc[mascara].copy()
+                    if not fatia.empty:
+                        partes[identificador].append(fatia)
+                        origens[identificador].add(nome)
+        except (ErroBaseLogger, ValueError, KeyError, OSError) as exc:
+            falhas.append(f"{nome}: {exc}")
+    if not partes:
+        raise ErroBaseLogger(
+            "Nenhum histórico válido foi identificado. "
+            + ("Erros: " + " | ".join(falhas[:3]) if falhas else "")
+        )
+    if len(partes) > MAX_LOGGERS_LOTE:
+        raise ErroBaseLogger(
+            f"Foram identificados {len(partes)} históricos. "
+            f"Limite: {MAX_LOGGERS_LOTE} equipamentos por importação."
+        )
+    catalogo = {
+        identificador: pd.concat(blocos, ignore_index=True, sort=False)
+        for identificador, blocos in sorted(partes.items())
+    }
+    return catalogo, {
+        identificador: sorted(arquivos_fonte)
+        for identificador, arquivos_fonte in origens.items()
+    }, falhas
+
+
+def analisar_selecionado(catalogo, identificador, limiar_min_mca=None):
+    """Executa o diagnóstico SOMENTE para o logger selecionado."""
+    if identificador not in catalogo:
+        raise ErroBaseLogger(
+            "Selecione um logger disponível nos históricos importados."
+        )
+    fonte = catalogo[identificador]
+    # Um arquivo sem ID fica rotulado por seu nome, sem presumir ID.
+    id_real = None if identificador.startswith("Arquivo: ") else identificador
+    serie, coluna, _ = extrair_historico(fonte, id_real)
+    resultado = diagnosticar(serie, limiar_min_mca=limiar_min_mca)
+    return serie, coluna, resultado

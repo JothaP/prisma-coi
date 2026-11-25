@@ -28,7 +28,7 @@ from logger_monitor_core import (
 from logger_comportamento_core import (
     diagnosticar, extrair_historico, ids_disponiveis,
 )
-from logger_lote_core import analisar_lote
+from logger_lote_core import catalogar_historicos, analisar_selecionado
 
 exigir_acesso_modulo("4")
 if not verificar_autenticacao():
@@ -394,8 +394,10 @@ def _monitor():
 
 
 @st.cache_data(ttl=600, max_entries=3, show_spinner=False)
-def _avaliar_upload_lote(arquivos, limite):
-    return analisar_lote(arquivos, limiar_min_mca=limite)
+def _catalogar_uploads_historicos(arquivos):
+    # Somente leitura e agrupamento: o diagnóstico é calculado para o ID
+    # selecionado depois, sem processar desnecessariamente todo o catálogo.
+    return catalogar_historicos(arquivos)
 
 
 def _campo_limite_local(sufixo):
@@ -423,7 +425,7 @@ def _campo_limite_local(sufixo):
 
 
 def _mostrar_diagnostico(dados, diagnostico, logger_id=None):
-    """Apresentação compartilhada entre análise individual e em lote."""
+    """Exibe somente o diagnóstico do logger escolhido no seletor."""
     st.caption(
         f"Logger: {logger_id or 'identificador não disponível'} · "
         f"Última leitura do arquivo: "
@@ -536,158 +538,100 @@ def _mostrar_diagnostico(dados, diagnostico, logger_id=None):
         "⬇️ Exportar diagnóstico individual (TXT)",
         data=texto.encode("utf-8"),
         file_name="analise_comportamento_logger.txt",
-        mime="text/plain", key=f"m4_logger_download_analisador_{'lote' if logger_id else 'individual'}",
+        mime="text/plain", key="m4_logger_download_analisador_selecionado",
     )
-
-
-def _comportamento_individual():
-    arquivo = st.file_uploader(
-        "Histórico de medições (XLSX, XLS ou CSV)",
-        type=["xlsx", "xls", "csv"],
-        key="m4_logger_historico",
-    )
-    if arquivo is None:
-        st.info("Envie a série histórica do logger para iniciar.")
-        return
-    limite = _campo_limite_local("individual")
-    try:
-        base = _ler_upload(arquivo.name, arquivo.getvalue())
-        ids = ids_disponiveis(base)
-        escolhido = None
-        if len(ids) > 1:
-            escolhido = st.selectbox(
-                "O arquivo contém vários loggers. Selecione um Galaxia ID:",
-                ids, key="m4_logger_id_historico",
-            )
-        elif len(ids) == 1:
-            escolhido = ids[0]
-            st.caption(f"Galaxia ID identificado: {escolhido}")
-        dados, nome_coluna, logger_id = extrair_historico(base, escolhido)
-        diagnostico = diagnosticar(dados, unidade="mca", limiar_min_mca=limite)
-    except (ErroBaseLogger, ValueError, KeyError, ImportError, OSError) as erro:
-        st.error(f"Não foi possível analisar o histórico: {erro}")
-        return
-    st.caption(
-        f"Coluna utilizada: {nome_coluna}. Confirme que a exportação "
-        "apresenta a pressão em mca; nenhuma conversão automática de bar é feita."
-    )
-    _mostrar_diagnostico(dados, diagnostico, logger_id)
-
-
-def _comportamento_lote():
-    st.caption(
-        "Importe vários históricos de uma vez, incluindo arquivos com diversos "
-        "Galaxia ID. Cada logger será analisado de forma independente. "
-        "Arquivos do mesmo ID serão combinados; arquivos sem ID "
-        "receberão identificação pelo nome do arquivo."
-    )
-    arquivos = st.file_uploader(
-        "Históricos para análise em lote (XLSX, XLS ou CSV)",
-        type=["xlsx", "xls", "csv"],
-        accept_multiple_files=True,
-        key="m4_logger_historicos_lote",
-    )
-    if not arquivos:
-        st.info("Selecione vários históricos ou um arquivo com diversos loggers.")
-        return
-    limite = _campo_limite_local("lote")
-    if limite is not None:
-        st.warning(
-            "O mesmo limite mínimo operacional informado será aplicado "
-            "a TODOS os equipamentos do lote. Confirme sua aplicabilidade."
-        )
-    try:
-        with st.spinner("Avaliando separadamente os históricos por Galaxia ID..."):
-            panorama, detalhes = _avaliar_upload_lote(
-                _arquivos(arquivos), limite
-            )
-    except (ErroBaseLogger, ValueError, KeyError, OSError) as erro:
-        st.error(f"Não foi possível analisar o lote: {erro}")
-        return
-
-    total_avaliados = len(detalhes)
-    e1, e2, e3, e4, e5 = st.columns(5)
-    e1.metric("Analisados", total_avaliados)
-    e2.metric("Alta prioridade", int((panorama["Prioridade"] == "Alta prioridade").sum()))
-    e3.metric("Atenção", int((panorama["Prioridade"] == "Atenção").sum()))
-    e4.metric("Acima do padrão", int((panorama["Direção"] == "Acima do padrão").sum()))
-    e5.metric(
-        "Inconclusivos / erros",
-        int(panorama["Prioridade"].isin(["Referência insuficiente", "Não avaliado"]).sum()),
-    )
-    st.caption(
-        "A prioridade é de INVESTIGAÇÃO, não diagnóstico confirmado de falta de água. "
-        "Uma pressão acima do habitual não é automaticamente classificada como crítica."
-    )
-    fl1, fl2 = st.columns(2)
-    with fl1:
-        prioridades = st.multiselect(
-            "Filtrar por prioridade",
-            sorted(panorama["Prioridade"].dropna().unique()),
-            key="m4_logger_lote_prioridades",
-        )
-    with fl2:
-        direcoes = st.multiselect(
-            "Filtrar por direção do desvio",
-            sorted(panorama["Direção"].dropna().unique()),
-            key="m4_logger_lote_direcoes",
-        )
-    tabela = panorama
-    if prioridades:
-        tabela = tabela[tabela["Prioridade"].isin(prioridades)]
-    if direcoes:
-        tabela = tabela[tabela["Direção"].isin(direcoes)]
-    st.dataframe(
-        tabela, use_container_width=True, hide_index=True,
-        column_config={
-            "Última pressão (mca)": st.column_config.NumberColumn(format="%.2f"),
-            "Mediana do horário (mca)": st.column_config.NumberColumn(format="%.2f"),
-            "Desvio da mediana (mca)": st.column_config.NumberColumn(format="%+.2f"),
-        },
-    )
-    st.download_button(
-        "⬇️ Exportar diagnóstico consolidado (CSV)",
-        data=tabela.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
-        file_name="diagnostico_loggers_lote.csv",
-        mime="text/csv",
-        key="m4_logger_download_lote",
-    )
-    if not detalhes:
-        st.warning("Nenhum histórico do lote continha dados suficientes para diagnóstico.")
-        return
-    st.divider()
-    st.markdown("#### Aprofundar análise individual")
-    ids = [x for x in tabela["Galaxia ID"] if x in detalhes]
-    if not ids:
-        st.info("Os filtros atuais não incluem equipamentos com análise disponível.")
-        return
-    escolhido = st.selectbox(
-        "Selecione o logger para visualizar o diagnóstico e a curva",
-        ids,
-        key="m4_logger_lote_id_selecionado",
-    )
-    dados, diagnostico = detalhes[escolhido]
-    _mostrar_diagnostico(dados, diagnostico, escolhido)
 
 
 def _comportamento():
     st.markdown("### 📉 Análise de Comportamento")
     st.caption(
-        "Análise do comportamento hidráulico observado: desvio histórico do "
-        "horário, tendência recente, persistência e possíveis recuperações. "
-        "Os resultados são indicativos e devem ser confrontados com o "
-        "contexto operacional do ponto."
+        "Importe vários históricos de uma única vez e utilize o seletor "
+        "para consultar o diagnóstico de cada logger. A ferramenta analisa "
+        "somente o equipamento selecionado, sem misturar suas medições com "
+        "as dos demais."
     )
-    modo = st.radio(
-        "Modalidade",
-        ["Individual", "Em lote"],
-        horizontal=True,
-        key="m4_logger_modalidade_comportamento",
+    arquivos = st.file_uploader(
+        "Importar históricos de loggers (XLSX, XLS ou CSV)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        key="m4_logger_historicos_seletor",
+        help=(
+            "Permite enviar vários arquivos ou um arquivo com diversos "
+            "Galaxia ID. Depois, selecione o equipamento desejado."
+        ),
     )
-    if modo == "Individual":
-        _comportamento_individual()
-    else:
-        _comportamento_lote()
+    if not arquivos:
+        st.info(
+            "Selecione um ou mais arquivos de históricos para "
+            "habilitar o seletor de loggers."
+        )
+        return
+
+    try:
+        with st.spinner("Organizando históricos por Galaxia ID..."):
+            catalogo, origens, falhas = _catalogar_uploads_historicos(
+                _arquivos(arquivos)
+            )
+    except (ErroBaseLogger, ValueError, KeyError, OSError) as erro:
+        st.error(f"Não foi possível importar os históricos: {erro}")
+        return
+
+    st.caption(
+        f"{len(arquivos)} arquivo(s) enviado(s) · "
+        f"{len(catalogo)} histórico(s) identificado(s). "
+        "Os dados permanecem disponíveis enquanto os arquivos estiverem "
+        "selecionados nesta sessão."
+    )
+    if falhas:
+        st.warning(
+            f"{len(falhas)} arquivo(s) não puderam ser interpretados. "
+            "Os demais históricos permanecem disponíveis."
+        )
+        with st.expander("Ver erros de importação"):
+            for falha in falhas:
+                st.write(falha)
+
+    ids = list(catalogo)
+    escolhido = st.selectbox(
+        "Selecione o logger para analisar (Galaxia ID)",
+        ids,
+        key="m4_logger_seletor_comportamento",
+        help=(
+            "O diagnóstico e o gráfico abaixo se referem somente ao ID "
+            "escolhido. Digite parte do identificador para localizá-lo."
+        ),
+    )
+    if escolhido is None:
+        return
+    if escolhido.startswith("Arquivo: "):
+        st.info(
+            "Este histórico não contém um Galaxia ID identificado. "
+            "O nome do arquivo é usado apenas como referência de seleção; "
+            "confirme a origem do equipamento."
+        )
+    fontes = origens.get(escolhido, [])
+    st.caption(
+        f"Histórico selecionado: **{escolhido}** · "
+        f"arquivo(s) correspondente(s): {', '.join(fontes)}"
+    )
+    limite = _campo_limite_local("seletor")
+
+    try:
+        dados, nome_coluna, diagnostico = analisar_selecionado(
+            catalogo, escolhido, limiar_min_mca=limite
+        )
+    except (ErroBaseLogger, ValueError, KeyError, TypeError, IndexError) as erro:
+        st.error(f"Não foi possível analisar o logger {escolhido}: {erro}")
+        return
+
+    st.caption(
+        f"Coluna de pressão utilizada: {nome_coluna}. "
+        "Confirme que os valores originais estão em mca. "
+        "A ferramenta não converte automaticamente valores de bar."
+    )
+    _mostrar_diagnostico(dados, diagnostico, escolhido)
+
+
 
 with st.sidebar:
     st.markdown("### 📡 Análise de Logger")
