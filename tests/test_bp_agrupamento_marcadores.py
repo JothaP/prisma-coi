@@ -41,7 +41,7 @@ class TesteClustersBaixaPressao(unittest.TestCase):
             1: "COR_ALTA_PRESSAO",
         }
         for rank, nome in nomes.items():
-            match = re.search(r"^" + nome + r'\\s*=\\s*"(#[0-9A-Fa-f]{6})"',
+            match = re.search(r"^" + nome + r'\s*=\s*"(#[0-9A-Fa-f]{6})"',
                               mapa, flags=re.MULTILINE)
             self.assertIsNotNone(match, nome)
             self.assertEqual(CORES_FAIXAS[rank], match.group(1))
