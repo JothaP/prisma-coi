@@ -45,6 +45,7 @@ from m8_consulta_ampliada import (
     interpretar_termos_equipamentos,
     pontos_matriculas_poligono,
 )
+from m8_links_google_maps import extrair_lista_links
 
 st.set_page_config(
     page_title="Consulta Operacional | COI",
@@ -1708,6 +1709,87 @@ def exibir_consulta_operacional() -> None:
             use_container_width=True,
         )
 
+    # O extrator fica antes da entrada manual para poder preencher
+    # m8_coordenadas_pesquisa antes da criacao do respectivo widget Streamlit.
+    with st.expander("🔗 Extrair coordenadas de links do Google Maps", expanded=False):
+        with st.form("m8_links_google_maps"):
+            links_digitados = st.text_area(
+                "Links do Google Maps — um por linha",
+                key="m8_links_google_maps_entrada",
+                height=135,
+                placeholder=(
+                    "https://maps.app.goo.gl/...\n"
+                    "https://www.google.com/maps/place/..."
+                ),
+                help="Cole ate 100 links. Links encurtados sao resolvidos automaticamente.",
+            )
+            aceitar_centro = st.checkbox(
+                "Aceitar coordenadas do centro do mapa, se não houver local marcado",
+                value=False,
+                key="m8_links_aceitar_centro",
+                help="O centro do mapa pode ser diferente do local de interesse.",
+            )
+            extrair_links = st.form_submit_button(
+                "🔗 Extrair coordenadas e localizar no mapa",
+                use_container_width=True,
+            )
+
+        if extrair_links:
+            try:
+                with st.spinner("Interpretando links do Google Maps..."):
+                    extracoes = extrair_lista_links(
+                        links_digitados, aceitar_centro=aceitar_centro
+                    )
+            except ValueError as erro:
+                st.error(str(erro))
+            else:
+                st.session_state["m8_links_resultados"] = extracoes
+                coordenadas_importadas = [
+                    item["coordenadas"] for item in extracoes
+                    if item["status"] == "OK"
+                ]
+                if coordenadas_importadas:
+                    st.session_state["m8_coordenadas_pesquisa"] = "\n".join(
+                        f"{lat:.8f}, {lon:.8f}"
+                        for lat, lon in coordenadas_importadas
+                    )
+                    st.session_state["m8_ponto_pesquisado"] = tuple(coordenadas_importadas)
+                    st.session_state["m8_integrado_versao_mapa"] = (
+                        st.session_state.get("m8_integrado_versao_mapa", 0) + 1
+                    )
+                    st.rerun()
+                st.error("Nenhum link apresentou coordenadas válidas.")
+
+    resultados_links = st.session_state.get("m8_links_resultados") or []
+    if resultados_links:
+        quantidade_ok = sum(item["status"] == "OK" for item in resultados_links)
+        quantidade_falhas = len(resultados_links) - quantidade_ok
+        st.caption(
+            f"Links interpretados: {quantidade_ok} de {len(resultados_links)}. "
+            f"Os marcadores seguem a ordem dos links válidos (P1 a P{quantidade_ok})."
+            if quantidade_ok else "Nenhum link pôde ser convertido em coordenada."
+        )
+        if quantidade_falhas:
+            st.warning(
+                f"{quantidade_falhas} link(s) não puderam ser interpretados. "
+                "Consulte o diagnóstico abaixo."
+            )
+        with st.expander("Resultado da extração de links", expanded=quantidade_falhas > 0):
+            st.dataframe(
+                pd.DataFrame([{
+                    "Linha": item["linha"],
+                    "Ponto": item["ponto"],
+                    "Situação": item["status"],
+                    "Coordenadas": (
+                        f"{item['coordenadas'][0]:.8f}, {item['coordenadas'][1]:.8f}"
+                        if item["coordenadas"] is not None else ""
+                    ),
+                    "Origem": item["origem"],
+                    "Diagnóstico": item["erro"],
+                } for item in resultados_links]),
+                hide_index=True, use_container_width=True,
+            )
+
     with st.form("m8_busca_coordenadas"):
         st.markdown("**📍 Localizar ponto por coordenadas**")
         coordenadas_digitadas = st.text_area(
@@ -1730,6 +1812,7 @@ def exibir_consulta_operacional() -> None:
         except ValueError as erro:
             st.error(str(erro))
         else:
+            st.session_state.pop("m8_links_resultados", None)
             st.session_state["m8_ponto_pesquisado"] = pontos_encontrados
             st.session_state["m8_integrado_versao_mapa"] = (
                 st.session_state.get("m8_integrado_versao_mapa", 0) + 1
@@ -1752,6 +1835,7 @@ def exibir_consulta_operacional() -> None:
         with col_apagar:
             if st.button("Limpar pontos", key="m8_limpar_ponto"):
                 st.session_state.pop("m8_ponto_pesquisado", None)
+                st.session_state.pop("m8_links_resultados", None)
                 st.session_state["m8_integrado_versao_mapa"] = (
                     st.session_state.get("m8_integrado_versao_mapa", 0) + 1
                 )
