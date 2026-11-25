@@ -498,6 +498,43 @@ with st.sidebar:
     if st.button("🏠 Menu Principal", use_container_width=True):
         st.switch_page("app.py")
     st.divider()
+    # O manual oficial fica versionado no repositório, sem links públicos
+    # ou armazenamento fora do PRISMA.
+    caminho_manual = (
+        Path(__file__).resolve().parent.parent
+        / "Manuais"
+        / "Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf"
+    )
+    if caminho_manual.is_file():
+        try:
+            bytes_manual = caminho_manual.read_bytes()
+            if not bytes_manual.startswith(b"%PDF"):
+                raise ValueError("O arquivo do manual não é um PDF válido.")
+            st.download_button(
+                "📘 Baixar manual de utilização (PDF)",
+                data=bytes_manual,
+                file_name="Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+                key="btn_download_manual_analise_logger",
+            )
+        except (OSError, ValueError):
+            st.button(
+                "📘 Manual indisponível",
+                disabled=True,
+                use_container_width=True,
+                key="btn_manual_indisponivel",
+            )
+            st.caption("Falha ao carregar o manual. Verifique o arquivo em Manuais/.")
+    else:
+        st.button(
+            "📘 Baixar manual de utilização (PDF)",
+            disabled=True,
+            use_container_width=True,
+            key="btn_manual_nao_publicado",
+        )
+        st.caption("Manual ainda não publicado em Manuais/.")
+    st.divider()
     st.caption(
         "Análises por upload, sem gravação de arquivos no PRISMA. "
         "Os resultados descrevem somente os dados enviados."
