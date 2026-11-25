@@ -16,7 +16,7 @@ tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
 names = {
     "_popup_cliente", "_popup_ativo", "_m8_formatar_cota",
     "_m8_rótulo_html", "_m8_adicionar_rotulo", "_m8_mapa_unificado",
-    "_m8_interpretar_coordenadas",
+    "_m8_interpretar_coordenadas", "_m8_normalizar_pontos",
 }
 found = [
     node for node in tree.body
@@ -124,7 +124,8 @@ class TestarRotulosModulo8(unittest.TestCase):
         )
         self.assertEqual(mapa.location, [-5.089, -42.801])
         html = mapa.get_root().render()
-        self.assertIn("Ponto pesquisado por coordenadas", html)
+        self.assertIn("P1 — coordenada pesquisada", html)
+        self.assertIn("Ponto P1", html)
         self.assertIn("Cota da superfície:", html)
         self.assertIn("98 m", html)
         self.assertIn("-5.08900000", html)
@@ -134,13 +135,37 @@ class TestarRotulosModulo8(unittest.TestCase):
     def test_busca_coordenadas_e_independente_do_indice_matriculas(self):
         codigo = source.read_text(encoding="utf-8")
         self.assertIn('with st.form("m8_busca_coordenadas"):', codigo)
-        self.assertIn('"m8_ponto_pesquisado"] = ponto_encontrado', codigo)
-        self.assertIn('ponto_pesquisado=ponto_pesquisado', codigo)
+        self.assertIn('"m8_ponto_pesquisado"] = pontos_encontrados', codigo)
+        self.assertIn('ponto_pesquisado=pontos_pesquisados', codigo)
         self.assertIn('st.session_state.pop("m8_ponto_pesquisado", None)', codigo)
         # A pesquisa por equipamentos acrescenta alternativas à mesma
         # condição; não exigir que ponto seja o último termo do if.
-        self.assertIn('or ponto_pesquisado is not None', codigo)
-        self.assertIn('_consultar_proximidade(\n            referencia_ponto, bases, raio', codigo)
+        self.assertIn('or pontos_pesquisados', codigo)
+        self.assertIn('_consultar_proximidade(\n            referencias_pontos, bases, raio', codigo)
+
+    def test_varios_pontos_tem_rotulos_permanentes_e_fit_bounds(self):
+        vazio = pd.DataFrame(columns=["NUM_LIGACAO", "END_LIGACAO", "_lat", "_lon"])
+        pontos = ((-5.1, -42.8), (-5.12, -42.82),
+                  (-5.13, -42.83), (-5.15, -42.85),
+                  (-5.16, -42.86))
+        for flag in (True, False):
+            mapa = namespace["_m8_mapa_unificado"](
+                vazio, [], 750, [], [], None, None, {},
+                exibir_rotulos=flag, ponto_pesquisado=pontos,
+            )
+            html = mapa.get_root().render()
+            for indice in range(1, 6):
+                self.assertIn(f"P{indice}", html)
+                self.assertIn(f"Ponto P{indice}", html)
+            self.assertIn("fitBounds", html)
+            self.assertEqual(
+                sum(
+                    isinstance(child, folium.Marker)
+                    and any(isinstance(v, folium.Popup)
+                            for v in child._children.values())
+                    for child in mapa._children.values()
+                ), 5
+            )
 
     def test_toggle_recria_o_mapa_sem_alterar_a_consulta(self):
         raw = source.read_text(encoding="utf-8")
