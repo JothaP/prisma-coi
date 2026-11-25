@@ -7,6 +7,7 @@ on:
       - 'm8_consulta_ampliada.py'
       - 'tests/test_m8_busca_ativos_matriculas_area.py'
       - 'tests/test_m8_coordenadas_unificadas.py'
+      - 'tests/test_m8_matriculas_mais_proximas.py'
       - 'tests/test_modulo8_rotulos_marcadores.py'
       - '.github/workflows/testar-rotulos-modulo8.yml'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - 'tests/test_modulo8_rotulos_marcadores.py'
       - 'tests/test_m8_busca_ativos_matriculas_area.py'
       - 'tests/test_m8_coordenadas_unificadas.py'
+      - 'tests/test_m8_matriculas_mais_proximas.py'
       - '.github/workflows/testar-rotulos-modulo8.yml'
   workflow_dispatch:
 
@@ -41,3 +43,5 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_m8_busca_ativos_matriculas_area.py' -v
       - name: Testar coordenadas em campo unico
         run: python -m unittest discover -s tests -p 'test_m8_coordenadas_unificadas.py' -v
+      - name: Testar matricula mais proxima de cada ponto
+        run: python -m unittest discover -s tests -p 'test_m8_matriculas_mais_proximas.py' -v
