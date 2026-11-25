@@ -39,7 +39,10 @@ def _valores(df, coluna, padrao=""):
 def numeros(serie):
     """Conversão decimal PT-BR sem converter valor vazio em pressão zero."""
     s = serie.astype(str).str.strip().str.replace(r"\s+", "", regex=True)
-    s = s.str.replace(r"(?<=\d)\.(?=\d{3}(?:,|$))", "", regex=True)
+    # Um ponto isolado é separador DECIMAL (1.234 = 1,234 mca).
+    # Havendo ponto e vírgula juntos, o ponto separa milhares (1.234,56).
+    com_ponto_e_virgula = s.str.contains(".", regex=False) & s.str.contains(",", regex=False)
+    s = s.where(~com_ponto_e_virgula, s.str.replace(".", "", regex=False))
     s = s.str.replace(",", ".", regex=False)
     return pd.to_numeric(s, errors="coerce").replace([np.inf, -np.inf], np.nan)
 
