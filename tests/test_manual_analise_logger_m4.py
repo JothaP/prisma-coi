@@ -5,7 +5,7 @@ import hashlib
 
 ROOT=Path(__file__).resolve().parents[1]
 PAGINA=ROOT/"pages"/"4_4_Analise_de_Logger.py"
-MANUAL=ROOT/"Manuais"/"Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf"
+MANUAL=ROOT/"manuais"/"Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf"
 SHA256_ORIGINAL="0fc4a60d649c0b6ce0fb41807ab0ae989658966118ccd42b767c9a26b13868d7"
 
 
@@ -13,7 +13,7 @@ class TesteManualSidebar(unittest.TestCase):
     def test_sidebar_faz_download_de_pdf_local_sem_url_externa(self):
         fonte=PAGINA.read_text(encoding="utf-8")
         self.assertIn('Path(__file__).resolve().parent.parent', fonte)
-        self.assertIn('"Manuais"', fonte)
+        self.assertIn('"manuais"', fonte)
         self.assertIn('"Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf"', fonte)
         self.assertIn("caminho_manual.read_bytes()", fonte)
         self.assertIn('bytes_manual.startswith(b"%PDF")', fonte)
