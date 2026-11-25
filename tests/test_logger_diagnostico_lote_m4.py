@@ -126,6 +126,19 @@ class TesteInterpretacaoOperacional(unittest.TestCase):
         with self.assertRaises(ValueError):
             diagnosticar(dados, limiar_min_mca=-5)
 
+    def test_ultima_pressao_habitual_com_queda_recente_ainda_exige_monitoramento(self):
+        dados = serie_base(valor=12, ultimo=12)
+        dados.loc[len(dados)] = {
+            "data": pd.Timestamp("2026-11-25 10:00"), "pressao": 25
+        }
+        dados.loc[len(dados)] = {
+            "data": pd.Timestamp("2026-11-25 10:10"), "pressao": 12
+        }
+        resp = diagnosticar(dados.sort_values("data").reset_index(drop=True))
+        self.assertEqual(resp["direcao"], "Dentro do padrão")
+        self.assertEqual(resp["tendencia"], "Queda recente")
+        self.assertEqual(resp["prioridade"], "Monitorar")
+
     def test_leituras_sem_cobertura_nao_confirmam_estabilidade(self):
         dados = serie_base(valor=12, ultimo=12)
         resp = diagnosticar(dados)
