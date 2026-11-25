@@ -502,7 +502,7 @@ with st.sidebar:
     # ou armazenamento fora do PRISMA.
     caminho_manual = (
         Path(__file__).resolve().parent.parent
-        / "Manuais"
+        / "manuais"
         / "Manual_de_Uso_Analise_de_Logger_PRISMA_COI_Aegea.pdf"
     )
     if caminho_manual.is_file():
@@ -525,7 +525,7 @@ with st.sidebar:
                 use_container_width=True,
                 key="btn_manual_indisponivel",
             )
-            st.caption("Falha ao carregar o manual. Verifique o arquivo em Manuais/.")
+            st.caption("Falha ao carregar o manual. Verifique o arquivo em manuais/.")
     else:
         st.button(
             "📘 Baixar manual de utilização (PDF)",
@@ -533,7 +533,7 @@ with st.sidebar:
             use_container_width=True,
             key="btn_manual_nao_publicado",
         )
-        st.caption("Manual ainda não publicado em Manuais/.")
+        st.caption("Manual ainda não publicado em manuais/.")
     st.divider()
     st.caption(
         "Análises por upload, sem gravação de arquivos no PRISMA. "
