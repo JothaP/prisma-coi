@@ -166,3 +166,26 @@ with col3:
         st.switch_page(
             "pages/4_3_Cards_Operacionais.py"
         )
+
+# ============================================================
+# 4.4 — ANÁLISE DE LOGGER
+# ============================================================
+
+st.divider()
+
+col_logger, _ = st.columns([1, 2])
+with col_logger:
+    st.markdown("### 📡 Análise de Logger")
+    st.write(
+        "Monitor de Variação para comparar duas bases e Análise de "
+        "Comportamento para diagnosticar o histórico de pressão."
+    )
+    st.caption("Status: **Ativo**")
+    st.write("")
+    if st.button(
+        "Acessar Análise de Logger",
+        type="primary",
+        use_container_width=True,
+        key="btn_analise_logger",
+    ):
+        st.switch_page("pages/4_4_Analise_de_Logger.py")
