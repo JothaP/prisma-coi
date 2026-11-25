@@ -18,7 +18,7 @@ MAPA = ROOT / "pages" / "1_Baixa_Pressao.py"
 class TesteClustersBaixaPressao(unittest.TestCase):
     def test_limites_de_cinco_faixas_sem_media(self):
         casos = (
-            (0, 5), (0.001, 4), (5, 4), (5.001, 3),
+            (-1, 4), (0, 5), (0.001, 4), (5, 4), (5.001, 3),
             (9.999, 3), (10, 2), (15, 2), (15.001, 1),
         )
         for pressao, esperado in casos:
@@ -26,7 +26,7 @@ class TesteClustersBaixaPressao(unittest.TestCase):
                 self.assertEqual(prioridade_pressao_mca(pressao), esperado)
 
     def test_valores_invalidos_bloqueados(self):
-        for pressao in (-1, float("nan"), float("inf"), "abc"):
+        for pressao in (float("nan"), float("inf"), "abc"):
             with self.subTest(pressao=pressao):
                 with self.assertRaises(ValueError):
                     prioridade_pressao_mca(pressao)
