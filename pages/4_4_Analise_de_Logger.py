@@ -128,6 +128,25 @@ def _exibir_detalhes_logger(dados):
             str(row["MedicaoEm_Atual"]) if pd.notna(row["MedicaoEm_Atual"]) else "—"
         ),
     })
+    # Contexto da consulta original: comparar a pressão do logger à média
+    # da última leitura dos OUTROS loggers do mesmo município.
+    if pd.notna(row.get("Cidade")) and pd.notna(row.get("Pressao_Atual")):
+        referencia_cidade = dados.loc[
+            (dados["Cidade"] == row["Cidade"])
+            & (dados["Galaxia ID"] != selecionado)
+            & dados["Pressao_Atual"].notna()
+        ]
+        if not referencia_cidade.empty:
+            media_cidade = referencia_cidade["Pressao_Atual"].mean()
+            diferenca_cidade = row["Pressao_Atual"] - media_cidade
+            st.info(
+                f"Comparativo municipal: pressão do logger "
+                f"{fnumero(diferenca_cidade, com_sinal=True)} em relação "
+                f"à média de {len(referencia_cidade)} outro(s) logger(s) "
+                f"de {row['Cidade']} ({fnumero(media_cidade)}). "
+                "Comparação de últimas leituras disponíveis, "
+                "que podem ter horários diferentes."
+            )
     st.link_button("🗺️ Abrir localização no Google Maps", _mapa_url(row))
     datas = []
     if pd.notna(row["MedicaoEm_Anterior"]) and pd.notna(row["Pressao_Anterior"]):
