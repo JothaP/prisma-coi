@@ -85,7 +85,7 @@ class TesteClustersBaixaPressao(unittest.TestCase):
         self.assertIn("key=\"mapa_principal_pressao\"", texto)
         self.assertIn("bp_pressure_rank=prioridade_pressao_mca(pressao)", texto)
         self.assertIn("bp_pressure_mca=pressao", texto)
-        self.assertIn('"os agrupamentos mostram a pressão média em MCA."', texto)
+        self.assertIn('O **número** do grupo é a média das medições em MCA;', texto)
         self.assertIn("bp-cluster-unidade", texto)
         self.assertIn("if modo_visualizacao == \"Medições individuais\" and mostrar_rotulos:",texto)
 
