@@ -22,7 +22,8 @@ if RAIZ not in sys.path:
 
 from auth import exigir_acesso_modulo, verificar_autenticacao
 from logger_monitor_core import (
-    ErroBaseLogger, comparar_bases, consolidar_arquivos, ler_arquivo,
+    ErroBaseLogger, ler_arquivo, preparar_medicoes, mesclar_historico,
+    resumir_historico, historico_logger,
 )
 from logger_comportamento_core import (
     diagnosticar, extrair_historico, ids_disponiveis,
@@ -45,13 +46,6 @@ def fnumero(valor, unidade="mca", com_sinal=False):
 
 def _arquivos(uploaded):
     return tuple((f.name, f.getvalue()) for f in uploaded)
-
-
-@st.cache_data(ttl=300, max_entries=5, show_spinner=False)
-def _comparar_uploads(antes, depois):
-    base_anterior = consolidar_arquivos(antes)
-    base_atual = consolidar_arquivos(depois)
-    return comparar_bases(base_anterior, base_atual), len(base_anterior), len(base_atual)
 
 
 @st.cache_data(ttl=300, max_entries=6, show_spinner=False)
@@ -85,7 +79,7 @@ def _mapa_url(registro):
     )
 
 
-def _exibir_detalhes_logger(dados):
+def _exibir_detalhes_logger(dados, historico):
     st.divider()
     st.markdown("#### Consulta individual por Galaxia ID")
     ids = sorted(dados["Galaxia ID"].astype(str).unique().tolist())
@@ -148,62 +142,147 @@ def _exibir_detalhes_logger(dados):
                 "que podem ter horários diferentes."
             )
     st.link_button("🗺️ Abrir localização no Google Maps", _mapa_url(row))
-    datas = []
-    if pd.notna(row["MedicaoEm_Anterior"]) and pd.notna(row["Pressao_Anterior"]):
-        datas.append({"Momento": row["MedicaoEm_Anterior"],
-                      "Pressão (mca)": row["Pressao_Anterior"], "Base": "Anterior"})
-    if pd.notna(row["MedicaoEm_Atual"]) and pd.notna(row["Pressao_Atual"]):
-        datas.append({"Momento": row["MedicaoEm_Atual"],
-                      "Pressão (mca)": row["Pressao_Atual"], "Base": "Posterior"})
-    if datas:
-        grafico = px.line(
-            pd.DataFrame(datas).sort_values("Momento"),
-            x="Momento", y="Pressão (mca)", markers=True,
-            title=f"Leituras reais nas duas bases — {selecionado}",
-            hover_data=["Base"],
-        )
-        grafico.update_layout(hovermode="x unified", height=340)
-        st.plotly_chart(grafico, use_container_width=True)
+    st.markdown("#### Evolução das medições carregadas")
+    serie = historico_logger(historico, selecionado)
+    if serie.empty:
+        st.warning("Este logger não possui medições com pressão e data válidas.")
+        return
     st.caption(
-        "Esses dois registros não constituem histórico suficiente para "
-        "afirmar se a pressão está dentro ou fora do padrão. Para isso, "
-        "utilize o modo Análise de Comportamento."
+        f"{len(serie)} leitura(s) distinta(s) com data e pressão válidas. "
+        "A curva inclui todos os horários carregados nesta sessão; "
+        "as duas últimas leituras são usadas na classificação da variação."
+    )
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Mínima", fnumero(serie["Pressao"].min()))
+    m2.metric("Máxima", fnumero(serie["Pressao"].max()))
+    m3.metric("Média", fnumero(serie["Pressao"].mean()))
+    m4.metric(
+        "Variação 1ª → última",
+        fnumero(serie["Pressao"].iloc[-1] - serie["Pressao"].iloc[0], com_sinal=True)
+        if len(serie) > 1 else "—"
+    )
+    grafico = px.line(
+        serie,
+        x="MedicaoEm", y="Pressao", markers=True,
+        title=f"Variação de pressão — Logger {selecionado}",
+        labels={"MedicaoEm": "Data/hora da medição", "Pressao": "Pressão (mca)"},
+        hover_data={"Arquivo_Origem": True, "MedicaoEm": "|%d/%m/%Y %H:%M"},
+    )
+    grafico.add_hline(
+        y=float(serie["Pressao"].mean()), line_dash="dash",
+        annotation_text="Média das medições", annotation_position="top right",
+    )
+    if len(serie) <= 20:
+        grafico.update_traces(
+            text=[f"{v:.1f}".replace(".", ",") for v in serie["Pressao"]],
+            textposition="top center", mode="lines+markers+text",
+        )
+    grafico.update_layout(hovermode="x unified", height=430)
+    st.plotly_chart(grafico, use_container_width=True)
+    with st.expander("Ver todos os horários carregados"):
+        st.dataframe(
+            serie[["MedicaoEm", "Pressao", "Arquivo_Origem"]].rename(
+                columns={"MedicaoEm": "Horário real", "Pressao": "Pressão (mca)",
+                         "Arquivo_Origem": "Arquivo de origem"}
+            ), hide_index=True, use_container_width=True,
+        )
+    st.caption(
+        "O gráfico representa as leituras presentes nas bases carregadas, "
+        "não uma série contínua de todas as medições do equipamento. "
+        "Para comparar com o padrão histórico diário, utilize Análise de Comportamento."
     )
 
 
 def _monitor():
     st.markdown("### 📈 Monitor de Variação")
     st.caption(
-        "Compare duas exportações feitas em horários diferentes. A ferramenta usa "
-        "o último registro de cada Galaxia ID em cada conjunto, comparando o "
-        "horário efetivo da medição, não o horário de upload."
+        "Carregue bases coletadas em diferentes horários ao longo do dia. "
+        "O monitor acumula as leituras nesta sessão, identifica a variação "
+        "entre os dois últimos horários reais de cada logger e permite "
+        "consultar o gráfico com todos os pontos importados."
     )
-    col_a, col_b = st.columns(2)
-    with col_a:
-        anteriores = st.file_uploader(
-            "1. Base anterior (primeiro horário)",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=True,
-            key="m4_logger_base_anterior",
+
+    if "m4_logger_monitor_historico" not in st.session_state:
+        st.session_state["m4_logger_monitor_historico"] = pd.DataFrame()
+    if "m4_logger_monitor_total_arquivos" not in st.session_state:
+        st.session_state["m4_logger_monitor_total_arquivos"] = 0
+    if "m4_logger_monitor_upload_versao" not in st.session_state:
+        st.session_state["m4_logger_monitor_upload_versao"] = 0
+
+    arquivos = st.file_uploader(
+        "Importar bases de loggers (vários arquivos em um único campo)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        key=f"m4_logger_monitor_upload_{st.session_state['m4_logger_monitor_upload_versao']}",
+        help=(
+            "Selecione várias exportações de horários diferentes ou acrescente "
+            "novas bases conforme o dia avança, clicando em Adicionar bases."
+        ),
+    )
+    col_add, col_clear = st.columns([3, 1])
+    with col_add:
+        adicionar = st.button(
+            "➕ Adicionar bases ao monitoramento",
+            type="primary", use_container_width=True,
+            disabled=not bool(arquivos), key="m4_logger_adicionar_bases",
         )
-    with col_b:
-        posteriores = st.file_uploader(
-            "2. Base posterior (segundo horário)",
-            type=["xlsx", "xls", "csv"],
-            accept_multiple_files=True,
-            key="m4_logger_base_posterior",
+    with col_clear:
+        limpar = st.button(
+            "🗑️ Limpar monitoramento",
+            use_container_width=True,
+            key="m4_logger_limpar_bases",
         )
-    if not anteriores or not posteriores:
-        st.info("Envie pelo menos um arquivo em cada horário para comparar.")
+    if limpar:
+        st.session_state["m4_logger_monitor_historico"] = pd.DataFrame()
+        st.session_state["m4_logger_monitor_total_arquivos"] = 0
+        st.session_state["m4_logger_monitor_upload_versao"] += 1
+        st.rerun()
+
+    if adicionar:
+        novas = []
+        falhas = []
+        with st.spinner("Importando as exportações e verificando horários..."):
+            for arquivo in arquivos:
+                try:
+                    planilha = _ler_upload(arquivo.name, arquivo.getvalue())
+                    novas.append(preparar_medicoes(planilha, arquivo.name))
+                except (ErroBaseLogger, ValueError, KeyError, ImportError, OSError) as exc:
+                    falhas.append(f"{arquivo.name}: {exc}")
+            if novas:
+                st.session_state["m4_logger_monitor_historico"] = mesclar_historico(
+                    st.session_state["m4_logger_monitor_historico"],
+                    pd.concat(novas, ignore_index=True),
+                )
+                st.session_state["m4_logger_monitor_total_arquivos"] += len(novas)
+                st.session_state["m4_logger_monitor_upload_versao"] += 1
+                st.session_state["m4_logger_monitor_ultima_importacao"] = (
+                    f"{len(novas)} arquivo(s) incluído(s)."
+                )
+            if falhas:
+                st.session_state["m4_logger_monitor_falhas"] = falhas
+            else:
+                st.session_state.pop("m4_logger_monitor_falhas", None)
+        if novas:
+            st.rerun()
+
+    if st.session_state.get("m4_logger_monitor_ultima_importacao"):
+        st.success(st.session_state.pop("m4_logger_monitor_ultima_importacao"))
+    for falha in st.session_state.get("m4_logger_monitor_falhas", []):
+        st.error(f"Falha na importação: {falha}")
+
+    historico = st.session_state["m4_logger_monitor_historico"]
+    if historico.empty:
+        st.info(
+            "Selecione uma ou várias bases e clique em **Adicionar bases**. "
+            "Depois, faça novas importações no mesmo campo ao longo do dia "
+            "para atualizar os resultados e os gráficos."
+        )
         return
 
     try:
-        with st.spinner("Lendo bases e cruzando Galaxia ID..."):
-            comparacao, n_antes, n_depois = _comparar_uploads(
-                _arquivos(anteriores), _arquivos(posteriores),
-            )
-    except (ErroBaseLogger, ValueError, KeyError, ImportError, OSError) as erro:
-        st.error(f"Não foi possível comparar as bases: {erro}")
+        comparacao = resumir_historico(historico)
+    except (ErroBaseLogger, ValueError, KeyError, OSError) as erro:
+        st.error(f"Não foi possível analisar as leituras importadas: {erro}")
         return
 
     if comparacao.empty:
@@ -225,14 +304,18 @@ def _monitor():
     ):
         coluna.metric(titulo, valor)
     st.caption(
-        f"Registros únicos por ID: base anterior {n_antes} · base posterior {n_depois}. "
-        "Diferença = pressão posterior − pressão anterior (mca)."
+        f"Arquivos adicionados nesta sessão: "
+        f"{st.session_state['m4_logger_monitor_total_arquivos']} · "
+        f"{len(historico)} registros de logger/horário distintos. "
+        "Variação = pressão da última leitura − pressão da penúltima, "
+        "sempre usando horários de medição diferentes."
+
     )
     if not comparaveis.all():
         st.warning(
-            f"{(~comparaveis).sum()} logger(s) sem comparação válida. "
-            "Veja o motivo na tabela; ausência de dados ou horário sem atualização "
-            "não significa pressão estável."
+            f"{(~comparaveis).sum()} logger(s) ainda sem duas leituras "
+            "comparáveis em horários diferentes ou com dados incompletos. "
+            "Veja o motivo na tabela; ausência de dados não significa estabilidade."
         )
 
     c_reg, c_cid, c_est, c_inst, c_tipo, c_tend = st.columns([1.3,1.5,1,1.1,1.1,1.3])
@@ -268,7 +351,8 @@ def _monitor():
     colunas_tabela = [
         "Galaxia ID", "Cidade", "Regional", "Base", "Tipo_Ponto",
         "Tendencia", "Pressao_Anterior", "Pressao_Atual", "Delta_MCA",
-        "MedicaoEm_Anterior", "MedicaoEm_Atual", "Status", "Estado", "Motivo",
+        "MedicaoEm_Anterior", "MedicaoEm_Atual", "Qtd_Medicoes",
+        "Status", "Estado", "Motivo",
     ]
     tabela = mostrar[colunas_tabela].copy().rename(columns={
         "Tendencia": "Tendência",
@@ -278,6 +362,7 @@ def _monitor():
         "MedicaoEm_Anterior": "Horário anterior",
         "MedicaoEm_Atual": "Horário atual",
         "Tipo_Ponto": "Tipo de ponto",
+        "Qtd_Medicoes": "Horários com medição",
     })
     st.dataframe(
         tabela, hide_index=True, use_container_width=True,
@@ -304,7 +389,7 @@ def _monitor():
             labels={"Delta_MCA":"Variação (mca)","Galaxia ID":"Logger"},
         )
         st.plotly_chart(fig, use_container_width=True)
-    _exibir_detalhes_logger(comparacao)
+    _exibir_detalhes_logger(comparacao, historico)
 
 
 def _comportamento():
