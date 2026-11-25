@@ -38,7 +38,7 @@ def prioridade_pressao_mca(valor: float) -> int:
 
 
 # MarkerCluster recebe a função em JavaScript; somente inteiros de prioridade
-# são transferidos via marker.options.bp_pressure_rank. Os nomes, endereços
+# são transferidos via marker.options.bpPressureRank. Os nomes, endereços
 # e dados dos consumidores nunca entram no HTML dos agrupamentos.
 FUNCAO_ICONE_CLUSTER = r"""
 function (cluster) {
@@ -47,7 +47,7 @@ function (cluster) {
     var semPressao = 0;
     var baixaPressao = 0;
     for (var i = 0; i < filhos.length; i++) {
-        var valor = Number(filhos[i].options.bp_pressure_rank || 1);
+        var valor = Number(filhos[i].options.bpPressureRank || 1);
         if (!Number.isFinite(valor) || valor < 1 || valor > 5) valor = 1;
         piorFaixa = Math.max(piorFaixa, valor);
         if (valor === 5) semPressao++;
