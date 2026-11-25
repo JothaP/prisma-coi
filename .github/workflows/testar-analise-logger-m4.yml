@@ -10,6 +10,8 @@ on:
       - "pages/4_Ferramentas_Operacionais.py"
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
+      - "tests/test_manual_analise_logger_m4.py"
+      - "Manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
   pull_request:
@@ -21,6 +23,8 @@ on:
       - "pages/4_Ferramentas_Operacionais.py"
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
+      - "tests/test_manual_analise_logger_m4.py"
+      - "Manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
 
@@ -45,3 +49,5 @@ jobs:
         run: python -m unittest discover -s tests -p "test_analise_logger_m4.py" -v
       - name: Testar uploads acumulativos e falha de Excel Infinity
         run: python -m unittest discover -s tests -p "test_monitor_logger_incremental_m4.py" -v
+      - name: Testar botao e integridade do PDF institucional quando presente
+        run: python -m unittest discover -s tests -p "test_manual_analise_logger_m4.py" -v
