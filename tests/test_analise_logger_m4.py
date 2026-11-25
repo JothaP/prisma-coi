@@ -42,11 +42,12 @@ class TesteMonitorVariacao(unittest.TestCase):
         self.assertEqual(dados_regional("local não mapeado"), ("Não mapeada", "-", ""))
 
     def test_normalizacao_pressao_decimais_zeros_e_ausentes(self):
-        resultado = numeros(pd.Series(["12,5", "1.234,56", "0", "", "nan", None]))
+        resultado = numeros(pd.Series(["12,5", "1.234,56", "0", "", "nan", None, "1.234"]))
         self.assertEqual(resultado.iloc[0], 12.5)
         self.assertEqual(resultado.iloc[1], 1234.56)
         self.assertEqual(resultado.iloc[2], 0.0)
-        self.assertTrue(resultado.iloc[3:].isna().all())
+        self.assertTrue(resultado.iloc[3:6].isna().all())
+        self.assertAlmostEqual(resultado.iloc[6], 1.234)
 
     def test_comparacao_estrita_e_sem_falso_estavel(self):
         data1 = "25/11/2026 07:00"
