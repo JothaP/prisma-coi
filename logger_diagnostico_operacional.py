@@ -235,6 +235,24 @@ def avaliar_operacao(dados, padrao, limiar_min_mca=None):
                 "a continuidade do comportamento não pode ser assegurada."
             )
 
+    # A leitura pode ter retornado à faixa histórica após uma queda
+    # expressiva: isso requer acompanhamento, mesmo quando o valor FINAL
+    # já é habitual. Não rotular como "sem sinal histórico de queda".
+    if prioridade == "Sem sinal histórico de queda":
+        if recuperou:
+            prioridade = "Monitorar"
+            justificativa = (
+                "Há registros de pressão próxima de zero e recuperação "
+                "observada. Recomenda-se conferir o histórico e a situação "
+                "da rede antes de considerar a condição normalizada."
+            )
+        elif tendencia in ("Queda recente", "Oscilação recente"):
+            prioridade = "Monitorar"
+            justificativa = (
+                "Foram registradas alterações recentes na pressão mesmo "
+                "com a última leitura dentro da faixa habitual."
+            )
+
     if recuperou:
         status = "Recuperação observada"
         recuperacao_texto = (
