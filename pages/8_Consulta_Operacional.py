@@ -151,6 +151,24 @@ def _m8_interpretar_coordenadas(latitude: str, longitude: str) -> tuple[float, f
     )
 
 
+def _m8_interpretar_par_coordenadas(entrada: str) -> tuple[float, float]:
+    """Interpreta um único campo com latitude e longitude em graus decimais."""
+    padrao = (
+        r"\s*(?P<latitude>[+-]?\d{1,3}(?:[.,]\d{1,12})?)"
+        r"\s*(?:[,;]|\s+)\s*"
+        r"(?P<longitude>[+-]?\d{1,3}(?:[.,]\d{1,12})?)\s*;?\s*"
+    )
+    correspondencia = re.fullmatch(padrao, str(entrada or ""))
+    if correspondencia is None:
+        raise ValueError(
+            "Informe latitude e longitude no mesmo campo, separadas por vírgula "
+            "ou espaço. Ex.: -5.14474000, -42.78857000."
+        )
+    return _m8_interpretar_coordenadas(
+        correspondencia.group("latitude"), correspondencia.group("longitude")
+    )
+
+
 def _assinatura(caminho: Path) -> tuple[str, int, int]:
     info = caminho.stat()
     return str(caminho), info.st_size, info.st_mtime_ns
@@ -1582,25 +1600,20 @@ def exibir_consulta_operacional() -> None:
 
     with st.form("m8_busca_coordenadas"):
         st.markdown("**📍 Localizar ponto por coordenadas**")
-        col_lat, col_lon = st.columns(2)
-        with col_lat:
-            latitude_digitada = st.text_input(
-                "Latitude", key="m8_latitude_pesquisa",
-                placeholder="Ex.: -5.0890 ou -5,0890",
-            )
-        with col_lon:
-            longitude_digitada = st.text_input(
-                "Longitude", key="m8_longitude_pesquisa",
-                placeholder="Ex.: -42.8010 ou -42,8010",
-            )
+        coordenadas_digitadas = st.text_input(
+            "Coordenadas (latitude, longitude)",
+            key="m8_coordenadas_pesquisa",
+            placeholder="Ex.: -5.14474000, -42.78857000",
+            help="Também aceita espaço como separador: -5.14474000 -42.78857000.",
+        )
         localizar_ponto = st.form_submit_button(
             "📍 Localizar coordenadas", use_container_width=True,
         )
 
     if localizar_ponto:
         try:
-            ponto_encontrado = _m8_interpretar_coordenadas(
-                latitude_digitada, longitude_digitada
+            ponto_encontrado = _m8_interpretar_par_coordenadas(
+                coordenadas_digitadas
             )
         except ValueError as erro:
             st.error(str(erro))
