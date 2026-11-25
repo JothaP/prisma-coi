@@ -1250,17 +1250,16 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     elif lats:
         centro = [sum(lats) / len(lats), sum(lons) / len(lons)]
         zoom_inicial = 16 if len(clientes) == 1 else 13
+    elif area is not None:
+        centro = [float(area.centroid.y), float(area.centroid.x)]
+        zoom_inicial = 13
     elif foco_equipamentos:
-        # A pesquisa por planta de ativo ou logger enquadra o equipamento
-        # efetivamente cadastrado, sem criar ponto fictício de matrícula.
+        # A busca por planta/logger enquadra o equipamento cadastrado.
         centro = [
             float(foco_equipamentos[0]["_lat"]),
             float(foco_equipamentos[0]["_lon"]),
         ]
         zoom_inicial = 17 if len(foco_equipamentos) == 1 else 12
-    elif area is not None:
-        centro = [float(area.centroid.y), float(area.centroid.x)]
-        zoom_inicial = 13
     else:
         centro = [-5.089, -42.801]
         zoom_inicial = 12
@@ -1495,6 +1494,9 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
     if ponto_pesquisado is not None:
         # Não deixar fit_bounds de matrículas ou desenhos antigos desviar o foco.
         pass
+    elif area is not None:
+        oeste, sul, leste, norte = area.bounds
+        mapa.fit_bounds([[sul, oeste], [norte, leste]], padding=(35, 35), max_zoom=17)
     elif foco_equipamentos and len(foco_equipamentos) > 1:
         latitudes = [float(a["_lat"]) for a in foco_equipamentos]
         longitudes = [float(a["_lon"]) for a in foco_equipamentos]
@@ -1503,9 +1505,6 @@ def _m8_mapa_unificado(clientes, ativos, raio, bairros, influencias, area,
              [max(latitudes), max(longitudes)]],
             padding=(55, 55), max_zoom=17,
         )
-    elif area is not None:
-        oeste, sul, leste, norte = area.bounds
-        mapa.fit_bounds([[sul, oeste], [norte, leste]], padding=(35, 35), max_zoom=17)
     elif len(clientes) > 1:
         mapa.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]],
                         padding=(60, 60), max_zoom=16)
@@ -1772,7 +1771,8 @@ def exibir_consulta_operacional() -> None:
     influencias = []
     arquivo_influencias = _caminho_influencias()
     if arquivo_influencias and (area is not None or not validos.empty
-                               or ponto_pesquisado is not None):
+                               or ponto_pesquisado is not None
+                               or bool(ativos_pesquisados)):
         try:
             todas_influencias = _ler_influencias(_assinatura(arquivo_influencias))
             if not validos.empty:
@@ -1786,6 +1786,13 @@ def exibir_consulta_operacional() -> None:
                 contexto = box(lon_p-.008, lat_p-.008, lon_p+.008, lat_p+.008)
             elif area is not None:
                 contexto = box(*area.bounds).buffer(.008)
+            elif ativos_pesquisados:
+                contexto = box(
+                    min(float(a["_lon"]) for a in ativos_pesquisados)-.008,
+                    min(float(a["_lat"]) for a in ativos_pesquisados)-.008,
+                    max(float(a["_lon"]) for a in ativos_pesquisados)+.008,
+                    max(float(a["_lat"]) for a in ativos_pesquisados)+.008,
+                )
             else:
                 contexto = box(min(validos["_lon"])-.008, min(validos["_lat"])-.008,
                                max(validos["_lon"])+.008, max(validos["_lat"])+.008)
@@ -1832,6 +1839,11 @@ def exibir_consulta_operacional() -> None:
                 area.bounds[0]-.008, area.bounds[1]-.008,
                 area.bounds[2]+.008, area.bounds[3]+.008,
             )
+        elif ativos_pesquisados:
+            oeste = min(float(a["_lon"]) for a in ativos_pesquisados)-.008
+            sul = min(float(a["_lat"]) for a in ativos_pesquisados)-.008
+            leste = max(float(a["_lon"]) for a in ativos_pesquisados)+.008
+            norte = max(float(a["_lat"]) for a in ativos_pesquisados)+.008
         elif not validos.empty:
             oeste, sul = min(validos["_lon"])-.008, min(validos["_lat"])-.008
             leste, norte = max(validos["_lon"])+.008, max(validos["_lat"])+.008
@@ -1839,7 +1851,8 @@ def exibir_consulta_operacional() -> None:
             # Consulta livre: inclui todas as feições dos arquivos encontrados,
             # sem escolher apenas a primeira camada/um único GeoPackage.
             bairros = todas
-        if area is not None or not validos.empty or ponto_pesquisado is not None:
+        if (area is not None or not validos.empty or
+                ponto_pesquisado is not None or ativos_pesquisados):
             # Só enviar ao navegador as feições que cruzem o contexto da
             # análise, mantendo o conjunto completo no cache do servidor.
             bairros = [
