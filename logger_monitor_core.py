@@ -1,20 +1,23 @@
 """Núcleo do Monitor de Variação de loggers (sem dependências do Streamlit).
 
-Duas bases representam dois momentos de coleta. Compara somente leituras
-válidas e cronologicamente posteriores do mesmo Galaxia ID, evitando marcar
-ausência de dados ou timestamps repetidos como pressão estável.
+Múltiplas exportações acumulam leituras por Galaxia ID e timestamp real;
+o panorama compara as duas últimas leituras distintas, preservando todas
+as leituras para o gráfico de evolução no decorrer do dia. O legado
+comparar_bases() continua disponível para comparações pontuais.
 """
 from __future__ import annotations
 
 import io
 import re
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from logger_regionais import dados_regional, normalizar
+from logger_xlsx_fallback import ler_xlsx_xml
 
 
 class ErroBaseLogger(ValueError):
@@ -61,25 +64,37 @@ def datas_medicao(serie):
 
 
 def ler_arquivo(nome, conteudo):
-    """XLSX, XLS, CSV; somente memória, sem armazenamento de bases."""
+    """Lê XLSX, XLS, CSV em memória. XLSX malformado usa XML de contingência."""
     if len(conteudo) > 40 * 1024 * 1024:
         raise ErroBaseLogger("Arquivo acima de 40 MB; divida a base antes de enviar.")
     extensao = Path(nome).suffix.lower()
-    try:
-        if extensao in {".xlsx", ".xls"}:
+    if extensao in {".xlsx", ".xls"}:
+        try:
             return pd.read_excel(io.BytesIO(conteudo))
-        if extensao in {".csv", ".txt"}:
-            for codificacao in ("utf-8-sig", "latin1"):
+        except Exception as erro_excel:
+            if extensao == ".xlsx":
                 try:
-                    texto = conteudo.decode(codificacao)
-                    return pd.read_csv(io.StringIO(texto), sep=None, engine="python")
-                except (UnicodeError, pd.errors.ParserError):
-                    continue
-            raise ErroBaseLogger("Não foi possível interpretar a codificação ou separador do CSV.")
-    except (ValueError, KeyError, OSError, EOFError, zipfile.BadZipFile) as exc:
-        raise ErroBaseLogger(f"Não foi possível ler {nome}: {exc}") from exc
+                    return ler_xlsx_xml(conteudo)
+                except (ValueError, KeyError, OSError, ET.ParseError, zipfile.BadZipFile) as erro_xml:
+                    raise ErroBaseLogger(
+                        f"Não foi possível ler {nome} pelo leitor de Excel nem "
+                        "pela recuperação de dados XLSX. "
+                        f"Erro original: {erro_excel}; recuperação: {erro_xml}"
+                    ) from erro_xml
+            raise ErroBaseLogger(
+                f"Não foi possível ler {nome}: {erro_excel}"
+            ) from erro_excel
+    if extensao in {".csv", ".txt"}:
+        for codificacao in ("utf-8-sig", "latin1"):
+            try:
+                texto = conteudo.decode(codificacao)
+                return pd.read_csv(io.StringIO(texto), sep=None, engine="python")
+            except (UnicodeError, pd.errors.ParserError):
+                continue
+        raise ErroBaseLogger(
+            f"Não foi possível interpretar a codificação ou o separador de {nome}."
+        )
     raise ErroBaseLogger("Formato não suportado. Utilize XLSX, XLS ou CSV.")
-
 
 def classificar_ponto(endereco, nome):
     texto = normalizar(f"{nome} {endereco}")
@@ -89,8 +104,8 @@ def classificar_ponto(endereco, nome):
     return "Ativo" if re.search(r"[A-Za-z]{2,}\s*[-_]?\s*\d+", trecho) else "Residência"
 
 
-def preparar_base(df, origem):
-    """Padroniza uma exportação, mantendo uma última leitura por Galaxia ID."""
+def preparar_medicoes(df, origem):
+    """Padroniza todas as leituras da exportação, sem perder a série temporal."""
     if df.empty:
         raise ErroBaseLogger(f"{origem}: planilha vazia.")
     col_id = _coluna(df, "Galaxia ID", "Galax.ia ID", "ID Galaxia", "ID Logger")
@@ -162,13 +177,97 @@ def preparar_base(df, origem):
     saida = saida[saida["Galaxia ID"].ne("") & ~saida["Galaxia ID"].str.lower().isin(["nan", "none"])]
     if saida.empty:
         raise ErroBaseLogger(f"{origem}: nenhum Galaxia ID válido.")
-    # Mesmo logger duplicado: leitura com data maior prevalece.
-    # Se não houver data válida, ela fica não comparável, nunca estável.
+    # Cada exportação pode conter vários horários do mesmo equipamento.
+    # A deduplicação por (ID, instante) é feita na acumulação, não aqui.
+    return saida.reset_index(drop=True)
+
+
+def preparar_base(df, origem):
+    """Legado de base única: preserva a última leitura de cada Galaxia ID."""
     return (
-        saida.sort_values("MedicaoEm", na_position="first", kind="stable")
+        preparar_medicoes(df, origem)
+        .sort_values("MedicaoEm", na_position="first", kind="stable")
         .drop_duplicates("Galaxia ID", keep="last")
         .reset_index(drop=True)
     )
+
+
+def mesclar_historico(anterior, novo):
+    """Anexa bases por sessão e elimina somente leituras repetidas ID+horário.
+
+    Exportações posteriores do mesmo horário atualizam o registro do ponto.
+    Não usa horário de upload para fabricar avanço de pressão.
+    """
+    frames = [df for df in (anterior, novo) if df is not None and not df.empty]
+    if not frames:
+        raise ErroBaseLogger("Nenhuma medição de logger para analisar.")
+    dados = pd.concat(frames, ignore_index=True)
+    dados = dados.drop_duplicates(
+        ["Galaxia ID", "MedicaoEm"], keep="last"
+    )
+    return (
+        dados.sort_values(["Galaxia ID", "MedicaoEm"], kind="stable", na_position="first")
+        .reset_index(drop=True)
+    )
+
+
+def carregar_historico(arquivos):
+    """Importa quantas exportações forem enviadas, usando as datas reais."""
+    if not arquivos:
+        raise ErroBaseLogger("Selecione uma ou mais bases.")
+    dados = [preparar_medicoes(ler_arquivo(nome, conteudo), nome)
+             for nome, conteudo in arquivos]
+    return mesclar_historico(None, pd.concat(dados, ignore_index=True))
+
+
+def historico_logger(dados, galaxia_id):
+    """Série histórica válida e ordenada para o gráfico de um equipamento."""
+    recorte = dados.loc[
+        dados["Galaxia ID"].astype(str).eq(str(galaxia_id))
+    ].dropna(subset=["MedicaoEm", "Pressao"])
+    return (
+        recorte.sort_values("MedicaoEm", kind="stable")
+        .drop_duplicates("MedicaoEm", keep="last")
+        .reset_index(drop=True)
+    )
+
+
+def resumir_historico(dados):
+    """Variação entre as últimas duas leituras de timestamp distinto por ID.
+
+    A leitura mais recente sem pressão é reportada como não comparável,
+    não é substituída silenciosamente por um valor antigo.
+    """
+    if dados is None or dados.empty:
+        raise ErroBaseLogger("Nenhuma base foi importada.")
+    # Nunca considerar timestamps NaT como medições comparáveis.
+    validas_data = dados.dropna(subset=["MedicaoEm"]).sort_values(
+        ["Galaxia ID", "MedicaoEm"], kind="stable"
+    )
+    atual = validas_data.groupby("Galaxia ID", sort=False).tail(1).copy()
+    anteriores = validas_data.groupby("Galaxia ID", sort=False).tail(2)
+    anterior = anteriores.loc[
+        anteriores.groupby("Galaxia ID").cumcount(ascending=False).eq(1)
+    ].copy()
+    ids_sem_data = dados.loc[
+        ~dados["Galaxia ID"].isin(atual["Galaxia ID"])
+    ].drop_duplicates("Galaxia ID", keep="last")
+    if not ids_sem_data.empty:
+        atual = pd.concat([atual, ids_sem_data], ignore_index=True)
+
+    resultado = comparar_bases(anterior, atual)
+    sem_anterior = resultado["_merge"].eq("right_only")
+    resultado.loc[sem_anterior, "Motivo"] = "Sem duas medições em horários distintos"
+    datas_invalidas = sem_anterior & resultado["MedicaoEm_Atual"].isna()
+    resultado.loc[datas_invalidas, "Motivo"] = "Sem horário de medição válido"
+
+    quantidade = validas_data.groupby("Galaxia ID").size().rename("Qtd_Medicoes")
+    arquivos = dados.groupby("Galaxia ID")["Arquivo_Origem"].nunique().rename("Qtd_Arquivos")
+    resultado = resultado.merge(quantidade, on="Galaxia ID", how="left")
+    resultado = resultado.merge(arquivos, on="Galaxia ID", how="left")
+    resultado["Qtd_Medicoes"] = resultado["Qtd_Medicoes"].fillna(0).astype(int)
+    resultado["Qtd_Arquivos"] = resultado["Qtd_Arquivos"].fillna(0).astype(int)
+    return resultado
 
 
 def consolidar_arquivos(arquivos):
