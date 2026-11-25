@@ -4,7 +4,7 @@ from google.oauth2.service_account import Credentials
 import json
 import pandas as pd
 import folium
-from folium.plugins import Fullscreen
+from folium.plugins import Fullscreen, MarkerCluster
 from streamlit_folium import st_folium
 import os
 import simplekml
@@ -33,6 +33,10 @@ if str(BP_RAIZ_SAI) not in sys.path:
     sys.path.insert(0, str(BP_RAIZ_SAI))
 from sai_pressao_importacao import (
     IndiceDuplicidades, converter_bruta, ler_arquivo,
+)
+from bp_agrupamento_marcadores import (
+    FUNCAO_ICONE_CLUSTER, ZOOM_ROTULOS_INDIVIDUAIS,
+    opcoes_cluster, prioridade_pressao_mca,
 )
 import xml.etree.ElementTree as ET
 
@@ -3357,13 +3361,14 @@ with c_map_faixas:
 with c_map3:
 
     st.checkbox(
-        "Exibir rótulos dos bairros",
+        "Exibir rótulos",
         value=True,
         key="mostrar_rotulos_bp",
         help=(
             "Mostra informações junto aos pins. "
             "No modo por bairro mostra pressão média e quantidade. "
-            "No modo individual mostra a medição daquele ponto."
+            "No modo individual, os valores aparecem a partir do zoom 15; "
+            "os agrupamentos continuam exibindo a quantidade de medições."
         )
     )
 
@@ -3381,6 +3386,13 @@ with c_map4:
         ),
     )
 
+
+if modo_visualizacao == "Medições individuais":
+    st.caption(
+        "Aproxime para dividir os grupos; clique em um agrupamento para ampliar. "
+        "A cor do grupo indica a **faixa de pressão mais crítica** entre suas "
+        "medições, e não a média. Rótulos individuais aparecem no zoom detalhado."
+    )
 
 # Este segundo filtro é EXCLUSIVO do mapa. O filtro geral da sidebar
 # permanece aplicado ao restante da interface.
@@ -3620,6 +3632,16 @@ if not df_mapa.empty:
         # MEDIÇÕES INDIVIDUAIS
         # ====================================================
         if modo_visualizacao == "Medições individuais":
+
+            # O Leaflet agrupa por distância em pixels na tela e desmembra
+            # automaticamente os grupos conforme o zoom. Marcadores de
+            # coordenadas idênticas podem ser abertos em leque (spiderfy).
+            bp_agrupador_individual = MarkerCluster(
+                name="Medições de pressão",
+                control=False,
+                icon_create_function=FUNCAO_ICONE_CLUSTER,
+                **opcoes_cluster(),
+            ).add_to(m)
 
             # A cota é obtida pelo ponto medido, não por interpolação entre
             # medições ou pela média de um bairro. Sem DEM/cobertura, deixa
@@ -3864,8 +3886,11 @@ if not df_mapa.empty:
                         f"{bairro} | "
                         f"{pressao_formatada} MCA | "
                         f"{classificacao}"
-                    )
-                ).add_to(m)
+                    ),
+                    # O agregado lê somente esta prioridade numérica.
+                    # Nunca utiliza média para esconder uma medição de 0 MCA.
+                    bp_pressure_rank=prioridade_pressao_mca(pressao),
+                ).add_to(bp_agrupador_individual)
 
         # ====================================================
         # POR BAIRRO
@@ -4245,6 +4270,48 @@ if not df_mapa.empty:
 map_style_html = """
 <style>
 
+    /* Grupos de medições no estilo exploratório: sem os cartões repetidos
+       enquanto o zoom está afastado. A cor é a pior faixa do conjunto. */
+    .leaflet-marker-icon.bp-cluster-icon {
+        background: transparent !important;
+        border: 0 !important;
+        overflow: visible !important;
+    }
+    .bp-cluster-badge {
+        width: 100%;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        border-radius: 50%;
+        background: var(--bp-cluster-color, #64748b);
+        border: 3px solid #ffffff;
+        box-shadow: 0 2px 10px rgba(15, 23, 42, .32),
+                    0 0 0 5px color-mix(in srgb,
+                        var(--bp-cluster-color, #64748b) 23%, transparent);
+        cursor: pointer;
+        transition: transform .12s ease;
+    }
+    .bp-cluster-badge:hover {
+        transform: scale(1.08);
+    }
+    .bp-cluster-numero {
+        color: #111827;
+        font-family: Arial, sans-serif;
+        font-size: 14px;
+        font-weight: 800;
+        line-height: 1;
+        text-shadow: 0 1px 1px rgba(255,255,255,.65);
+    }
+    /* Os marcadores individuais continuam selecionáveis; apenas os
+       cartões de MCA aparecem quando as ruas já são visíveis no detalhe. */
+    .leaflet-container:not(.bp-zoom-detalhe-individual)
+    .pressao-individual-marker .bp-label-card-individual {
+        display: none !important;
+    }
+
+
     .leaflet-marker-icon.pressao-bairro-marker,
     .leaflet-marker-icon.pressao-individual-marker {
 
@@ -4538,6 +4605,9 @@ class EscalaMarcadoresRotulosPorZoom(MacroElement):
             px(2 * rotulo) + " " + px(5 * rotulo));
         container.classList.toggle("bp-zoom-urbano", zoom < 11);
         container.classList.toggle("bp-zoom-regional", zoom < 8);
+        container.classList.toggle(
+            "bp-zoom-detalhe-individual", zoom >= 15
+        );
     }
 
     mapa.whenReady(atualizarEscala);
@@ -4680,7 +4750,7 @@ class ReorganizarRotulosIndividuais(MacroElement):
     function reorganizar() {
         // A escala de pressão urbana permanece visível; o panorama extremo
         // não exige cálculo de colisão de rótulos que estão ocultos.
-        if (mapa.getZoom() < 8) return;
+        if (mapa.getZoom() < 15) return;
         var container = mapa.getContainer();
         if (!container) return;
         var limites = container.getBoundingClientRect();
