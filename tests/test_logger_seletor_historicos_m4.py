@@ -128,6 +128,20 @@ class TesteSeletorLogger(unittest.TestCase):
         self.assertEqual(r1["prioridade"], "Atenção")
         self.assertEqual(r2["prioridade"], "Sem sinal histórico de queda")
 
+    def test_metricas_redundantes_ficam_apenas_no_diagnostico_textual(self):
+        tela = (ROOT / "pages" / "4_4_Analise_de_Logger.py").read_text(
+            encoding="utf-8"
+        )
+        inicio = tela.index("def _mostrar_diagnostico(")
+        fim = tela.index("def _comportamento():", inicio)
+        trecho = tela[inicio:fim]
+        self.assertNotIn('e.metric("Tendência recente"', trecho)
+        self.assertNotIn('f.metric("Situação observada"', trecho)
+        self.assertNotIn('"Persistência confirmada"', trecho)
+        self.assertIn('st.write(diagnostico["diagnostico"])', trecho)
+        self.assertIn('d.metric("Prioridade investigativa", prioridade)', trecho)
+        self.assertIn('fnumero(diagnostico["referencia_horario_mediana"])', trecho)
+
     def test_tela_tem_um_upload_e_um_seletor_sem_painel_lote(self):
         fonte = (ROOT / "pages" / "4_4_Analise_de_Logger.py").read_text(
             encoding="utf-8"

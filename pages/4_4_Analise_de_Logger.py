@@ -480,16 +480,6 @@ def _mostrar_diagnostico(dados, diagnostico, logger_id=None):
     )
     d.metric("Prioridade investigativa", prioridade)
 
-    e, f, g = st.columns(3)
-    e.metric("Tendência recente", diagnostico["tendencia"])
-    f.metric("Situação observada", diagnostico["status_recente"])
-    duracao = diagnostico["persistencia_abaixo_min"]
-    if duracao is None:
-        duracao = diagnostico["persistencia_zero_min"]
-    g.metric(
-        "Persistência confirmada",
-        f"{duracao:.0f} min" if duracao is not None else "Não demonstrada",
-    )
     st.markdown("#### Diagnóstico operacional")
     st.write(diagnostico["diagnostico"])
     st.caption(
