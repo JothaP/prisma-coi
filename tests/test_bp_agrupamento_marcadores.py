@@ -1,9 +1,12 @@
 """Valida agrupamento cartográfico no Módulo 1 sem acessar dados reais."""
+import ast
 from pathlib import Path
 import re
 import unittest
 
 import folium
+from branca.element import MacroElement
+from jinja2 import Template
 from folium.plugins import MarkerCluster
 
 from bp_agrupamento_marcadores import (
@@ -142,6 +145,35 @@ class TesteClustersBaixaPressao(unittest.TestCase):
         )
         # Verifica a cadeia de estado que distingue o mapa com e sem clusters.
         self.assertIn('"true" if sem_agrupamento else "false"', texto)
+
+    def test_javascript_real_distingue_modo_sem_agrupamento(self):
+        fonte = MAPA.read_text(encoding="utf-8")
+        arvore = ast.parse(fonte, filename=str(MAPA))
+        classe = next(
+            item for item in arvore.body
+            if isinstance(item, ast.ClassDef)
+            and item.name == "EscalaMarcadoresRotulosPorZoom"
+        )
+        contexto = {"MacroElement": MacroElement, "Template": Template}
+        exec(compile(ast.Module(body=[classe], type_ignores=[]), str(MAPA), "exec"), contexto)
+        criar = contexto["EscalaMarcadoresRotulosPorZoom"]
+        for sem_agrupamento, valor_js in ((False, "false"), (True, "true")):
+            with self.subTest(sem_agrupamento=sem_agrupamento):
+                mapa = folium.Map(location=[-5.1, -42.8], zoom_start=13)
+                mapa.add_child(criar(sem_agrupamento=sem_agrupamento))
+                html = mapa.get_root().render()
+                self.assertIn(
+                    'container.classList.toggle("bp-sem-agrupamento", '
+                    + valor_js + ");",
+                    html,
+                )
+
+    def test_reposicionamento_restaurado_quando_zoom_afasta(self):
+        texto = MAPA.read_text(encoding="utf-8")
+        self.assertIn("if (mapa.getZoom() < 15) {", texto)
+        self.assertIn('rotulo.style.removeProperty("left");', texto)
+        self.assertIn('rotulo.style.removeProperty("top");', texto)
+        self.assertIn('rotulo.style.removeProperty("visibility");', texto)
 
     def test_zoom_agregado_preservado_por_padrao(self):
         texto = MAPA.read_text(encoding="utf-8")
