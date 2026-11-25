@@ -6,12 +6,14 @@ on:
       - "pages/1_Baixa_Pressao.py"
       - "bp_agrupamento_marcadores.py"
       - "tests/test_bp_agrupamento_marcadores.py"
+      - "tests/test_bp_cluster_media.js"
       - ".github/workflows/testar-clusters-baixa-pressao.yml"
   pull_request:
     paths:
       - "pages/1_Baixa_Pressao.py"
       - "bp_agrupamento_marcadores.py"
       - "tests/test_bp_agrupamento_marcadores.py"
+      - "tests/test_bp_cluster_media.js"
       - ".github/workflows/testar-clusters-baixa-pressao.yml"
   workflow_dispatch:
 
@@ -33,3 +35,5 @@ jobs:
         run: python -m py_compile pages/1_Baixa_Pressao.py bp_agrupamento_marcadores.py
       - name: Validar faixas, JS gerado, zoom e regressao de filtros
         run: python -m unittest discover -s tests -p "test_bp_agrupamento_marcadores.py" -v
+      - name: Executar calculo real da media de grupos em JavaScript
+        run: node tests/test_bp_cluster_media.js

@@ -1,15 +1,15 @@
 """Agrupamento responsivo de medições do mapa de Baixa Pressão (Módulo 1).
 
-A categoria de um grupo é a MAIS CRÍTICA entre suas medições, jamais a média.
-O mapa individual mantém os marcadores e popups originais; este arquivo contém
-somente prioridades e a função visual do Leaflet.markercluster.
+O número do círculo é a MÉDIA de pressão em MCA das medições agrupadas.
+A COR continua sinalizando a faixa MAIS CRÍTICA, para não esconder um ponto
+sem pressão em um conjunto cuja média está normal. Preserva os popups.
 """
 from __future__ import annotations
 
 import math
 
 # Mesmas faixas já adotadas no Módulo 1, da melhor para a mais crítica.
-# 0 é um caso especial; não misturar zero com outras pressões na média.
+# 0 é uma faixa especial, mas entra normalmente no cálculo da média.
 CORES_FAIXAS = {
     1: "#22C55E",  # alta, > 15
     2: "#2563EB",  # normal, 10 a 15
@@ -37,21 +37,31 @@ def prioridade_pressao_mca(valor: float) -> int:
     return 1
 
 
-# MarkerCluster recebe a função em JavaScript; somente inteiros de prioridade
-# são transferidos via marker.options.bpPressureRank. Os nomes, endereços
-# e dados dos consumidores nunca entram no HTML dos agrupamentos.
+# MarkerCluster recebe a função em JavaScript. Cada marcador carrega apenas
+# o valor numérico da pressão e a prioridade de criticidade; nomes, endereços
+# e matrículas não são expostos no HTML dos agrupamentos.
 FUNCAO_ICONE_CLUSTER = r"""
 function (cluster) {
     var filhos = cluster.getAllChildMarkers();
     var piorFaixa = 1;
     var semPressao = 0;
     var baixaPressao = 0;
+    var somaPressao = 0;
+    var medicoesValidas = 0;
     for (var i = 0; i < filhos.length; i++) {
-        var valor = Number(filhos[i].options.bpPressureRank || 1);
+        var opcoes = filhos[i].options || {};
+        var valor = Number(opcoes.bpPressureRank || 1);
         if (!Number.isFinite(valor) || valor < 1 || valor > 5) valor = 1;
         piorFaixa = Math.max(piorFaixa, valor);
         if (valor === 5) semPressao++;
         else if (valor === 4) baixaPressao++;
+        // Zero, pressões negativas e pressões altas entram na média.
+        // Não tratar valores ausentes como zero.
+        var pressao = opcoes.bpPressureMca;
+        if (typeof pressao === "number" && Number.isFinite(pressao)) {
+            somaPressao += pressao;
+            medicoesValidas++;
+        }
     }
     var cores = {
         1: "#22C55E", 2: "#2563EB", 3: "#FF8FE1",
@@ -62,13 +72,18 @@ function (cluster) {
         4: "Baixa pressão", 5: "Sem pressão"
     };
     var total = cluster.getChildCount();
-    var tamanho = total >= 100 ? 54 : total >= 20 ? 48 : 42;
-    var texto = total + " medições; pior faixa: " + nomes[piorFaixa] +
-        "; 0 MCA: " + semPressao + "; baixa pressão: " + baixaPressao +
-        ". Clique para aproximar.";
+    var media = medicoesValidas ? somaPressao / medicoesValidas : null;
+    var mediaTexto = media === null ? "--" : media.toFixed(1).replace(".", ",");
+    // A pressão média ocupa mais espaço que um simples contador.
+    var tamanho = mediaTexto.length >= 6 ? 70 : mediaTexto.length >= 5 ? 64 : 58;
+    var texto = "Pressão média: " + mediaTexto + " MCA em " +
+        medicoesValidas + " de " + total + " medições; pior faixa: " +
+        nomes[piorFaixa] + "; 0 MCA: " + semPressao +
+        "; baixa pressão: " + baixaPressao + ". Clique para aproximar.";
     var html = '<span class="bp-cluster-badge" style="--bp-cluster-color:' +
         cores[piorFaixa] + '" title="' + texto + '">' +
-        '<span class="bp-cluster-numero">' + total + '</span></span>';
+        '<span class="bp-cluster-numero">' + mediaTexto + '</span>' +
+        '<span class="bp-cluster-unidade">MCA</span></span>';
     return L.divIcon({
         html: html,
         className: "bp-cluster-icon",

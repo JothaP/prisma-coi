@@ -3368,7 +3368,7 @@ with c_map3:
             "Mostra informações junto aos pins. "
             "No modo por bairro mostra pressão média e quantidade. "
             "No modo individual, os valores aparecem a partir do zoom 15; "
-            "os agrupamentos continuam exibindo a quantidade de medições."
+            "os agrupamentos mostram a pressão média em MCA."
         )
     )
 
@@ -3390,8 +3390,9 @@ with c_map4:
 if modo_visualizacao == "Medições individuais":
     st.caption(
         "Aproxime para dividir os grupos; clique em um agrupamento para ampliar. "
-        "A cor do grupo indica a **faixa de pressão mais crítica** entre suas "
-        "medições, e não a média. Rótulos individuais aparecem no zoom detalhado."
+        "O **número** do grupo é a média das medições em MCA; a **cor** indica "
+        "a faixa mais crítica do grupo, mesmo quando a média é normal. "
+        "Rótulos individuais aparecem no zoom detalhado."
     )
 
 # Este segundo filtro é EXCLUSIVO do mapa. O filtro geral da sidebar
@@ -3887,8 +3888,9 @@ if not df_mapa.empty:
                         f"{pressao_formatada} MCA | "
                         f"{classificacao}"
                     ),
-                    # O agregado lê somente esta prioridade numérica.
-                    # Nunca utiliza média para esconder uma medição de 0 MCA.
+                    # Média em MCA no círculo; cor pela faixa MAIS crítica.
+                    # O valor da pressão já foi convertido para float acima.
+                    bp_pressure_mca=pressao,
                     bp_pressure_rank=prioridade_pressao_mca(pressao),
                 ).add_to(bp_agrupador_individual)
 
@@ -4281,8 +4283,10 @@ map_style_html = """
         width: 100%;
         height: 100%;
         display: flex;
+        flex-direction: column;
         align-items: center;
         justify-content: center;
+        gap: 1px;
         box-sizing: border-box;
         border-radius: 50%;
         background: var(--bp-cluster-color, #64748b);
@@ -4302,7 +4306,16 @@ map_style_html = """
         font-size: 14px;
         font-weight: 800;
         line-height: 1;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
         text-shadow: 0 1px 1px rgba(255,255,255,.65);
+    }
+    .bp-cluster-unidade {
+        color: #111827;
+        font-family: Arial, sans-serif;
+        font-size: 9px;
+        font-weight: 700;
+        line-height: 1;
     }
     /* Os marcadores individuais continuam selecionáveis; apenas os
        cartões de MCA aparecem quando as ruas já são visíveis no detalhe. */
