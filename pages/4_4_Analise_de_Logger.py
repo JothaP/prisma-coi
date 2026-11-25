@@ -28,6 +28,7 @@ from logger_monitor_core import (
 from logger_comportamento_core import (
     diagnosticar, extrair_historico, ids_disponiveis,
 )
+from logger_lote_core import analisar_lote
 
 exigir_acesso_modulo("4")
 if not verificar_autenticacao():
@@ -392,20 +393,163 @@ def _monitor():
     _exibir_detalhes_logger(comparacao, historico)
 
 
-def _comportamento():
-    st.markdown("### 📉 Análise de Comportamento")
-    st.caption(
-        "Faça upload do histórico de UM logger. O diagnóstico considera a "
-        "última medição presente no arquivo, compara o mesmo horário em "
-        "dias anteriores e identifica quedas ou elevações recentes."
+@st.cache_data(ttl=600, max_entries=3, show_spinner=False)
+def _avaliar_upload_lote(arquivos, limite):
+    return analisar_lote(arquivos, limiar_min_mca=limite)
+
+
+def _campo_limite_local(sufixo):
+    habilitado = st.checkbox(
+        "Utilizar limite mínimo operacional específico (opcional)",
+        value=False,
+        key=f"m4_logger_limite_habilitado_{sufixo}",
+        help=(
+            "Somente habilite quando houver um limite mínimo aplicável ao(s) "
+            "ponto(s) analisado(s). Não existe um limite universal definido "
+            "por esta ferramenta. No lote, o mesmo valor será aplicado a todos."
+        ),
     )
+    if not habilitado:
+        return None
+    return st.number_input(
+        "Limite mínimo informado pelo operador (mca)",
+        min_value=0.0,
+        max_value=150.0,
+        value=10.0,
+        step=0.5,
+        key=f"m4_logger_limite_valor_{sufixo}",
+        help="O valor é apenas ilustrativo até ser informado e confirmado pelo operador.",
+    )
+
+
+def _mostrar_diagnostico(dados, diagnostico, logger_id=None):
+    """Apresentação compartilhada entre análise individual e em lote."""
+    st.caption(
+        f"Logger: {logger_id or 'identificador não disponível'} · "
+        f"Última leitura do arquivo: "
+        f"{diagnostico['data_ultima']:%d/%m/%Y %H:%M} · "
+        f"{len(dados)} leituras válidas."
+    )
+
+    direcao = diagnostico["direcao"]
+    prioridade = diagnostico["prioridade"]
+    if prioridade == "Alta prioridade":
+        st.error(
+            "🔴 Prioridade alta para investigação — patamar próximo de zero "
+            "persistente. Verificar a integridade do logger e a situação da rede."
+        )
+    elif direcao == "Abaixo do padrão":
+        st.warning(
+            "🟠 Pressão abaixo do padrão histórico do horário. "
+            "Verificar duração e possíveis impactos no abastecimento."
+        )
+    elif direcao == "Acima do padrão":
+        st.info(
+            "🔵 Pressão acima do padrão histórico do horário. "
+            "Isso não significa falta de água; avaliar eventuais condições de sobrepressão."
+        )
+    elif direcao == "Atípico dentro da faixa":
+        st.info(
+            "🔎 Leitura pouco frequente, embora dentro da faixa histórica "
+            "do horário. A classificação isolada não confirma anormalidade."
+        )
+    elif direcao == "Dentro do padrão":
+        st.success("✅ Pressão dentro do padrão estatístico daquele horário.")
+        st.caption(
+            "Padrão histórico não comprova pressão suficiente para o abastecimento. "
+            "A avaliação hidráulica deve considerar as condições do ponto."
+        )
+    else:
+        st.warning(
+            "⚪ Referência histórica insuficiente para classificar o horário."
+        )
+
+    a, b, c, d = st.columns(4)
+    a.metric("Última pressão", fnumero(diagnostico["pressao_ultima"]))
+    b.metric(
+        "Mediana neste horário",
+        fnumero(diagnostico["referencia_horario_mediana"]),
+        help="Mediana de leituras de dias anteriores na faixa horária ±30 min.",
+    )
+    c.metric(
+        "Desvio da mediana",
+        fnumero(diagnostico["desvio_mca"], com_sinal=True),
+        help="Diferença entre a última pressão e a mediana do mesmo horário.",
+    )
+    d.metric("Prioridade investigativa", prioridade)
+
+    e, f, g = st.columns(3)
+    e.metric("Tendência recente", diagnostico["tendencia"])
+    f.metric("Situação observada", diagnostico["status_recente"])
+    duracao = diagnostico["persistencia_abaixo_min"]
+    if duracao is None:
+        duracao = diagnostico["persistencia_zero_min"]
+    g.metric(
+        "Persistência confirmada",
+        f"{duracao:.0f} min" if duracao is not None else "Não demonstrada",
+    )
+    st.markdown("#### Diagnóstico operacional")
+    st.write(diagnostico["diagnostico"])
+    st.caption(
+        f"Referência ±30 min: {diagnostico['medicoes_referencia']} medição(ões) "
+        f"em {diagnostico['dias_referencia']} dia(s) anteriores; "
+        "classificação requer ao menos 5 dias e 25 medições. "
+        "Persistência limitada a intervalos de até 30 minutos entre leituras."
+    )
+    if diagnostico["referencia_inferior"] is not None:
+        st.info(
+            "Faixa histórica ampliada pela tolerância, específica do horário da "
+            "última medição: "
+            f"{fnumero(diagnostico['referencia_inferior'])} a "
+            f"{fnumero(diagnostico['referencia_superior'])}. "
+            "A classificação considera também a frequência de valores próximos."
+        )
+
+    grafico = px.line(
+        dados, x="data", y="pressao", markers=False,
+        title=f"Histórico de pressão{f' — {logger_id}' if logger_id else ''}",
+        labels={"data": "Data/hora", "pressao": "Pressão (mca)"},
+    )
+    grafico.update_layout(hovermode="x unified", height=430)
+    st.plotly_chart(grafico, use_container_width=True)
+    st.caption(
+        "A faixa histórica de referência é válida para o horário da última "
+        "medição, não para toda a curva. Os dados não permitem confirmar "
+        "sozinhos a causa de possíveis anormalidades."
+    )
+    with st.expander("Ver medições utilizadas"):
+        st.dataframe(
+            dados.rename(
+                columns={"data": "Data/hora", "pressao": "Pressão (mca)"}
+            ), hide_index=True, use_container_width=True,
+        )
+    texto = (
+        f"Análise de Comportamento — {logger_id or 'logger não identificado'}\n"
+        + f"Classificação histórica: {diagnostico['classificacao']}\n"
+        + f"Direção: {direcao}\n"
+        + f"Prioridade investigativa: {prioridade}\n"
+        + diagnostico["diagnostico"] + "\n"
+        + f"Referência: {diagnostico['dias_referencia']} dias, "
+        + f"{diagnostico['medicoes_referencia']} medições\n"
+    )
+    st.download_button(
+        "⬇️ Exportar diagnóstico individual (TXT)",
+        data=texto.encode("utf-8"),
+        file_name="analise_comportamento_logger.txt",
+        mime="text/plain", key=f"m4_logger_download_analisador_{'lote' if logger_id else 'individual'}",
+    )
+
+
+def _comportamento_individual():
     arquivo = st.file_uploader(
         "Histórico de medições (XLSX, XLS ou CSV)",
-        type=["xlsx", "xls", "csv"], key="m4_logger_historico",
+        type=["xlsx", "xls", "csv"],
+        key="m4_logger_historico",
     )
     if arquivo is None:
         st.info("Envie a série histórica do logger para iniciar.")
         return
+    limite = _campo_limite_local("individual")
     try:
         base = _ler_upload(arquivo.name, arquivo.getvalue())
         ids = ids_disponiveis(base)
@@ -419,71 +563,131 @@ def _comportamento():
             escolhido = ids[0]
             st.caption(f"Galaxia ID identificado: {escolhido}")
         dados, nome_coluna, logger_id = extrair_historico(base, escolhido)
-        diagnostico = diagnosticar(dados, unidade="mca")
+        diagnostico = diagnosticar(dados, unidade="mca", limiar_min_mca=limite)
     except (ErroBaseLogger, ValueError, KeyError, ImportError, OSError) as erro:
         st.error(f"Não foi possível analisar o histórico: {erro}")
         return
-
     st.caption(
-        f"Coluna utilizada: {nome_coluna} · {len(dados)} medições com data e "
-        "pressão válidas · Unidade exibida: mca. Confirme que sua "
-        "exportação usa mca; os limites do código original não convertem bar para mca."
+        f"Coluna utilizada: {nome_coluna}. Confirme que a exportação "
+        "apresenta a pressão em mca; nenhuma conversão automática de bar é feita."
     )
-    resultado = diagnostico["classificacao"]
-    if resultado == "Dentro do padrão":
-        st.success("✅ Dentro do padrão histórico do horário da última medição")
-    elif resultado == "Fora do padrão":
-        st.error("⚠️ Fora do padrão histórico do horário da última medição")
-    else:
-        st.warning("Histórico insuficiente para confirmar o padrão desse horário")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Última pressão", fnumero(diagnostico["pressao_ultima"]))
-    k2.metric("Média histórica", fnumero(diagnostico["media"]))
-    k3.metric("Mínima", fnumero(diagnostico["minimo"]))
-    k4.metric("Máxima", fnumero(diagnostico["maximo"]))
+    _mostrar_diagnostico(dados, diagnostico, logger_id)
 
-    st.markdown("#### Diagnóstico operacional")
-    st.write(diagnostico["diagnostico"])
+
+def _comportamento_lote():
     st.caption(
-        f"Última leitura: {diagnostico['data_ultima']:%d/%m/%Y %H:%M} · "
-        f"Referência no mesmo horário (±30 min): "
-        f"{diagnostico['medicoes_referencia']} medições em "
-        f"{diagnostico['dias_referencia']} dia(s) anteriores. "
-        "Para classificar o padrão são necessários ao menos 5 dias e 25 medições."
+        "Importe vários históricos de uma vez, incluindo arquivos com diversos "
+        "Galaxia ID. Cada logger será analisado de forma independente. "
+        "Arquivos do mesmo ID serão combinados; arquivos sem ID "
+        "receberão identificação pelo nome do arquivo."
     )
-    if diagnostico["referencia_inferior"] is not None:
-        st.info(
-            "Faixa de referência ampliada pela tolerância do código original: "
-            f"{fnumero(diagnostico['referencia_inferior'])} a "
-            f"{fnumero(diagnostico['referencia_superior'])}. "
-            "A classificação também exige pelo menos 10% das medições de "
-            "referência próximas da última leitura."
-        )
-    grafico = px.line(
-        dados, x="data", y="pressao", markers=False,
-        title=f"Histórico real de pressão{f' — {logger_id}' if logger_id else ''}",
-        labels={"data":"Data/hora", "pressao":"Pressão (mca)"},
+    arquivos = st.file_uploader(
+        "Históricos para análise em lote (XLSX, XLS ou CSV)",
+        type=["xlsx", "xls", "csv"],
+        accept_multiple_files=True,
+        key="m4_logger_historicos_lote",
     )
-    grafico.update_layout(hovermode="x unified", height=430)
-    st.plotly_chart(grafico, use_container_width=True)
-    with st.expander("Ver medições utilizadas"):
-        st.dataframe(
-            dados.rename(columns={"data":"Data/hora","pressao":"Pressão (mca)"}),
-            hide_index=True, use_container_width=True,
+    if not arquivos:
+        st.info("Selecione vários históricos ou um arquivo com diversos loggers.")
+        return
+    limite = _campo_limite_local("lote")
+    if limite is not None:
+        st.warning(
+            "O mesmo limite mínimo operacional informado será aplicado "
+            "a TODOS os equipamentos do lote. Confirme sua aplicabilidade."
         )
+    try:
+        with st.spinner("Avaliando separadamente os históricos por Galaxia ID..."):
+            panorama, detalhes = _avaliar_upload_lote(
+                _arquivos(arquivos), limite
+            )
+    except (ErroBaseLogger, ValueError, KeyError, OSError) as erro:
+        st.error(f"Não foi possível analisar o lote: {erro}")
+        return
+
+    total_avaliados = len(detalhes)
+    e1, e2, e3, e4, e5 = st.columns(5)
+    e1.metric("Analisados", total_avaliados)
+    e2.metric("Alta prioridade", int((panorama["Prioridade"] == "Alta prioridade").sum()))
+    e3.metric("Atenção", int((panorama["Prioridade"] == "Atenção").sum()))
+    e4.metric("Acima do padrão", int((panorama["Direção"] == "Acima do padrão").sum()))
+    e5.metric(
+        "Inconclusivos / erros",
+        int(panorama["Prioridade"].isin(["Referência insuficiente", "Não avaliado"]).sum()),
+    )
+    st.caption(
+        "A prioridade é de INVESTIGAÇÃO, não diagnóstico confirmado de falta de água. "
+        "Uma pressão acima do habitual não é automaticamente classificada como crítica."
+    )
+    fl1, fl2 = st.columns(2)
+    with fl1:
+        prioridades = st.multiselect(
+            "Filtrar por prioridade",
+            sorted(panorama["Prioridade"].dropna().unique()),
+            key="m4_logger_lote_prioridades",
+        )
+    with fl2:
+        direcoes = st.multiselect(
+            "Filtrar por direção do desvio",
+            sorted(panorama["Direção"].dropna().unique()),
+            key="m4_logger_lote_direcoes",
+        )
+    tabela = panorama
+    if prioridades:
+        tabela = tabela[tabela["Prioridade"].isin(prioridades)]
+    if direcoes:
+        tabela = tabela[tabela["Direção"].isin(direcoes)]
+    st.dataframe(
+        tabela, use_container_width=True, hide_index=True,
+        column_config={
+            "Última pressão (mca)": st.column_config.NumberColumn(format="%.2f"),
+            "Mediana do horário (mca)": st.column_config.NumberColumn(format="%.2f"),
+            "Desvio da mediana (mca)": st.column_config.NumberColumn(format="%+.2f"),
+        },
+    )
     st.download_button(
-        "⬇️ Exportar diagnóstico (TXT)",
-        data=(
-            f"Análise de Comportamento — {logger_id or 'logger não identificado'}\n"
-            + f"Classificação: {resultado}\n"
-            + diagnostico["diagnostico"] + "\n"
-            + f"Referência: {diagnostico['dias_referencia']} dias, "
-            + f"{diagnostico['medicoes_referencia']} medições\n"
-        ).encode("utf-8"),
-        file_name="analise_comportamento_logger.txt",
-        mime="text/plain", key="m4_logger_download_analisador",
+        "⬇️ Exportar diagnóstico consolidado (CSV)",
+        data=tabela.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+        file_name="diagnostico_loggers_lote.csv",
+        mime="text/csv",
+        key="m4_logger_download_lote",
     )
+    if not detalhes:
+        st.warning("Nenhum histórico do lote continha dados suficientes para diagnóstico.")
+        return
+    st.divider()
+    st.markdown("#### Aprofundar análise individual")
+    ids = [x for x in tabela["Galaxia ID"] if x in detalhes]
+    if not ids:
+        st.info("Os filtros atuais não incluem equipamentos com análise disponível.")
+        return
+    escolhido = st.selectbox(
+        "Selecione o logger para visualizar o diagnóstico e a curva",
+        ids,
+        key="m4_logger_lote_id_selecionado",
+    )
+    dados, diagnostico = detalhes[escolhido]
+    _mostrar_diagnostico(dados, diagnostico, escolhido)
 
+
+def _comportamento():
+    st.markdown("### 📉 Análise de Comportamento")
+    st.caption(
+        "Análise do comportamento hidráulico observado: desvio histórico do "
+        "horário, tendência recente, persistência e possíveis recuperações. "
+        "Os resultados são indicativos e devem ser confrontados com o "
+        "contexto operacional do ponto."
+    )
+    modo = st.radio(
+        "Modalidade",
+        ["Individual", "Em lote"],
+        horizontal=True,
+        key="m4_logger_modalidade_comportamento",
+    )
+    if modo == "Individual":
+        _comportamento_individual()
+    else:
+        _comportamento_lote()
 
 with st.sidebar:
     st.markdown("### 📡 Análise de Logger")
