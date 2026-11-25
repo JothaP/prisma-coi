@@ -171,11 +171,26 @@ class TestarPontosMatriculasPoligono(unittest.TestCase):
             None, {}, exibir_rotulos=False, matriculas_area=pontos,
         )
         html = mapa.get_root().render()
-        self.assertIn("Matrículas dentro do polígono", html)
-        self.assertIn("Matrícula: 001234", html)
-        self.assertIn("Matrícula: 001235", html)
+        camadas = [
+            c for c in mapa._children.values()
+            if isinstance(c, folium.plugins.MarkerCluster)
+        ]
+        self.assertEqual(len(camadas), 1)
+        self.assertEqual(camadas[0].layer_name, "Matrículas dentro do polígono")
+        self.assertIn("001234", html)
+        self.assertIn("001235", html)
         self.assertIn("markerClusterGroup", html)
         self.assertNotIn("Matrículas consultadas", html)
+        markers = [
+            c for c in camadas[0]._children.values()
+            if isinstance(c, folium.Marker)
+        ]
+        self.assertEqual(len(markers), 2)
+        self.assertTrue(all(
+            any(isinstance(child, folium.Tooltip)
+                for child in marker._children.values())
+            for marker in markers
+        ))
 
     def test_busca_logger_gera_marcador_e_foco_sem_matricula(self):
         clientes = pd.DataFrame(
