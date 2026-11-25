@@ -49,22 +49,36 @@ O mapeamento de 243 localidades e respectivas regionais, bases e zonas
 foi preservado do Colab. Para municípios não mapeados, a
 regional/base/zona pode vir da exportação.
 
-## Análise de Comportamento — interpretação operacional
+## Análise de Comportamento — vários históricos, um seletor
 
-Há duas modalidades dentro da aba:
+A Análise de Comportamento possui **uma única modalidade de consulta**:
 
-- **Individual:** importe um histórico XLSX/XLS/CSV; caso contenha vários
-  Galaxia ID, selecione um. O diagnóstico é calculado somente sobre esse ID.
-- **Em lote:** importe vários históricos simultaneamente, inclusive um arquivo
-  com medições de múltiplos Galaxia ID. Equipamentos são avaliados separadamente.
-  Arquivos com o mesmo ID se complementam; arquivos sem ID são identificados
-  pelo nome, **sem afirmar que o nome corresponde a um Galaxia ID**.
+1. Selecione **um ou vários arquivos XLSX/XLS/CSV** no campo de upload.
+   Um mesmo arquivo pode conter históricos de vários Galaxia ID.
+2. A ferramenta organiza os arquivos por Galaxia ID, sem calcular
+   antecipadamente todos os diagnósticos.
+3. Escolha o equipamento no seletor **Selecione o logger para analisar
+   (Galaxia ID)**. É possível localizar o ID digitando parte do nome.
+4. O gráfico, a classificação histórica, a prioridade investigativa,
+   os indicadores e a exportação TXT pertencem **somente ao equipamento
+   selecionado**. Ao trocar a seleção, o diagnóstico é atualizado.
+5. Se dois arquivos contêm medições do **mesmo Galaxia ID**, suas
+   séries são combinadas e as datas repetidas são tratadas pelo
+   analisador existente. IDs diferentes nunca são misturados.
 
-O lote oferece totais por prioridade, filtros por direção do desvio e
-prioridade, panorama completo, exportação CSV e seleção de um equipamento
-para detalhar o diagnóstico e o gráfico. Limites técnicos: 100 arquivos e
-150 equipamentos por processamento. Erros de um logger não impedem a
-avaliação dos demais e são exibidos no panorama.
+Não há mais abas ou opções separadas **Individual / Em lote** nem painel
+de resultados consolidados. A importação múltipla serve para evitar
+que o operador tenha de reenviar o histórico ao alternar entre loggers.
+
+Um arquivo sem Galaxia ID é rotulado como **Arquivo: nome** e permanece
+isolado; o nome de arquivo não é considerado um ID verdadeiro. Se vários
+arquivos sem ID tiverem o mesmo nome, cada um recebe opção própria no
+seletor. Arquivos inválidos são indicados individualmente, sem bloquear
+os demais. Limites técnicos do catálogo: **até 100 arquivos e 150
+históricos** por upload.
+
+Os arquivos são mantidos apenas no cache temporário do Streamlit durante
+a sessão. O histórico selecionado não é enviado ao Supabase.
 
 ### Dimensões independentes
 
@@ -119,8 +133,8 @@ incorretamente como acima ou abaixo dos limites.
 
 O limite mínimo operacional específico é **opcional** e é informado
 pelo operador; o sistema não assume uma pressão universal adequada.
-No **lote**, caso habilitado, o mesmo limite se aplica a todos os
-loggers, e a interface exige confirmação de sua aplicabilidade.
+O limite se aplica **somente ao logger selecionado** no momento da análise,
+não a todos os históricos importados.
 
 **Unidade:** a interface apresenta pressão em **mca**. A exportação deve
 conter mca; não há conversão automática de bar.
@@ -155,6 +169,10 @@ de valores, integridade do mapeamento regional, variação versus
 estabilidade, dados ausentes, timestamps repetidos/retrocedidos,
 dias/mínimo histórico, padrão dentro/fora, salto persistente e
 navegação/autorização do Módulo 4.
+
+`tests/test_logger_seletor_historicos_m4.py` cobre importação múltipla,
+seleção exclusiva por Galaxia ID, concatenação dos arquivos de um mesmo
+logger, prevenção de mistura de IDs e manutenção da sidebar do manual.
 
 `tests/test_logger_diagnostico_lote_m4.py` cobre direção de desvios,
 permanência de baixa pressão, recuperação, referências insuficientes,
