@@ -66,7 +66,7 @@ g8 = carregar_funcoes(FONTE8, {
     "_normalizar_texto", "_normalizar_cabecalho", "_assinatura",
     "_arquivos_bairros_municipais", "_assinaturas_bairros_municipais",
     "_bairros_geograficos",
-    "_m8_mapa_unificado",
+    "_m8_mapa_unificado", "_m8_normalizar_pontos",
 }, {
     "sqlite3": sqlite3, "math": math, "re": re, "unicodedata": unicodedata,
     "Path": Path, "RAIZ": RAIZ,
