@@ -49,31 +49,86 @@ O mapeamento de 243 localidades e respectivas regionais, bases e zonas
 foi preservado do Colab. Para municípios não mapeados, a
 regional/base/zona pode vir da exportação.
 
-## Análise de Comportamento
+## Análise de Comportamento — interpretação operacional
 
-1. Importe o histórico XLSX/XLS/CSV do logger.
-2. Se o arquivo possuir vários **Galaxia ID**, selecione um deles,
-   sem juntar históricos de aparelhos diferentes.
-3. Examine classificação, diagnóstico textual, métricas e curva de pressão.
-4. Se necessário, baixe o diagnóstico TXT.
+Há duas modalidades dentro da aba:
 
-O algoritmo mantém os parâmetros enviados no Colab:
-- Referência temporal: **±30 minutos** do horário da última medição;
-- Dias anteriores mínimos: **5**;
-- Registros da faixa horária mínimos: **25**;
-- Quantis 5 e 95 com tolerância `max(0,8; 7% da amplitude)`;
-- Exigência de ao menos 10% dos registros de referência próximos ao
-  valor atual;
-- Busca saltos persistentes nos **últimos 90 minutos**, com amplitude
-  mínima de 3 unidades e variação relativa de 10%;
-- Fallback de avaliação de tendência dentro da última hora.
+- **Individual:** importe um histórico XLSX/XLS/CSV; caso contenha vários
+  Galaxia ID, selecione um. O diagnóstico é calculado somente sobre esse ID.
+- **Em lote:** importe vários históricos simultaneamente, inclusive um arquivo
+  com medições de múltiplos Galaxia ID. Equipamentos são avaliados separadamente.
+  Arquivos com o mesmo ID se complementam; arquivos sem ID são identificados
+  pelo nome, **sem afirmar que o nome corresponde a um Galaxia ID**.
 
-Se os requisitos de referência não forem alcançados, apresenta
-**Dados insuficientes**, sem inventar classificação de normalidade.
+O lote oferece totais por prioridade, filtros por direção do desvio e
+prioridade, panorama completo, exportação CSV e seleção de um equipamento
+para detalhar o diagnóstico e o gráfico. Limites técnicos: 100 arquivos e
+150 equipamentos por processamento. Erros de um logger não impedem a
+avaliação dos demais e são exibidos no panorama.
 
-**Unidade:** a interface apresenta pressão em **mca**. Confirme que a
-planilha exportada já utiliza mca. Os limites preservados do código
-original são numéricos e não realizam conversão automática de bar/mca.
+### Dimensões independentes
+
+1. **Comportamento histórico:** `Dentro do padrão`, `Abaixo do padrão`,
+   `Acima do padrão`, `Atípico dentro da faixa` ou
+   `Referência insuficiente`. Acima do padrão não é alerta automático
+   de falta de água. A referência usa somente dias anteriores e
+   horários ±30 min da última leitura.
+2. **Tendência recente:** variação líquida e amplitude entre os valores
+   disponíveis na janela final de 90 minutos, com alerta para lacunas
+   superiores a 30 minutos. A ausência de queda recente **não descarta**
+   uma condição historicamente reduzida ou prolongada.
+3. **Prioridade de investigação:** combinação de anomalia de pressão
+   versus histórico, persistência próxima de zero e, opcionalmente,
+   um limite mínimo operacional fornecido pelo operador. Não equivale
+   a ocorrência de FA confirmada, diagnóstico de causa ou laudo hidráulico.
+
+### Referência e parâmetros
+
+Preserva a regra estatística original de comparação:
+- Janela **±30 minutos** ao horário da última medição;
+- **≥5 dias anteriores e ≥25 medições**;
+- Quantis 5% e 95%, tolerância `max(0,8; 7% da amplitude)`;
+- Ao menos 10% das medições de referência próximas à leitura;
+- A média global do histórico não é utilizada para definir direção.
+  Exibe-se a **mediana do horário**, a faixa de referência e o
+  desvio da leitura final em relação à mediana.
+
+Uma leitura pode estar **dentro da faixa dos quantis** e ainda ser pouco
+frequente, caso menos de 10% dos registros estejam próximos dela. Nessa
+situação, indica `Atípico dentro da faixa`, em vez de classificá-la
+incorretamente como acima ou abaixo dos limites.
+
+### Persistência, recuperação e lacunas
+
+- Um patamar persistente abaixo da faixa daquele horário exige
+  **pelo menos três medições** e **15 min**, sem lacunas superiores a
+  **30 min**, dentro dos 90 minutos que precedem a leitura final.
+  Esse indicador é **local à janela recente**: não prova uma
+  interrupção de várias horas com os dados disponíveis.
+- Pressão próxima de zero é definida para fins de **triagem** como
+  `≤0,5 mca`. Uma ocorrência prolongada pode ser marcada como
+  `Alta prioridade`, mas requer confirmação operacional e
+  verificação da integridade do sensor.
+- A detecção de recuperação busca valores próximos de zero nas
+  últimas **12 horas**, seguidos de pelo menos duas leituras
+  com valor `≥5 mca`, com a última atingindo a faixa de
+  referência quando esta existir. É **sinal de recuperação
+  nas medições**, não confirmação de abastecimento normalizado.
+- Não extrapolar leituras por lacunas ou interpretar um único
+  registro baixo como queda persistente.
+
+O limite mínimo operacional específico é **opcional** e é informado
+pelo operador; o sistema não assume uma pressão universal adequada.
+No **lote**, caso habilitado, o mesmo limite se aplica a todos os
+loggers, e a interface exige confirmação de sua aplicabilidade.
+
+**Unidade:** a interface apresenta pressão em **mca**. A exportação deve
+conter mca; não há conversão automática de bar.
+
+**Atenção:** identificação de risco hidráulico ou impacto regional de
+abastecimento exige avaliação contextual da rede, topografia, operação,
+histórico de manutenções e, quando necessário, validação em campo. O
+sistema não calcula interdependência hidráulica dos loggers nesta versão.
 
 ## Segurança e armazenamento
 
@@ -100,6 +155,11 @@ de valores, integridade do mapeamento regional, variação versus
 estabilidade, dados ausentes, timestamps repetidos/retrocedidos,
 dias/mínimo histórico, padrão dentro/fora, salto persistente e
 navegação/autorização do Módulo 4.
+
+`tests/test_logger_diagnostico_lote_m4.py` cobre direção de desvios,
+permanência de baixa pressão, recuperação, referências insuficientes,
+limiar operacional opcional, isolamento por Galaxia ID e falhas parciais
+em lotes.
 
 `tests/test_monitor_logger_incremental_m4.py` acrescenta regressões
 para cinco coletas ao longo do dia, importações em lotes consecutivos,
