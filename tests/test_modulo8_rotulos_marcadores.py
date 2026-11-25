@@ -137,7 +137,9 @@ class TestarRotulosModulo8(unittest.TestCase):
         self.assertIn('"m8_ponto_pesquisado"] = ponto_encontrado', codigo)
         self.assertIn('ponto_pesquisado=ponto_pesquisado', codigo)
         self.assertIn('st.session_state.pop("m8_ponto_pesquisado", None)', codigo)
-        self.assertIn('or ponto_pesquisado is not None:', codigo)
+        # A pesquisa por equipamentos acrescenta alternativas à mesma
+        # condição; não exigir que ponto seja o último termo do if.
+        self.assertIn('or ponto_pesquisado is not None', codigo)
         self.assertIn('_consultar_proximidade(\n            referencia_ponto, bases, raio', codigo)
 
     def test_toggle_recria_o_mapa_sem_alterar_a_consulta(self):
