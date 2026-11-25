@@ -11,7 +11,7 @@ on:
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
-      - "Manuais/**"
+      - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
   pull_request:
@@ -24,7 +24,7 @@ on:
       - "tests/test_analise_logger_m4.py"
       - "tests/test_monitor_logger_incremental_m4.py"
       - "tests/test_manual_analise_logger_m4.py"
-      - "Manuais/**"
+      - "manuais/**"
       - "logger_xlsx_fallback.py"
       - ".github/workflows/testar-analise-logger-m4.yml"
 
