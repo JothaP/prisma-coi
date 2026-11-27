@@ -24,6 +24,7 @@ import pandas as pd
 from pyproj import CRS, Transformer
 from shapely import wkb
 from shapely.ops import transform as transformar_geometria
+from farol_regionais_api import chapadinha_sul_api
 
 FUSO_FAROL = ZoneInfo("America/Fortaleza")
 RAIZ_PROJETO = Path(__file__).resolve().parent
@@ -434,7 +435,11 @@ def carregar_gpkg(caminho):
                     "nome": rotulo,
                     "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
                     "nomes_alternativos": nomes_alternativos,
-                    "tipo_area": "Subárea" if subarea_explicita else "Bairro",
+                    "tipo_area": (
+                        "Povoado / Localidade rural"
+                        if chapadinha_sul_api(municipio, nome_real)
+                        else "Subárea" if subarea_explicita else "Bairro"
+                    ),
                     "sem_nome": not bool(nome_real),
                     "municipio": normalizar_municipio(municipio),
                     "poligonos": poligonos,
