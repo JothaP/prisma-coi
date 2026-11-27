@@ -24,6 +24,7 @@ from pyproj import CRS, Transformer
 from shapely import wkb
 from shapely.geometry import Polygon
 from shapely.ops import transform as transformar_geometria
+from farol_regionais_api import chapadinha_sul_api
 
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -59,6 +60,7 @@ g3 = carregar_funcoes(FONTE3, {
     "unicodedata": unicodedata, "wkb": wkb,
     "CRS": CRS, "Transformer": Transformer,
     "transformar_geometria": transformar_geometria, "folium": folium,
+    "chapadinha_sul_api": chapadinha_sul_api,
     "os": __import__("os"),
 })
 
