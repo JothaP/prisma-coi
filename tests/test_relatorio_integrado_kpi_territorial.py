@@ -145,8 +145,9 @@ class TestTotalTerritorial(unittest.TestCase):
         self.assertNotIn("'Matrículas distintas'",fonte)
         self.assertIn("concs = totais_territoriais_concentracoes(concs, grupos, os_df)",fonte)
         self.assertIn('os_df = os_df[os_df["_data"].dt.date.between(inicio, fim)].copy()',fonte)
-        self.assertIn('os_df = os_df[os_df["Cidade"].map(unidade_da_cidade_farol) == unidade].copy()',fonte)
-        self.assertIn('"versao_esquema": 15',fonte)
+        self.assertIn('os_df = os_df[os_df["_unidade"] == unidade].copy()',fonte)
+        self.assertIn('bp = bp[bp["_unidade"] == unidade].copy()',fonte)
+        self.assertIn('"versao_esquema": 16',fonte)
 
 
 if __name__ == "__main__":

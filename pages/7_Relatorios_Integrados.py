@@ -45,6 +45,12 @@ from farol_mesclagem_operacional import chave_evento as chave_evento_farol
 from farol_eventos_relatorio_integrado import (
     bairros_do_farol, eventos_do_grupo_farol, classificar_os_por_evento,
 )
+from farol_regionais_api import (
+    unidade_operacional_os, regional_da_concentracao_api,
+    mapa_regionais_de_linhas, PLANILHA_CADASTROS_COI,
+    ABA_MUNICIPIOS_REGIONAIS, REGIONAL_NAO_CADASTRADA,
+    MULTIPLAS_REGIONAIS, chave_municipio,
+)
 
 # Mesma abrangência operacional padrão do Módulo 3 (independente do raio
 # usado para formar as concentrações ou associar medições do Módulo 1).
@@ -102,14 +108,55 @@ def normalizar(v):
     t = unicodedata.normalize("NFKD", str(v or "").upper().strip())
     return " ".join("".join(c for c in t if not unicodedata.combining(c)).split())
 
-def unidade_da_cidade_farol(valor):
-    """Mesma classificação do Módulo 3: THE, API e TIM não se misturam."""
-    cidade = re.sub(r"[^A-Z0-9]", "", normalizar(valor))
-    if cidade == "TERESINA":
-        return "THE"
-    if cidade in {"TIMON", "TIMONMA", "TIMONMARANHAO"}:
-        return "TIM"
-    return "API"
+def unidade_da_cidade_farol(valor, bairro=""):
+    """Usa EXATAMENTE a classificação territorial compartilhada com o Módulo 3.
+
+    Teresina/Chapadinha Sul é API (Meio Norte); demais bairros de Teresina
+    continuam THE. O campo geográfico Cidade permanece inalterado.
+    """
+    return unidade_operacional_os(valor, bairro)
+
+
+def atribuir_unidade_operacional_ri7(df, coluna_cidade, coluna_bairro):
+    """Atribui a unidade por registro; evita filtragem apenas pelo município."""
+    resultado = df.copy()
+    resultado["_unidade"] = [
+        unidade_da_cidade_farol(cidade, bairro)
+        for cidade, bairro in zip(resultado[coluna_cidade], resultado[coluna_bairro])
+    ]
+    return resultado
+
+
+def classificar_regionais_concentracoes_ri7(concentracoes, grupos, mapa_regionais):
+    """Aplica o cadastro regional usado no Módulo 3, sem renumerar concentrações."""
+    resultado = concentracoes.copy()
+    if resultado.empty:
+        resultado["Regional"] = pd.Series(dtype="str")
+        return resultado
+    por_grupo = {
+        codigo: grupo for codigo, grupo in grupos.groupby("_grupo", sort=False)
+    } if grupos is not None and not grupos.empty else {}
+    resultado["Regional"] = [
+        regional_da_concentracao_api(por_grupo.get(c["_grupo"]), mapa_regionais)
+        if c["_unidade"] == "API" else ""
+        for _, c in resultado.iterrows()
+    ]
+    prioridades = resultado["Regional"].map(
+        lambda r: 2 if r == REGIONAL_NAO_CADASTRADA else
+                  1 if r == MULTIPLAS_REGIONAIS else 0
+    )
+    return (
+        resultado.assign(
+            _ord_regional=prioridades,
+            _chave_regional=resultado["Regional"].map(chave_municipio),
+        )
+        .sort_values(
+            ["_ord_regional", "_chave_regional"],
+            kind="stable",
+        )
+        .drop(columns=["_ord_regional", "_chave_regional"])
+        .reset_index(drop=True)
+    )
 
 def flutuante(valor):
     texto = str("" if valor is None else valor).strip().replace(" ", "")
@@ -183,7 +230,7 @@ def preparar_os(df):
     df["_lat"] = df["Latitude"].map(lambda v: coordenada(v, "lat"))
     df["_lon"] = df["Longitude"].map(lambda v: coordenada(v, "lon"))
     df["_data"] = pd.to_datetime(df["Dt. Emissão"].map(data_parse),errors="coerce")
-    return df
+    return atribuir_unidade_operacional_ri7(df, "Cidade", "Bairro")
 
 def preparar_pressao(df):
     colunas = ["ID", "Data", "Municipio", "Bairro", "Latitude", "Longitude", "Pressao_MCA", "Observacao", "Matricula"]
@@ -212,7 +259,7 @@ def preparar_pressao(df):
     df["_pressao"] = df["Pressao_MCA"].map(lambda v: (p if (p := flutuante(v)) is not None and p >= 0 else None))
     df["_faixa"] = df["_pressao"].map(faixa_pressao)
     df["_id_medicao"] = [f"BP_{i}" for i in range(len(df))]
-    return df
+    return atribuir_unidade_operacional_ri7(df, "Municipio", "Bairro")
 
 def faixa_pressao(p):
     if p is None or pd.isna(p): return "Sem dado válido"
@@ -232,7 +279,7 @@ def concentracoes_farol(df, raio_m, minimo):
     df = df.dropna(subset=["_lat", "_lon"]).reset_index(drop=True).copy()
     if df.empty:
         return pd.DataFrame(), df
-    df["_unidade"] = df["Cidade"].map(unidade_da_cidade_farol)
+    df = atribuir_unidade_operacional_ri7(df, "Cidade", "Bairro")
     unidades = df["_unidade"].tolist()
     lat_step = raio_m / 111320.0
     lon_step = raio_m / (111320.0 * max(0.2, math.cos(math.radians(float(df["_lat"].mean())))))
@@ -2557,7 +2604,12 @@ def ri7_pagina_concentracao(pdf, conc, grupo, eventos, vinculadas, nao_vinculada
     ri7_cabecalho(pdf,'Farol Operacional — Relatório de Concentrações',
                   inicio,fim,unidade,'Análise da Concentração')
     codigo = str(conc.get('Concentração',''))
-    cabecalho = f"{codigo} — {conc.get('Município','')} — {conc.get('Bairros','')}"
+    regional = str(conc.get("Regional", "") or "")
+    cabecalho = (
+        f"{codigo} — {regional} — {conc.get('Município','')} — {conc.get('Bairros','')}"
+        if regional and conc.get("_unidade") == "API"
+        else f"{codigo} — {conc.get('Município','')} — {conc.get('Bairros','')}"
+    )
     ri7_tarja(pdf, cabecalho, 25, 459, 792, 31, tamanho=12)
     ri7_quadro_imagem(pdf, imagem_mapa, 26, 197, 317, 252)
     ri7_painel_kpi(pdf, 357, 396, 130, 53, 'Reclamações', str(len(grupo)),tamanho=18)
@@ -3012,8 +3064,10 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
     bp = bp_todas[bp_todas["_data"].dt.date.between(inicio, fim)
                   & bp_todas["_pressao"].notna()].copy()
     contagem_origem["periodo"] = len(bp)
-    os_df = os_df[os_df["Cidade"].map(unidade_da_cidade_farol) == unidade].copy()
-    bp = bp[bp["Municipio"].map(unidade_da_cidade_farol) == unidade].copy()
+    # As mesmas unidades do Módulo 3: considerar Cidade + Bairro em
+    # ambas as bases, para Chapadinha Sul não permanecer em THE.
+    os_df = os_df[os_df["_unidade"] == unidade].copy()
+    bp = bp[bp["_unidade"] == unidade].copy()
     if municipio_filtro.strip():
         mun = normalizar(municipio_filtro)
         os_df = os_df[os_df["_municipio"] == mun]
@@ -3023,6 +3077,28 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
     resumo_bp = resumo_pressao_por_bairro(bp)
     concs, grupos = concentracoes_farol(os_df, int(RAIO_CONCENTRACOES_M),
                                          int(MINIMO_OS_CONCENTRACAO))
+    aviso_regionais = ""
+    if unidade == "API" and not concs.empty:
+        # Mesmo cadastro Município/Regional do Módulo 3, sem alterar O.S.
+        # Se a planilha estiver indisponível, a API permanece visível e
+        # a exceção de Chapadinha Sul segue identificada como Meio Norte.
+        mapa_regionais = {}
+        try:
+            tabela_regionais = ler_base(
+                PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
+            )
+            mapa_regionais = mapa_regionais_de_linhas(
+                [tabela_regionais.columns.tolist()]
+                + tabela_regionais.fillna("").values.tolist()
+            )
+        except Exception:
+            aviso_regionais = (
+                "Cadastro regional temporariamente indisponível; "
+                "classificações não confirmadas aparecem como regional não cadastrada."
+            )
+        concs = classificar_regionais_concentracoes_ri7(
+            concs, grupos, mapa_regionais,
+        )
     # Inclui O.S. fora das concentrações no território correspondente,
     # sem alterar a identificação nem as O.S. de cada concentração.
     concs = totais_territoriais_concentracoes(concs, grupos, os_df)
@@ -3039,9 +3115,10 @@ def consultar_diagnostico_atualizado(inicio, fim, unidade, municipio_filtro):
         pressao_sem_conc = bp.iloc[:0].copy()
 
     return {
-        "versao_esquema": 15,
+        "versao_esquema": 16,
         "consultado_em": datetime.now(FUSO_LOGGERS).strftime("%d/%m/%Y %H:%M:%S"),
         "municipio_filtro": municipio_filtro,
+        "aviso_regionais": aviso_regionais,
         "resumo": resumo, "associados": associados, "territoriais": territoriais,
         "concentracoes": concs, "achados": achados,
         "pressao_sem_conc": pressao_sem_conc,
@@ -3085,7 +3162,7 @@ _chaves_necessarias = {
 }
 if r is not None and (
     not isinstance(r, dict)
-    or r.get("versao_esquema") != 15
+    or r.get("versao_esquema") != 16
     or not _chaves_necessarias.issubset(r)
 ):
     st.session_state.pop("relatorio_coi_integrado", None)
@@ -3097,6 +3174,8 @@ if r:
         "(horário de Teresina). A geração do PDF consulta novamente as fontes."
     )
     resumo=r["resumo"]
+    if r.get("aviso_regionais"):
+        st.warning(r["aviso_regionais"])
     tem_pressao = r["n_bp"] > 0
     if tem_pressao:
         a,b,c,d=st.columns(4)
@@ -3122,6 +3201,8 @@ if r:
         rotulo_total = rotulo_total_territorial(r["unidade"])
         resumo_exibicao = resumo.rename(columns={"Total territorial": rotulo_total})
         visiveis=["Concentração","Município","Bairros","O.S.",rotulo_total]
+        if r["unidade"] == "API" and "Regional" in resumo_exibicao:
+            visiveis.insert(1, "Regional")
         if not resumo.empty and ((resumo["Medições próximas"]>0)|(resumo["Medições mesmo bairro"]>0)).any():
             visiveis += ["Medições próximas","Medições mesmo bairro","Menor pressão (mca)","Classificação indicativa"]
         if not resumo.empty:

@@ -1,0 +1,35 @@
+name: Validar divisão territorial M7 igual ao Farol M3
+
+on:
+  push:
+    paths:
+      - 'pages/7_Relatorios_Integrados.py'
+      - 'farol_regionais_api.py'
+      - 'tests/test_ri7_divisao_operacional.py'
+      - '.github/workflows/validar-divisao-ri7.yml'
+  pull_request:
+    paths:
+      - 'pages/7_Relatorios_Integrados.py'
+      - 'farol_regionais_api.py'
+      - 'tests/test_ri7_divisao_operacional.py'
+      - '.github/workflows/validar-divisao-ri7.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Instalar pandas para testes isolados
+        run: python -m pip install 'pandas>=2.2,<3'
+      - name: Verificar sintaxe dos módulos 3 e 7
+        run: python -m py_compile pages/3_Farol_Operacional.py pages/7_Relatorios_Integrados.py farol_regionais_api.py
+      - name: Comparar classificação por cidade e bairro e agrupamentos
+        run: python -m unittest discover -s tests -p 'test_ri7_divisao_operacional.py' -v
