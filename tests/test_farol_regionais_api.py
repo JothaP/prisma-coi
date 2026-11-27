@@ -1,4 +1,6 @@
 """Regressão da separação visual das concentrações API por regional."""
+import ast
+import math
 import unittest
 from pathlib import Path
 
@@ -9,6 +11,7 @@ from farol_regionais_api import (
     REGIONAL_NAO_CADASTRADA, MULTIPLAS_REGIONAIS,
     chave_municipio, mapa_regionais_de_linhas,
     regional_da_concentracao_api, ordenar_concentracoes_api_por_regional,
+    unidade_operacional_os, chapadinha_sul_api, REGIONAL_CHAPADINHA_SUL,
 )
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -124,6 +127,95 @@ class TesteRegionaisAPI(unittest.TestCase):
         )
         self.assertEqual([regional for regional, _ in order],
                          ["Cerrado", REGIONAL_NAO_CADASTRADA])
+
+    def test_chapadinha_sul_e_api_no_municipio_de_teresina(self):
+        for bairro in (
+            "Chapadinha Sul", "CHAPADINHA-SUL",
+            "Povoado Chapadinha Sul", "POV. CHAPADINHA SUL",
+        ):
+            with self.subTest(bairro=bairro):
+                self.assertTrue(chapadinha_sul_api("Teresina", bairro))
+                self.assertEqual(unidade_operacional_os("Teresina", bairro), "API")
+        self.assertEqual(unidade_operacional_os("Teresina", "Centro"), "THE")
+        self.assertEqual(unidade_operacional_os("Timon", "Chapadinha Sul"), "TIM")
+        self.assertFalse(chapadinha_sul_api("Altos", "Chapadinha Sul"))
+        self.assertEqual(unidade_operacional_os("Altos", "Chapadinha Sul"), "API")
+
+    def test_regional_meio_norte_mesmo_sem_teresina_no_cadastro_api(self):
+        grupo = pd.DataFrame({
+            "Cidade": ["Teresina"] * 3,
+            "Bairro": ["Chapadinha Sul"] * 3,
+        })
+        self.assertEqual(
+            regional_da_concentracao_api(grupo, {}), REGIONAL_CHAPADINHA_SUL
+        )
+        self.assertEqual(REGIONAL_CHAPADINHA_SUL, "MEIO NORTE")
+        # Não substitui a classificação dos demais municípios.
+        misto = pd.DataFrame({
+            "Cidade": ["Teresina", "Picos"],
+            "Bairro": ["Chapadinha Sul", "Centro"],
+        })
+        self.assertEqual(
+            regional_da_concentracao_api(misto, {"PICOS": "CERRADO"}),
+            MULTIPLAS_REGIONAIS,
+        )
+
+    def test_agrupamento_real_nao_mistura_the_e_api_proximas(self):
+        """Duas localidades próximas em Teresina geram grupos separados."""
+        pagina = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
+        arvore = ast.parse(pagina)
+        func = next(
+            n for n in arvore.body
+            if isinstance(n, ast.FunctionDef) and n.name == "criar_concentracoes"
+        )
+        func.decorator_list = []
+        def distancia(lat1, lon1, lat2, lon2):
+            dx = (lon1 - lon2) * 111000
+            dy = (lat1 - lat2) * 111000
+            return math.hypot(dx, dy)
+        ns = {
+            "pd": pd, "math": math, "parse_float": float,
+            "distancia_metros": distancia,
+            "limpar_nome_bairro": lambda nome: str(nome).upper(),
+            "unidade_da_cidade_farol": unidade_operacional_os,
+            "RAIO_CONCENTRACAO_PADRAO": 750,
+            "MINIMO_OS_CONCENTRACAO_PADRAO": 3,
+            "CABECALHO_CONCENTRACOES": [
+                "ID_CONCENTRACAO", "GRUPO", "LATITUDE", "LONGITUDE",
+                "QTD_OS", "QTD_MATRICULAS", "BAIRROS",
+            ],
+        }
+        exec(compile(ast.Module(body=[func], type_ignores=[]), str(RAIZ), "exec"), ns)
+        dados = pd.DataFrame({
+            "Nº da O.S": ["1", "2", "3", "4", "5", "6"],
+            "Cidade": ["Teresina"] * 6,
+            "Bairro": ["Centro"] * 3 + ["Chapadinha Sul"] * 3,
+            "Latitude": [-5.10, -5.1001, -5.1002] * 2,
+            "Longitude": [-42.80, -42.8001, -42.8002] * 2,
+            "Matrícula": [str(i) for i in range(6)],
+        })
+        concentracoes, pontos = ns["criar_concentracoes"](dados)
+        self.assertEqual(
+            set(concentracoes["ID_CONCENTRACAO"]), {"THE C001", "API C001"}
+        )
+        self.assertEqual(sorted(concentracoes["QTD_OS"].tolist()), [3, 3])
+        self.assertEqual(pontos["_grupo"].nunique(), 2)
+        grupo_api = concentracoes.loc[
+            concentracoes["ID_CONCENTRACAO"] == "API C001", "GRUPO"
+        ].iat[0]
+        self.assertEqual(set(pontos.loc[pontos["_grupo"] == grupo_api, "Bairro"]),
+                         {"Chapadinha Sul"})
+
+    def test_modal_pdf_e_painel_respeitam_a_classificacao_rural(self):
+        source = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
+        self.assertIn('str.startswith(f"{tipo} ")', source)
+        self.assertIn("unidade_da_cidade_farol(cidade, bairro)", source)
+        self.assertIn("unidades_relatorio", source)
+        self.assertIn("Povoado / Localidade rural", source)
+        self.assertIn("POVOADO (API /", source)
+        self.assertIn("bairros_chapadinha", source)
+        # A origem geográfica (Cidade) permanece íntegra; a unidade é calculada.
+        self.assertNotIn('df["Cidade"] = "Chapadinha Sul"', source)
 
     def test_aba_api_usa_apenas_titulos_sem_filtro_novo(self):
         source = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(

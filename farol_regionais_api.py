@@ -24,6 +24,34 @@ def chave_municipio(valor):
     return re.sub(r"[^A-Z0-9]", "", texto)
 
 
+# Exceção operacional confirmada pelo COI: povoado rural dentro do
+# município de Teresina, mas atendido pela unidade API / Meio Norte.
+REGIONAL_CHAPADINHA_SUL = "MEIO NORTE"
+CHAVES_CHAPADINHA_SUL = frozenset({
+    "CHAPADINHASUL", "POVOADOCHAPADINHASUL", "POVCHAPADINHASUL",
+})
+
+
+def chapadinha_sul_api(cidade, localidade):
+    """Distingue município geográfico de responsabilidade operacional."""
+    return (
+        chave_municipio(cidade) == "TERESINA"
+        and chave_municipio(localidade) in CHAVES_CHAPADINHA_SUL
+    )
+
+
+def unidade_operacional_os(cidade, localidade=""):
+    """Classifica cada O.S., sem modificar Cidade/Bairro de origem."""
+    municipio = chave_municipio(cidade)
+    if chapadinha_sul_api(cidade, localidade):
+        return "API"
+    if municipio == "TERESINA":
+        return "THE"
+    if municipio in {"TIMON", "TIMONMA", "TIMONMARANHAO"}:
+        return "TIM"
+    return "API"
+
+
 def mapa_regionais_de_linhas(linhas):
     """Lê a aba do Módulo 5 sem modificar os dados nem presumir regionais.
 
@@ -61,17 +89,21 @@ def regional_da_concentracao_api(grupo_os, mapa_regionais):
     """Não inventa a regional quando uma concentração cruza municípios."""
     if grupo_os is None or grupo_os.empty or "Cidade" not in grupo_os:
         return REGIONAL_NAO_CADASTRADA
-    cidades = {
-        chave_municipio(cidade) for cidade in grupo_os["Cidade"]
-        if chave_municipio(cidade)
-    }
-    if not cidades:
-        return REGIONAL_NAO_CADASTRADA
-    # Se uma das cidades não está cadastrada, classificar todas como
-    # "não cadastrada" evita atribuir uma regional potencialmente falsa.
-    if any(not mapa_regionais.get(cidade) for cidade in cidades):
-        return REGIONAL_NAO_CADASTRADA
-    regionais = {mapa_regionais[cidade] for cidade in cidades}
+    # A regional pode ser definida por localidade, não só por município:
+    # Chapadinha Sul pertence a Teresina, mas operacionalmente é API/Meio Norte.
+    # As demais O.S. continuam usando o cadastro de regionais do Módulo 5.
+    regionais = set()
+    for _, registro in grupo_os.iterrows():
+        municipio = chave_municipio(registro.get("Cidade", ""))
+        if not municipio:
+            return REGIONAL_NAO_CADASTRADA
+        if chapadinha_sul_api(registro.get("Cidade", ""), registro.get("Bairro", "")):
+            regionais.add(REGIONAL_CHAPADINHA_SUL)
+        else:
+            regional = mapa_regionais.get(municipio, "")
+            if not regional:
+                return REGIONAL_NAO_CADASTRADA
+            regionais.add(regional)
     if len({chave_municipio(r) for r in regionais}) > 1:
         return MULTIPLAS_REGIONAIS
     return sorted(regionais, key=lambda x: (chave_municipio(x), x))[0]

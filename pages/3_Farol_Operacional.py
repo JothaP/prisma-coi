@@ -71,6 +71,8 @@ from farol_mesclagem_operacional import chave_evento as chave_evento_persistente
 from farol_regionais_api import (
     PLANILHA_CADASTROS_COI, ABA_MUNICIPIOS_REGIONAIS,
     mapa_regionais_de_linhas, ordenar_concentracoes_api_por_regional,
+    unidade_operacional_os, chapadinha_sul_api,
+    REGIONAL_CHAPADINHA_SUL,
 )
 from farol_coordenadas_os import (
     NOME_ABA as NOME_ABA_CORRECOES_OS,
@@ -1597,14 +1599,13 @@ def normalizar_municipio(valor):
     return re.sub(r"[^A-Z0-9]", "", normalizar_texto(valor))
 
 
-def unidade_da_cidade_farol(valor):
-    """Define a unidade pela cidade da O.S., sem misturar Timon à API."""
-    cidade = normalizar_municipio(valor)
-    if cidade == "TERESINA":
-        return "THE"
-    if cidade in {"TIMON", "TIMONMA", "TIMONMARANHAO"}:
-        return "TIM"
-    return "API"
+def unidade_da_cidade_farol(valor, bairro=""):
+    """Define unidade operacional da O.S., considerando exceções rurais.
+
+    O município geográfico permanece inalterado (Teresina); Chapadinha Sul
+    responde à API / regional Meio Norte, não à unidade urbana THE.
+    """
+    return unidade_operacional_os(valor, bairro)
 
 
 def carregar_gpkg(caminho):
@@ -1756,7 +1757,11 @@ def carregar_gpkg(caminho):
                     "nome": rotulo,
                     "nome_normalizado": limpar_nome_bairro(nome_real) if nome_real else "",
                     "nomes_alternativos": nomes_alternativos,
-                    "tipo_area": "Subárea" if subarea_explicita else "Bairro",
+                    "tipo_area": (
+                        "Povoado / Localidade rural"
+                        if chapadinha_sul_api(municipio, nome_real)
+                        else "Subárea" if subarea_explicita else "Bairro"
+                    ),
                     "sem_nome": not bool(nome_real),
                     "municipio": normalizar_municipio(municipio),
                     "poligonos": poligonos,
@@ -1956,7 +1961,10 @@ def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MI
         return pd.DataFrame(columns=CABECALHO_CONCENTRACOES), df
     # Não agrupa pontos de unidades diferentes (THE / API / TIM).
     # Preserva a lógica de proximidade entre municípios da mesma unidade.
-    unidades_os = df["Cidade"].fillna("").map(unidade_da_cidade_farol).tolist()
+    unidades_os = [
+        unidade_da_cidade_farol(cidade, bairro)
+        for cidade, bairro in zip(df["Cidade"], df["Bairro"])
+    ]
 
     # Grade geográfica para evitar comparação de todos contra todos.
     lat_step = raio_m / 111320.0
@@ -2031,7 +2039,8 @@ def criar_concentracoes(df_pontos, raio_m=RAIO_CONCENTRACAO_PADRAO, minimo_os=MI
     for _, concentracao in cdf.iterrows():
         grupo = df[df["_grupo"] == concentracao["GRUPO"]]
         cidade = str(grupo.iloc[0].get("Cidade", "")) if not grupo.empty else ""
-        abrangencia = unidade_da_cidade_farol(cidade)
+        bairro = str(grupo.iloc[0].get("Bairro", "")) if not grupo.empty else ""
+        abrangencia = unidade_da_cidade_farol(cidade, bairro)
         contador[abrangencia] += 1
         novos_ids.append(f"{abrangencia} C{contador[abrangencia]:03d}")
     cdf["ID_CONCENTRACAO"] = novos_ids
@@ -5132,14 +5141,22 @@ def gerar_pdf_operacional(concentracoes, pontos, pontos_cluster, proximidades, e
 @st.dialog("📄 Configurar relatório operacional", width="large")
 def modal_configurar_relatorio(concentracoes, pontos, pontos_cluster, proximidades,
                                eventos, bairros, raio, observacoes, pocos, loggers):
-    st.caption("THE: Teresina · API: demais municípios do Piauí · TIM: Timon. Os filtros do mapa principal não são alterados.")
+    st.caption(
+        "THE: Teresina, exceto Chapadinha Sul · "
+        "API: demais municípios do Piauí e Chapadinha Sul (Meio Norte) · "
+        "TIM: Timon. Os filtros do mapa principal não são alterados."
+    )
     tipo = st.radio("Relatório", ["THE", "API", "TIM"], horizontal=True,
                     key="farol_tipo_relatorio_the_api_tim")
-    disponiveis = sorted({cidade for _, c in concentracoes.iterrows()
-                         for cidade in cidades_da_concentracao(c, pontos_cluster)},
-                        key=normalizar_texto)
-    cidades = [cidade for cidade in disponiveis if unidade_da_cidade_farol(cidade) == tipo]
-    selecionadas = filtrar_concentracoes_relatorio(concentracoes, pontos_cluster, cidades)
+    # A classificação é operacional, por O.S., e não só pelo município.
+    # Inclui Chapadinha Sul no PDF API sem trazer os demais bairros de Teresina.
+    selecionadas = concentracoes.loc[
+        concentracoes["ID_CONCENTRACAO"].astype(str).str.startswith(f"{tipo} ")
+    ].copy()
+    cidades = sorted({
+        cidade for _, c in selecionadas.iterrows()
+        for cidade in cidades_da_concentracao(c, pontos_cluster)
+    }, key=normalizar_texto)
     st.caption(f"{len(selecionadas)} concentração(ões) incluída(s) em {tipo}.")
     gerar = st.button("📸 Gerar relatório em PDF", type="primary", width="stretch",
                       disabled=selecionadas.empty)
@@ -5149,9 +5166,12 @@ def modal_configurar_relatorio(concentracoes, pontos, pontos_cluster, proximidad
         else:
             try:
                 # O panorama usa somente as O.S. da unidade selecionada.
-                cidades_normalizadas = {normalizar_municipio(c) for c in cidades}
+                unidades_relatorio = [
+                    unidade_da_cidade_farol(cidade, bairro)
+                    for cidade, bairro in zip(pontos["Cidade"], pontos["Bairro"])
+                ]
                 pontos_relatorio = pontos.loc[
-                    pontos["Cidade"].map(normalizar_municipio).isin(cidades_normalizadas)
+                    pd.Series(unidades_relatorio, index=pontos.index).eq(tipo)
                 ].copy()
                 with st.spinner("Gerando mapa panorâmico e fichas das concentrações..."):
                     pdf = gerar_pdf_operacional(selecionadas, pontos_relatorio, pontos_cluster,
@@ -5222,6 +5242,20 @@ def resumir_acionamentos_farol(df_cidade_bairro):
         "_bairro_chave": bairros.map(lambda nome: mapa_bairros[nome][0]),
         "_bairro_nome": bairros.map(lambda nome: mapa_bairros[nome][1]),
     })
+    # O painel é por município geográfico; sinalizar a unidade operacional
+    # distinta sem deslocar o povoado para um município fictício.
+    bairros_chapadinha = {
+        mapa_bairros[nome][0] for nome in bairros.unique()
+        if chapadinha_sul_api("TERESINA", nome)
+    }
+    if bairros_chapadinha:
+        mascara_chapadinha = (
+            base["_cidade_chave"].eq("TERESINA")
+            & base["_bairro_chave"].isin(bairros_chapadinha)
+        )
+        base.loc[mascara_chapadinha, "_bairro_nome"] += (
+            f" · POVOADO (API / {REGIONAL_CHAPADINHA_SUL})"
+        )
     # Um agrupamento único permite extrair ambos os rankings sem reler as O.S.
     por_bairro = (base.groupby(["_cidade_chave", "_bairro_chave"], sort=False, as_index=False)
                   .agg(_cidade_nome=("_cidade_nome", "first"),
