@@ -237,6 +237,26 @@ def sugerir_recuperacoes(vinculos, municipio, latitude, longitude,
 
 
 
+def contar_vinculos_ativos_por_ficha(contextos, vinculos):
+    """Conta concentrações ATIVAS por ficha, não versões históricas das chaves.
+
+    Cada acréscimo de O.S. gera uma nova chave no Supabase. A versão antiga
+    permanece para auditoria; isso NÃO significa que duas concentrações
+    simultâneas estejam compartilhando o mesmo acompanhamento.
+    """
+    por_chave = {
+        str(v.get("chave", "")).strip(): str(v.get("evento_id", "")).strip()
+        for v in vinculos
+        if v.get("chave") and v.get("evento_id")
+    }
+    por_ficha = {}
+    for codigo, contexto in contextos.items():
+        ficha_id = por_chave.get(str(contexto.get("chave", "")).strip(), "")
+        if ficha_id:
+            por_ficha.setdefault(ficha_id, set()).add(str(codigo))
+    return {ficha_id: len(codigos) for ficha_id, codigos in por_ficha.items()}
+
+
 def identificar_continuidades_automaticas(contextos, vinculos, fichas, agora=None):
     """Identifica continuações inequívocas por ACRÉSCIMO de O.S. à concentração.
 

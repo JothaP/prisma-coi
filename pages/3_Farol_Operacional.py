@@ -56,6 +56,8 @@ from farol_graficos_temporarios import (
 from integracao_acompanhamento_producao import (
     chave_concentracao, localizar_vinculo, listar_vinculos,
     dados_acompanhamento, historico_evento, texto_pdf,
+    identificar_continuidades_automaticas, continuar_vinculo_automaticamente,
+    contar_vinculos_ativos_por_ficha,
 )
 from farol_acomp_supabase_backend import fonte_supabase
 from farol_limpeza_acompanhamentos import excluir_fichas_acompanhamento_admin
@@ -6057,12 +6059,6 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                 todos_vinculos_acomp = listar_vinculos()
                 vinculos_acomp_visiveis = {v["chave"]: v for v in todos_vinculos_acomp}
                 fichas_acomp_visiveis = dados_acompanhamento()
-                total_vinculos_por_ficha = {}
-                for vinculo in todos_vinculos_acomp:
-                    ficha_id = str(vinculo.get("evento_id", ""))
-                    total_vinculos_por_ficha[ficha_id] = (
-                        total_vinculos_por_ficha.get(ficha_id, 0) + 1
-                    )
                 recuperar_supabase_ativo = fonte_supabase()
                 erro_acomp_visivel = None
             except Exception as erro:
@@ -6131,10 +6127,65 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                     sorted(os_por_evento)
                 )
 
-            # Só as chaves exatas persistidas vinculam concentração e ficha.
-            # O usuário escolhe o que copiar, sem sincronização/união implícita.
-            # Opções de cópia são identificadas por concentrações ativas, não
-            # por coincidência de bairro/evento. Seleção e cópia sempre manuais.
+            # Uma nova O.S. altera a chave (hash do conjunto completo), mas
+            # NÃO deve reiniciar a ficha. Somente a continuação append-only
+            # inequívoca de uma ficha em andamento é ligada automaticamente.
+            # O banco revalida as condições e grava nova chave com auditoria,
+            # sem editar ficha ou movimentações. Fusões e divisões ficam fora.
+            continuidades_pendentes = {}
+            if recuperar_supabase_ativo and erro_acomp_visivel is None:
+                propostas_continuidade = identificar_continuidades_automaticas(
+                    contextos_ativos_acomp, todos_vinculos_acomp,
+                    fichas_acomp_visiveis,
+                )
+                # Evita gravar vínculos novos ao navegar em dias históricos.
+                consulta_dia_atual = (
+                    historico_v2_ativo and data_consulta_v2 == hoje_historico_v2
+                )
+                for codigo_candidato, proposta in sorted(propostas_continuidade.items()):
+                    contexto_candidato = contextos_ativos_acomp[codigo_candidato]
+                    chave_nova = contexto_candidato["chave"]
+                    id_ficha = str(proposta["evento_id"])
+                    if not (PODE_EDITAR_FAROL and consulta_dia_atual):
+                        continuidades_pendentes[codigo_candidato] = proposta
+                        continue
+                    try:
+                        continuar_vinculo_automaticamente(
+                            contexto_candidato,
+                            proposta["chave_anterior"],
+                            id_ficha,
+                        )
+                    except Exception as erro_continuar:
+                        continuidades_pendentes[codigo_candidato] = proposta
+                        st.warning(
+                            f"{codigo_candidato}: a continuidade da ficha #{id_ficha} "
+                            f"não foi gravada. A ficha anterior está preservada. "
+                            f"Detalhe: {erro_continuar}"
+                        )
+                    else:
+                        vinculo_novo = dict(
+                            vinculos_acomp_visiveis.get(
+                                proposta["chave_anterior"], {}
+                            ),
+                            chave=chave_nova,
+                            evento_id=id_ficha,
+                            municipio=contexto_candidato["municipio"],
+                            bairros=contexto_candidato["bairros"],
+                            os_origem=";".join(contexto_candidato["os"]),
+                        )
+                        # A gravação já foi confirmada pelo Supabase. Atualiza
+                        # apenas a leitura desta execução (sem duplicar ficha).
+                        vinculos_acomp_visiveis[chave_nova] = vinculo_novo
+
+            # Uma mesma ficha pode ter várias chaves HISTÓRICAS de O.S.,
+            # mas só é compartilhada se pertencer a duas concentrações ativas.
+            total_vinculos_por_ficha = contar_vinculos_ativos_por_ficha(
+                contextos_ativos_acomp, vinculos_acomp_visiveis.values(),
+            )
+            # Fontes de cópia consideram somente concentrações ativas e
+            # permanecem independentes, mesmo quando a chave foi continuada.
+            # Não reconciliar automaticamente por bairro ou evento.
+
             fontes_copia_ativas = []
             for codigo_origem, contexto_origem in contextos_ativos_acomp.items():
                 vinculo_origem = vinculos_acomp_visiveis.get(contexto_origem["chave"])
@@ -6221,6 +6272,8 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             indicador_nota = f"🔄 Em andamento — Ficha #{ficha_acomp['id']}"
                         elif vinculo_acomp:
                             indicador_nota = "Acompanhamento vinculado — ficha indisponível"
+                        elif str(codigo) in continuidades_pendentes:
+                            indicador_nota = "🔎 Ficha anterior identificada — continuidade pendente"
                         else:
                             indicador_nota = "Sem acompanhamento nesta concentração"
                         bairros_grupo = str(concentracao.get("BAIRROS", "") or "").strip()
@@ -6248,6 +6301,12 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                                     st.info(indicador_nota)
                                 else:
                                     st.success(indicador_nota)
+                            elif str(codigo) in continuidades_pendentes:
+                                st.warning(
+                                    "Foi identificada uma possível continuidade de ficha já existente. "
+                                    "A vinculação ainda não foi confirmada. Não crie outra ficha; "
+                                    "um usuário autorizado deve consultar a data operacional atual."
+                                )
                             else:
                                 st.caption(
                                     "Esta concentração ainda não possui acompanhamento. "
@@ -6287,12 +6346,13 @@ if st.session_state.get("farol_tela", "mapa") == "mapa":
                             ) if PODE_EDITAR_FAROL else "📋 Consultar Acompanhamento"
                             if st.button(
                                 rotulo_acomp, key=f"farol_acomp_{abrangencia}_{codigo}",
-                                disabled=bool(erro_acomp_visivel),
+                                disabled=bool(erro_acomp_visivel) or str(codigo) in continuidades_pendentes,
                             ):
                                 popup_acompanhamento_farol(
                                     contexto_popup, pode_editar=PODE_EDITAR_FAROL
                                 )
-                            if fontes_copia and PODE_EDITAR_FAROL:
+                            if (fontes_copia and PODE_EDITAR_FAROL
+                                    and str(codigo) not in continuidades_pendentes):
                                 if st.button(
                                     "📋 Copiar dados de outra concentração",
                                     key=f"farol_copiar_ficha_{abrangencia}_{codigo}",

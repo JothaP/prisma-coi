@@ -20,6 +20,7 @@ NOMES = {
     "chave_concentracao", "_normalizar_municipio_vinculo",
     "_distancia_centros_m", "sugerir_recuperacoes",
     "identificar_continuidades_automaticas",
+    "contar_vinculos_ativos_por_ficha",
 }
 arvore = ast.parse(TEXTO, filename=str(SRC))
 funcoes = [n for n in arvore.body if isinstance(n, ast.FunctionDef) and n.name in NOMES]
@@ -197,6 +198,45 @@ class RecuperacaoVinculoTest(unittest.TestCase):
         self.assertEqual(self.automaticas(contextos={
             "THE C1": self.contexto_atual(multiplos_municipios=True)
         }), {})
+
+    def test_novas_os_preservam_ficha_e_ignoram_chaves_historicas_na_contagem(self):
+        chave_nova = ns["chave_concentracao"](
+            "TERESINA", -5.0905, -42.8005, ["1001", "1002", "1003", "1004"]
+        )
+        contexto = self.contexto_atual(chave=chave_nova)
+        proposta = self.automaticas(contextos={"THE C1": contexto})
+        self.assertEqual(proposta["THE C1"]["evento_id"], "101")
+        vinculo_atualizado = dict(
+            self.mais_cedo, chave=chave_nova, os_origem="1001;1002;1003;1004"
+        )
+        contagem = ns["contar_vinculos_ativos_por_ficha"](
+            {"THE C1": contexto}, [self.mais_cedo, vinculo_atualizado]
+        )
+        self.assertEqual(contagem, {"101": 1})
+
+    def test_duas_concentracoes_ativas_na_mesma_ficha_ainda_sao_compartilhadas(self):
+        ctx1 = self.contexto_atual(chave="b"*32)
+        ctx2 = self.contexto_atual(chave="c"*32)
+        vinculos = [
+            dict(self.mais_cedo, chave="b"*32),
+            dict(self.mais_cedo, chave="c"*32),
+        ]
+        self.assertEqual(
+            ns["contar_vinculos_ativos_por_ficha"](
+                {"THE C1": ctx1, "THE C2": ctx2}, vinculos,
+            ), {"101": 2},
+        )
+
+    def test_producao_reativa_continuidade_somente_com_permissao_e_hoje(self):
+        pagina = (RAIZ / "pages" / "3_Farol_Operacional.py").read_text(encoding="utf-8")
+        self.assertIn("propostas_continuidade = identificar_continuidades_automaticas(", pagina)
+        self.assertIn("continuar_vinculo_automaticamente(\n                            contexto_candidato", pagina)
+        self.assertIn("PODE_EDITAR_FAROL and consulta_dia_atual", pagina)
+        self.assertIn("contar_vinculos_ativos_por_ficha(", pagina)
+        self.assertIn("continuidades_pendentes", pagina)
+        self.assertIn("or str(codigo) in continuidades_pendentes", pagina)
+        # A regra de nao reutilizar fichas de outras concentracoes continua.
+        self.assertNotIn("resolver_ocorrencias(", pagina)
 
     def test_nova_gravacao_usa_rpc_restrita_e_gera_auditoria(self):
         src = (RAIZ / "farol_acomp_supabase_backend.py").read_text(encoding="utf-8")
